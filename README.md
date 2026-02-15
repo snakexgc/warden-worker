@@ -6,8 +6,6 @@ Warden Worker 是一个运行在 Cloudflare Workers 上的轻量级 Bitwarden �
 
 本项目不接触你的明文密码：Bitwarden 系列客户端会在本地完成加密，服务端只保存密文数据。
 
-> [!WARNING]
-> 如果你曾经部署过旧版本并准备升级，建议在客户端导出密码库 → 重新部署本项目（全新初始化数据库）→ 再导入密码库（可显著降低迁移/兼容成本）。
 
 ## 功能
 
@@ -29,7 +27,7 @@ Warden Worker 是一个运行在 Cloudflare Workers 上的轻量级 Bitwarden �
 ### 1. 创建 D1 数据库
 
 ```bash
-wrangler d1 create vault1
+wrangler d1 create vaultsql
 ```
 
 把输出的 `database_id` 写入 `wrangler.jsonc` 的 `d1_databases`。
@@ -39,7 +37,7 @@ wrangler d1 create vault1
 注意：`sql/schema_full.sql` 会 `DROP TABLE`，仅用于全新部署（会清空数据）。
 
 ```bash
-wrangler d1 execute vault1 --remote --file=sql/schema_full.sql
+wrangler d1 execute vaultsql --remote --file=sql/schema_full.sql
 ```
 
 `sql/schema.sql` 仅保留为历史/兼容用途；推荐新部署直接使用 `sql/schema_full.sql`。
@@ -66,7 +64,10 @@ wrangler secret put TWO_FACTOR_ENC_KEY
 wrangler deploy
 ```
 
-部署后，把 Workers URL 或自定义域名（例如 `https://warden.2x.nz`）填入 Bitwarden 客户端的“自托管服务器 URL”。
+部署后，把 Workers URL 或自定义域名（例如 `https://key.snakexgc.com`）填入 Bitwarden 客户端的“自托管服务器 URL”。
+
+### 5. 升级
+> 如果你曾经部署过旧版本并准备升级，建议在客户端 **导出密码库**  → **重新部署本项目（全新初始化数据库）** → **再导入密码库（可显著降低迁移/兼容成本）**。
 
 ## 客户端使用建议
 
@@ -85,6 +86,9 @@ wrangler deploy
 - 2FA：`GET /api/two-factor`、`/api/two-factor/authenticator/*`
 - 官方安卓设备探测：`GET /api/devices/knowndevice`
 - icon支持: `GET /icons/{*res}`
+
+## 增强项
+- 登录校验，防止失效tocken成功登录
 
 ## 本地开发
 

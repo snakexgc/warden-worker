@@ -8,7 +8,7 @@
   // D1 数据库绑定（必须完整，否则会被认为是新建/覆盖）
   "d1_databases": [
     {
-      "binding": "vault1",
+      "binding": "vaultsql",
       "database_id": "1908032b-6518-4c75-b84e-243484e0f762"
     }
   ],
