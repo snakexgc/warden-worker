@@ -16,6 +16,82 @@ use crate::{
     two_factor,
 };
 
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KdfData {
+    #[serde(rename = "kdfType", alias = "kdf")]
+    pub kdf: i32,
+    #[serde(rename = "iterations", alias = "kdfIterations")]
+    pub kdf_iterations: i32,
+    #[serde(rename = "memory", alias = "kdfMemory")]
+    pub kdf_memory: Option<i32>,
+    #[serde(rename = "parallelism", alias = "kdfParallelism")]
+    pub kdf_parallelism: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthenticationData {
+    #[serde(alias = "Salt", alias = "salt")]
+    pub salt: String,
+    #[serde(alias = "Kdf")]
+    pub kdf: KdfData,
+    #[serde(alias = "masterPasswordAuthenticationHash", alias = "MasterPasswordAuthenticationHash")]
+    pub master_password_authentication_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnlockData {
+    #[serde(alias = "Salt", alias = "salt")]
+    pub salt: String,
+    #[serde(alias = "Kdf")]
+    pub kdf: KdfData,
+    #[serde(alias = "masterKeyWrappedUserKey", alias = "MasterKeyWrappedUserKey")]
+    pub master_key_wrapped_user_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeKdfRequest {
+    #[serde(alias = "newMasterPasswordHash", alias = "NewMasterPasswordHash")]
+    pub new_master_password_hash: String,
+    #[serde(alias = "Key")]
+    pub key: String,
+    #[serde(alias = "authenticationData", alias = "authentication_data", alias = "AuthenticationData")]
+    pub authentication_data: AuthenticationData,
+    #[serde(alias = "unlockData", alias = "unlock_data", alias = "UnlockData")]
+    pub unlock_data: UnlockData,
+    #[serde(alias = "masterPasswordHash", alias = "MasterPasswordHash")]
+    pub master_password_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeKdfFlatRequest {
+    #[serde(alias = "kdfType")]
+    pub kdf: i32,
+    #[serde(alias = "kdfIterations", alias = "iterations")]
+    pub kdf_iterations: i32,
+    #[serde(alias = "kdfMemory", alias = "memory")]
+    pub kdf_memory: Option<i32>,
+    #[serde(alias = "kdfParallelism", alias = "parallelism")]
+    pub kdf_parallelism: Option<i32>,
+    #[serde(alias = "masterPasswordHash", alias = "MasterPasswordHash")]
+    pub master_password_hash: String,
+    #[serde(alias = "newMasterPasswordHash", alias = "NewMasterPasswordHash")]
+    pub new_master_password_hash: String,
+    #[serde(alias = "Key")]
+    pub key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum ChangeKdfPayload {
+    Vw(ChangeKdfRequest),
+    Flat(ChangeKdfFlatRequest),
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangeMasterPasswordRequest {
@@ -180,16 +256,30 @@ pub async fn prelogin(
         .ok_or_else(|| AppError::BadRequest("Missing email".to_string()))?;
     let db = db::get_db(&env)?;
 
-    let stmt = db.prepare("SELECT kdf_iterations FROM users WHERE email = ?1");
+    let stmt = db.prepare("SELECT kdf_type, kdf_iterations FROM users WHERE email = ?1");
     let query = stmt.bind(&[email.into()])?;
-    let kdf_iterations: Option<i32> = query
-        .first(Some("kdf_iterations"))
+    let row: Option<Value> = query
+        .first(None)
         .await
         .map_err(|_| AppError::Database)?;
+    let (kdf_type, kdf_iterations) = match row {
+        Some(v) => {
+            let kdf_type = v
+                .get("kdf_type")
+                .and_then(|x| x.as_i64())
+                .unwrap_or(0) as i32;
+            let kdf_iterations = v
+                .get("kdf_iterations")
+                .and_then(|x| x.as_i64())
+                .unwrap_or(600_000) as i32;
+            (kdf_type, kdf_iterations)
+        }
+        None => (0, 600_000),
+    };
 
     Ok(Json(PreloginResponse {
-        kdf: 0, // PBKDF2
-        kdf_iterations: kdf_iterations.unwrap_or(600_000),
+        kdf: kdf_type,
+        kdf_iterations,
         kdf_memory: None,
         kdf_parallelism: None,
     }))
@@ -398,6 +488,87 @@ pub async fn change_email(
             AppError::Database
         }
     })?;
+
+    Ok(Json(json!({})))
+}
+
+#[worker::send]
+pub async fn post_kdf(
+    claims: Claims,
+    State(env): State<Arc<Env>>,
+    Json(payload): Json<ChangeKdfPayload>,
+) -> Result<Json<Value>, AppError> {
+    let db = db::get_db(&env)?;
+    let user: Value = db
+        .prepare("SELECT * FROM users WHERE id = ?1")
+        .bind(&[claims.sub.clone().into()])?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+    let user: User = serde_json::from_value(user).map_err(|_| AppError::Internal)?;
+
+    if !constant_time_eq(
+        user.master_password_hash.as_bytes(),
+        match &payload {
+            ChangeKdfPayload::Vw(p) => p.master_password_hash.as_bytes(),
+            ChangeKdfPayload::Flat(p) => p.master_password_hash.as_bytes(),
+        },
+    ) {
+        return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+    }
+
+    let (new_master_password_hash, key, kdf_type, kdf_iterations) = match &payload {
+        ChangeKdfPayload::Vw(p) => {
+            if p.authentication_data.kdf != p.unlock_data.kdf {
+                return Err(AppError::BadRequest(
+                    "KDF settings must be equal for authentication and unlock".to_string(),
+                ));
+            }
+
+            if !user.email.eq_ignore_ascii_case(&p.authentication_data.salt)
+                || !user.email.eq_ignore_ascii_case(&p.unlock_data.salt)
+            {
+                return Err(AppError::BadRequest("Invalid master password salt".to_string()));
+            }
+
+            (
+                &p.new_master_password_hash,
+                &p.key,
+                p.unlock_data.kdf.kdf,
+                p.unlock_data.kdf.kdf_iterations,
+            )
+        }
+        ChangeKdfPayload::Flat(p) => (
+            &p.new_master_password_hash,
+            &p.key,
+            p.kdf,
+            p.kdf_iterations,
+        ),
+    };
+
+    if kdf_iterations < 1 {
+        return Err(AppError::BadRequest("Invalid kdfIterations".to_string()));
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let security_stamp = Uuid::new_v4().to_string();
+
+    db.prepare(
+        "UPDATE users SET master_password_hash = ?1, key = ?2, kdf_type = ?3, kdf_iterations = ?4, security_stamp = ?5, updated_at = ?6 WHERE id = ?7",
+    )
+    .bind(&[
+        new_master_password_hash.to_string().into(),
+        key.to_string().into(),
+        kdf_type.into(),
+        kdf_iterations.into(),
+        security_stamp.into(),
+        now.into(),
+        claims.sub.into(),
+    ])?
+    .run()
+    .await
+    .map_err(|_| AppError::Database)?;
 
     Ok(Json(json!({})))
 }

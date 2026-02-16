@@ -89,6 +89,7 @@ wrangler deploy
 - 官方安卓设备探测：`GET /api/devices/knowndevice`
 - icon支持: `GET /icons/{*res}`
 - 域名规则支持: `GET /api/settings/domains`
+- 加密密钥支持: `POST /api/accounts/kdf`
 
 ## 🔐安全增强
 - 登录校验，防止失效tocken成功登录

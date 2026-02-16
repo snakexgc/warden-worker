@@ -47,6 +47,7 @@ pub fn api_router(env: Env) -> Router {
         )
         .route("/api/accounts/password", put(accounts::change_master_password))
         .route("/api/accounts/email", put(accounts::change_email))
+        .route("/api/accounts/kdf", post(accounts::post_kdf))
         .route("/api/two-factor", get(two_factor::two_factor_status))
         .route("/api/two-factor/get-authenticator", post(two_factor::get_authenticator))
         .route(
