@@ -126,6 +126,12 @@ pub struct ProfileData {
     pub name: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvatarData {
+    pub avatar_color: Option<String>,
+}
+
 #[worker::send]
 pub async fn profile(
     claims: Claims,
@@ -148,6 +154,7 @@ pub async fn profile(
         "name": user.name,
         "email": user.email,
         "emailVerified": user.email_verified,
+        "avatarColor": user.avatar_color,
         "premium": true,
         "premiumFromOrganization": false,
         "masterPasswordHint": user.master_password_hint,
@@ -181,6 +188,37 @@ pub async fn post_profile(
     db.prepare("UPDATE users SET name = ?1, updated_at = ?2 WHERE id = ?3")
         .bind(&[
             name.into(),
+            now.into(),
+            claims.sub.clone().into(),
+        ])?
+        .run()
+        .await
+        .map_err(|_| AppError::Database)?;
+
+    profile(claims, State(env)).await
+}
+
+#[worker::send]
+pub async fn put_avatar(
+    claims: Claims,
+    State(env): State<Arc<Env>>,
+    Json(payload): Json<AvatarData>,
+) -> Result<Json<Value>, AppError> {
+    if let Some(color) = payload.avatar_color.as_deref() {
+        if color.len() != 7 {
+            return Err(AppError::BadRequest(
+                "The field AvatarColor must be a HTML/Hex color code with a length of 7 characters"
+                    .to_string(),
+            ));
+        }
+    }
+
+    let db = db::get_db(&env)?;
+    let now = Utc::now().to_rfc3339();
+
+    db.prepare("UPDATE users SET avatar_color = ?1, updated_at = ?2 WHERE id = ?3")
+        .bind(&[
+            to_js_val(payload.avatar_color),
             now.into(),
             claims.sub.clone().into(),
         ])?
@@ -226,6 +264,7 @@ pub async fn post_security_stamp(
         "name": user.name,
         "email": user.email,
         "emailVerified": user.email_verified,
+        "avatarColor": user.avatar_color,
         "premium": true,
         "premiumFromOrganization": false,
         "masterPasswordHint": user.master_password_hint,
@@ -318,6 +357,7 @@ pub async fn register(
         name: payload.name,
         email: payload.email.to_lowercase(),
         email_verified: false,
+        avatar_color: None,
         master_password_hash: payload.master_password_hash,
         master_password_hint: payload.master_password_hint,
         key: payload.user_symmetric_key,

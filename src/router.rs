@@ -34,6 +34,10 @@ pub fn api_router(env: Env) -> Router {
                 .put(accounts::post_profile),
         )
         .route(
+            "/api/accounts/avatar",
+            put(accounts::put_avatar).post(accounts::put_avatar),
+        )
+        .route(
             "/api/accounts/security-stamp",
             post(accounts::post_security_stamp),
         )

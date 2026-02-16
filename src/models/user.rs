@@ -7,6 +7,7 @@ pub struct User {
     pub email: String,
     #[serde(with = "bool_from_int")]
     pub email_verified: bool,
+    pub avatar_color: Option<String>,
     pub master_password_hash: String,
     pub master_password_hint: Option<String>,
     pub key: String,

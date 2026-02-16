@@ -15,7 +15,7 @@ Warden Worker 是一个运行在 Cloudflare Workers 上的轻量级 Bitwarden �
 - 官方安卓兼容：支持 `/api/devices/knowndevice` 与 remember-device（twoFactorProvider=5）流程
 - **安全增强**：支持“踢出所有已登录设备”（Security Stamp 校验），增强了 Token 刷新时的安全性
 
-## 快速部署（Cloudflare）
+## 手动部署（Cloudflare）
 
 ### 0. 前置条件
 
@@ -90,6 +90,7 @@ wrangler deploy
 - icon支持: `GET /icons/{*res}`
 - 域名规则支持: `GET /api/settings/domains`
 - 加密密钥支持: `POST /api/accounts/kdf`
+- 头像颜色支持: `POST /api/accounts/avatar`
 
 ## 🔐安全增强
 - 登录校验，防止失效tocken成功登录

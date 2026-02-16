@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS users (
     name TEXT,
     email TEXT NOT NULL UNIQUE,
     email_verified BOOLEAN NOT NULL DEFAULT 0,
+    avatar_color TEXT,
     master_password_hash TEXT NOT NULL,
     master_password_hint TEXT,
     key TEXT NOT NULL,
