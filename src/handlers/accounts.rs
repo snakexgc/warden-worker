@@ -151,7 +151,7 @@ pub async fn profile(
 
     Ok(Json(json!({
         "id": user.id,
-        "name": user.name,
+        "name": user.name.unwrap_or_default(),
         "email": user.email,
         "emailVerified": user.email_verified,
         "avatarColor": user.avatar_color,
@@ -352,9 +352,10 @@ pub async fn register(
         }
     }
     let now = Utc::now().to_rfc3339();
+    let name = payload.name.unwrap_or_default();
     let user = User {
         id: Uuid::new_v4().to_string(),
-        name: payload.name,
+        name: Some(name),
         email: payload.email.to_lowercase(),
         email_verified: false,
         avatar_color: None,

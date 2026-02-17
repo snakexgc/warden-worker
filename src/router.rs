@@ -7,7 +7,7 @@ use axum::extract::DefaultBodyLimit;
 use std::sync::Arc;
 use worker::Env;
 
-use crate::handlers::{accounts, ciphers, config, identity, sync, folders, import, two_factor, devices, sends, usage, icons, settings};
+use crate::handlers::{accounts, ciphers, compat, config, identity, sync, folders, import, two_factor, devices, sends, usage, icons, settings};
 
 pub fn api_router(env: Env) -> Router {
     let app_state = Arc::new(env);
@@ -85,6 +85,9 @@ pub fn api_router(env: Env) -> Router {
             post(sends::post_send_file_v2_data)
                 .layer(DefaultBodyLimit::max(100 * 1024 * 1024)),
         )
+        .route("/api/collections", get(compat::get_collections))
+        .route("/api/policies", get(compat::get_policies))
+        .route("/api/organizations", get(compat::get_organizations))
         // Main data sync route
         .route("/api/sync", get(sync::get_sync_data))
         // Ciphers CRUD

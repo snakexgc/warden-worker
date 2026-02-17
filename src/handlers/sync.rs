@@ -1,5 +1,6 @@
-use axum::{extract::State, Json};
+use axum::{extract::{Query, State}, Json};
 use serde_json::Value;
+use serde::Deserialize;
 use std::sync::Arc;
 use worker::Env;
 
@@ -18,10 +19,17 @@ use crate::{
     two_factor,
 };
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncQuery {
+    exclude_domains: Option<bool>,
+}
+
 #[worker::send]
 pub async fn get_sync_data(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    Query(q): Query<SyncQuery>,
 ) -> Result<Json<SyncResponse>, AppError> {
     let user_id = claims.sub;
     let db = db::get_db(&env)?;
@@ -85,7 +93,7 @@ pub async fn get_sync_data(
     let user_email = user.email.clone();
     let profile = Profile {
         id: user.id,
-        name: user.name,
+        name: user.name.unwrap_or_default(),
         email: user_email.clone(),
         avatar_color: user.avatar_color,
         master_password_hint: user.master_password_hint,
@@ -93,13 +101,17 @@ pub async fn get_sync_data(
         object: "profile".to_string(),
         premium: true,
         premium_from_organization: false,
-        email_verified: true,
+        email_verified: user.email_verified,
         force_password_reset: false,
         two_factor_enabled: two_factor::is_authenticator_enabled(&db, &user_id).await?,
         uses_key_connector: false,
         creation_date: time,
         key: user_key.clone(),
         private_key: user.private_key,
+        culture: "en-US".to_string(),
+        organizations: Vec::new(),
+        providers: Vec::new(),
+        provider_organizations: Vec::new(),
     };
 
     let user_decryption = UserDecryption {
@@ -116,12 +128,20 @@ pub async fn get_sync_data(
         }),
     };
 
+    let domains = if q.exclude_domains.unwrap_or(false) {
+        Value::Null
+    } else {
+        domains::build_domains_object(&db, &user_id, false).await?
+    };
+
     let response = SyncResponse {
         profile,
         folders,
+        collections: Vec::new(),
+        policies: Vec::new(),
         ciphers,
         sends,
-        domains: domains::build_domains_object(&db, &user_id, true).await?,
+        domains,
         user_decryption,
         object: "sync".to_string(),
     };

@@ -92,6 +92,12 @@ wrangler deploy
 - 加密密钥支持: `POST /api/accounts/kdf`
 - 头像颜色支持: `POST /api/accounts/avatar`
 
+## Vaultwarden 对齐新增接口
+
+- `GET /api/collections`（当前返回空数组）
+- `GET /api/policies`（当前返回空数组）
+- `GET /api/organizations`（当前返回空数组）
+
 ## 🔐安全增强
 - 登录校验，防止失效tocken成功登录
 
