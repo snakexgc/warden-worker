@@ -18,6 +18,7 @@ pub struct User {
     pub kdf_memory: Option<i32>,
     pub kdf_parallelism: Option<i32>,
     pub security_stamp: String,
+    pub password_salt: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

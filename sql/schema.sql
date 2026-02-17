@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS users (
     kdf_memory INTEGER,
     kdf_parallelism INTEGER,
     security_stamp TEXT,
+    password_salt TEXT,
     equivalent_domains TEXT NOT NULL DEFAULT '[]',
     excluded_globals TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,

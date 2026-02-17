@@ -3,6 +3,7 @@ use tower_service::Service;
 use worker::*;
 
 mod auth;
+mod crypto;
 mod db;
 mod domains;
 mod error;

@@ -14,7 +14,7 @@ use uuid::Uuid;
 use worker::{wasm_bindgen::JsValue, Env};
 use sha2::{Digest, Sha256};
 
-use crate::{auth::Claims, db, error::AppError, models::user::User, two_factor};
+use crate::{auth::Claims, crypto, db, error::AppError, models::user::User, two_factor};
 
 fn deserialize_trimmed_i32_opt<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
 where
@@ -344,7 +344,11 @@ pub async fn token(
                 .ok_or_else(|| AppError::Unauthorized("Invalid credentials".to_string()))?;
             let user: User = serde_json::from_value(user).map_err(|_| AppError::Internal)?;
             // Securely compare the provided hash with the stored hash
-            if !constant_time_eq(
+            if let Some(salt) = &user.password_salt {
+                if !crypto::verify_password(&password_hash, salt, &user.master_password_hash) {
+                    return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+                }
+            } else if !constant_time_eq(
                 user.master_password_hash.as_bytes(),
                 password_hash.as_bytes(),
             ) {

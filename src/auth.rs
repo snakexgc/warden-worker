@@ -8,6 +8,8 @@ use std::sync::Arc;
 use worker::Env;
 
 use crate::error::AppError;
+use serde_json::Value;
+use worker::D1Database;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
@@ -61,5 +63,33 @@ impl FromRequestParts<Arc<Env>> for Claims
             .map_err(|_| AppError::Unauthorized("Invalid token".to_string()))?;
 
         Ok(token_data.claims)
+    }
+}
+
+impl Claims {
+    pub async fn verify_security_stamp(&self, db: &D1Database) -> Result<(), AppError> {
+        if let Some(token_stamp) = &self.security_stamp {
+            let user_val: Option<Value> = db
+                .prepare("SELECT security_stamp FROM users WHERE id = ?1")
+                .bind(&[self.sub.clone().into()])
+                .map_err(|_| AppError::Database)?
+                .first(None)
+                .await
+                .map_err(|_| AppError::Database)?;
+
+            if let Some(user_val) = user_val {
+                let db_stamp = user_val
+                    .get("security_stamp")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                
+                if db_stamp != token_stamp {
+                    return Err(AppError::Unauthorized("Invalid security stamp".to_string()));
+                }
+            } else {
+                return Err(AppError::Unauthorized("User not found".to_string()));
+            }
+        }
+        Ok(())
     }
 }
