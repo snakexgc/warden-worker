@@ -16,12 +16,7 @@ pub struct FolderResponse {
     pub id: String,
     pub name: String,
     pub revision_date: String,
-    #[serde(default = "default_object")]
     pub object: String,
-}
-
-fn default_object() -> String {
-    "folder".to_string()
 }
 
 impl From<Folder> for FolderResponse {

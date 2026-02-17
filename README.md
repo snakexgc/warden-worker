@@ -15,7 +15,7 @@ Warden Worker 是一个运行在 Cloudflare Workers 上的轻量级 Bitwarden �
 - 官方安卓兼容：支持 `/api/devices/knowndevice` 与 remember-device（twoFactorProvider=5）流程
 - **安全增强**：支持“踢出所有已登录设备”（Security Stamp 校验），增强了 Token 刷新时的安全性
 
-## 手动部署（Cloudflare）
+## 手动部署（wrangler 命令行）
 
 ### 0. 前置条件
 
@@ -36,13 +36,11 @@ wrangler d1 create vaultsql
 
 ### 2. 初始化数据库
 
-注意：`sql/schema_full.sql` 会 `DROP TABLE`，仅用于全新部署（会清空数据）。
+注意：`sql/schema.sql` 会 `DROP TABLE`，用于全新部署（会清空数据，**请注意导出密码库**）。
 
 ```bash
-wrangler d1 execute vaultsql --remote --file=sql/schema_full.sql
+wrangler d1 execute vaultsql --remote --file=sql/schema.sql
 ```
-
-`sql/schema.sql` 仅保留为历史/兼容用途；推荐新部署直接使用 `sql/schema_full.sql`。
 
 ### 3. 配置密钥（Secrets）
 

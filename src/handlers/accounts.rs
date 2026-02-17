@@ -37,6 +37,7 @@ pub struct AuthenticationData {
     #[serde(alias = "Kdf")]
     pub kdf: KdfData,
     #[serde(alias = "masterPasswordAuthenticationHash", alias = "MasterPasswordAuthenticationHash")]
+    #[allow(dead_code)]
     pub master_password_authentication_hash: String,
 }
 
@@ -48,6 +49,7 @@ pub struct UnlockData {
     #[serde(alias = "Kdf")]
     pub kdf: KdfData,
     #[serde(alias = "masterKeyWrappedUserKey", alias = "MasterKeyWrappedUserKey")]
+    #[allow(dead_code)]
     pub master_key_wrapped_user_key: String,
 }
 
@@ -74,8 +76,10 @@ pub struct ChangeKdfFlatRequest {
     #[serde(alias = "kdfIterations", alias = "iterations")]
     pub kdf_iterations: i32,
     #[serde(alias = "kdfMemory", alias = "memory")]
+    #[allow(dead_code)]
     pub kdf_memory: Option<i32>,
     #[serde(alias = "kdfParallelism", alias = "parallelism")]
+    #[allow(dead_code)]
     pub kdf_parallelism: Option<i32>,
     #[serde(alias = "masterPasswordHash", alias = "MasterPasswordHash")]
     pub master_password_hash: String,
@@ -371,7 +375,7 @@ pub async fn register(
         updated_at: now,
     };
 
-    let query = query!(
+    query!(
         &db,
         "INSERT INTO users (id, name, email, master_password_hash, key, private_key, public_key, kdf_iterations, security_stamp, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
@@ -386,12 +390,12 @@ pub async fn register(
          user.security_stamp,
          user.created_at,
          user.updated_at
-    ).map_err(|error|{
+    ).map_err(|_|{
         AppError::Database
     })?
     .run()
     .await
-    .map_err(|error|{
+    .map_err(|_|{
         AppError::Database
     })?;
 

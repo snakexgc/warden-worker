@@ -21,8 +21,7 @@ pub enum AppError {
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
-    #[error("Cryptography error: {0}")]
-    Crypto(String),
+
 
     #[error(transparent)]
     JsonWebToken(#[from] jsonwebtoken::errors::Error),
@@ -45,10 +44,7 @@ impl IntoResponse for AppError {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg),
-            AppError::Crypto(msg) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Crypto error: {}", msg),
-            ),
+
             AppError::JsonWebToken(_) => (StatusCode::UNAUTHORIZED, "Invalid token".to_string()),
             AppError::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
