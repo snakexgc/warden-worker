@@ -41,6 +41,7 @@ async fn create_cipher_inner(
     collection_ids: Vec<String>,
 ) -> Result<Json<Cipher>, AppError> {
     let db = db::get_db(env)?;
+    claims.verify_security_stamp(&db).await?;
     let now = Utc::now();
     let now = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
@@ -128,6 +129,7 @@ pub async fn update_cipher(
     Json(payload): Json<CipherRequestData>,
 ) -> Result<Json<Cipher>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
     let now = Utc::now();
     let now = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
@@ -203,6 +205,7 @@ pub async fn soft_delete_cipher(
     Path(id): Path<String>,
 ) -> Result<Json<Cipher>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
     let now = Utc::now();
     let now = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
@@ -233,6 +236,7 @@ pub async fn restore_cipher(
     Path(id): Path<String>,
 ) -> Result<Json<Cipher>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
     let now = Utc::now();
     let now = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
@@ -262,6 +266,7 @@ pub async fn hard_delete_cipher(
     Path(id): Path<String>,
 ) -> Result<Json<()>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
 
     query!(
         &db,
@@ -292,6 +297,7 @@ pub async fn soft_delete_ciphers(
     Json(payload): Json<CipherIdsRequest>,
 ) -> Result<Json<()>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
     let now = Utc::now();
     let now = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
@@ -319,6 +325,7 @@ pub async fn restore_ciphers(
     Json(payload): Json<CipherIdsRequest>,
 ) -> Result<Json<()>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
     let now = Utc::now();
     let now = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
@@ -345,6 +352,7 @@ pub async fn hard_delete_ciphers(
     Json(payload): Json<CipherIdsRequest>,
 ) -> Result<Json<()>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
 
     for id in payload.ids {
         query!(

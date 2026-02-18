@@ -98,6 +98,7 @@ pub async fn two_factor_status(
     State(env): State<Arc<Env>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
     let enabled = two_factor::is_authenticator_enabled(&db, &claims.sub).await?;
     let providers: Vec<i32> = if enabled {
         vec![two_factor::TWO_FACTOR_PROVIDER_AUTHENTICATOR]
@@ -116,6 +117,7 @@ pub async fn authenticator_request(
     State(env): State<Arc<Env>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
     let now = Utc::now().to_rfc3339();
 
     let user_email: Option<String> = db
@@ -172,6 +174,7 @@ pub async fn get_authenticator(
     Json(payload): Json<PasswordOrOtpData>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
     payload.validate(&db, &claims.sub).await?;
 
     let enabled = two_factor::is_authenticator_enabled(&db, &claims.sub).await?;
@@ -199,6 +202,7 @@ pub async fn activate_authenticator(
     Json(payload): Json<EnableAuthenticatorData>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
 
     PasswordOrOtpData {
         master_password_hash: payload.master_password_hash.clone(),
@@ -248,6 +252,7 @@ pub async fn disable_authenticator_vw(
     Json(payload): Json<DisableAuthenticatorData>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
 
     let stored_hash: Option<String> = db
         .prepare("SELECT master_password_hash FROM users WHERE id = ?1")
@@ -294,6 +299,7 @@ pub async fn authenticator_enable(
     Json(payload): Json<EnableAuthenticatorRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
     let now = Utc::now().to_rfc3339();
 
     let secret_enc = two_factor::get_authenticator_secret_enc(&db, &claims.sub)
@@ -326,6 +332,7 @@ pub async fn authenticator_disable(
     Json(payload): Json<DisableAuthenticatorRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
     let secret_enc = two_factor::get_authenticator_secret_enc(&db, &claims.sub)
         .await?
         .ok_or_else(|| AppError::BadRequest("Authenticator not enabled".to_string()))?;

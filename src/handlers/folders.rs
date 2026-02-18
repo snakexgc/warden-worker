@@ -17,6 +17,7 @@ pub async fn create_folder(
     Json(payload): Json<CreateFolderRequest>,
 ) -> Result<Json<FolderResponse>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
     let now = Utc::now();
     let now = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
@@ -58,6 +59,7 @@ pub async fn delete_folder(
     Path(id): Path<String>,
 ) -> Result<Json<()>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
 
     query!(
         &db,
@@ -79,6 +81,7 @@ pub async fn update_folder(
     Json(payload): Json<CreateFolderRequest>,
 ) -> Result<Json<FolderResponse>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
     let now = Utc::now();
     let now = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 

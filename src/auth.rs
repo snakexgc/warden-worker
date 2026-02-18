@@ -68,28 +68,32 @@ impl FromRequestParts<Arc<Env>> for Claims
 
 impl Claims {
     pub async fn verify_security_stamp(&self, db: &D1Database) -> Result<(), AppError> {
-        if let Some(token_stamp) = &self.security_stamp {
-            let user_val: Option<Value> = db
-                .prepare("SELECT security_stamp FROM users WHERE id = ?1")
-                .bind(&[self.sub.clone().into()])
-                .map_err(|_| AppError::Database)?
-                .first(None)
-                .await
-                .map_err(|_| AppError::Database)?;
+        let token_stamp = self
+            .security_stamp
+            .as_deref()
+            .ok_or_else(|| AppError::Unauthorized("Missing security stamp".to_string()))?;
 
-            if let Some(user_val) = user_val {
-                let db_stamp = user_val
-                    .get("security_stamp")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                
-                if db_stamp != token_stamp {
-                    return Err(AppError::Unauthorized("Invalid security stamp".to_string()));
-                }
-            } else {
-                return Err(AppError::Unauthorized("User not found".to_string()));
-            }
+        let user_val: Option<Value> = db
+            .prepare("SELECT security_stamp FROM users WHERE id = ?1")
+            .bind(&[self.sub.clone().into()])
+            .map_err(|_| AppError::Database)?
+            .first(None)
+            .await
+            .map_err(|_| AppError::Database)?;
+
+        let Some(user_val) = user_val else {
+            return Err(AppError::Unauthorized("User not found".to_string()));
+        };
+
+        let db_stamp = user_val
+            .get("security_stamp")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if db_stamp != token_stamp {
+            return Err(AppError::Unauthorized("Invalid security stamp".to_string()));
         }
+
         Ok(())
     }
 }

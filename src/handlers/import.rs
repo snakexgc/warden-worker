@@ -21,6 +21,7 @@ pub async fn import_data(
     Json(mut payload): Json<ImportRequest>,
 ) -> Result<Json<()>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
     let now = Utc::now();
     let now = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 

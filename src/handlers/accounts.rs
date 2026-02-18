@@ -530,6 +530,7 @@ pub async fn change_master_password(
     }
 
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
     let user: Value = db
         .prepare("SELECT * FROM users WHERE id = ?1")
         .bind(&[claims.sub.clone().into()])?

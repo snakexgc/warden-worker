@@ -67,8 +67,9 @@ pub async fn get_sync_data(
     State(env): State<Arc<Env>>,
     Query(q): Query<SyncQuery>,
 ) -> Result<Json<SyncResponse>, AppError> {
-    let user_id = claims.sub;
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
+    let user_id = claims.sub;
 
     // Fetch profile
     let user: User = db

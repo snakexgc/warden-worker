@@ -189,6 +189,7 @@ pub async fn get_sends(
     State(env): State<Arc<Env>>,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
     let rows: Vec<Value> = db
         .prepare("SELECT * FROM sends WHERE user_id = ?1 ORDER BY updated_at DESC")
         .bind(&[claims.sub.into()])?
@@ -217,6 +218,7 @@ pub async fn get_send(
     Path(send_id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
     let send = get_send_by_id_and_user(&db, &send_id, &claims.sub)
         .await?
         .ok_or_else(|| AppError::NotFound("Send not found".to_string()))?;
@@ -230,6 +232,7 @@ pub async fn delete_send(
     Path(send_id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
 
     let owned = get_send_by_id_and_user(&db, &send_id, &claims.sub)
         .await?
@@ -277,6 +280,7 @@ pub async fn post_send(
     Json(payload): Json<SendData>,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
 
     if payload.r#type == SEND_TYPE_FILE {
         return Err(AppError::BadRequest("File sends should use /api/sends/file/v2".to_string()));
@@ -345,6 +349,7 @@ pub async fn post_send_file_v2(
     Json(payload): Json<SendData>,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
 
     if payload.r#type != SEND_TYPE_FILE {
         return Err(AppError::BadRequest("Send content is not a file".to_string()));
@@ -442,6 +447,7 @@ pub async fn post_send_file_v2_data(
     mut multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
     let send = get_send_by_id_and_user(&db, &send_id, &claims.sub)
         .await?
         .ok_or_else(|| AppError::NotFound("Send not found. Unable to save the file.".to_string()))?;

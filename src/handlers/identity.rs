@@ -570,10 +570,12 @@ pub async fn token(
                 .ok_or_else(|| AppError::Unauthorized("Invalid user".to_string()))?;
             let user: User = serde_json::from_value(user).map_err(|_| AppError::Internal)?;
 
-            if let Some(stamp) = token_data.claims.security_stamp {
-                if stamp != user.security_stamp {
-                    return Err(AppError::Unauthorized("Invalid security stamp".to_string()));
-                }
+            let stamp = token_data
+                .claims
+                .security_stamp
+                .ok_or_else(|| AppError::Unauthorized("Missing security stamp".to_string()))?;
+            if stamp != user.security_stamp {
+                return Err(AppError::Unauthorized("Invalid security stamp".to_string()));
             }
 
             let response = generate_tokens_and_response(user, &env)?;

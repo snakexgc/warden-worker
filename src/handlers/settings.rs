@@ -20,6 +20,7 @@ pub async fn get_domains(
     State(env): State<Arc<Env>>,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
     let domains = domains::build_domains_object(&db, &claims.sub, false).await?;
     Ok(Json(domains))
 }
@@ -48,6 +49,7 @@ async fn update_domains(
     payload: DomainsUpdateRequest,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
     let now = Utc::now().to_rfc3339();
 
     let equivalent_domains = payload.equivalent_domains.unwrap_or_default();

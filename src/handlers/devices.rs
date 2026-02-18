@@ -141,6 +141,7 @@ pub async fn device_token(
     Json(_payload): Json<PushTokenRequest>,
 ) -> Result<Json<()>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
     ensure_devices_table(&db).await?;
 
     let inferred_name = infer_device_name(&headers);
@@ -177,6 +178,7 @@ pub async fn get_devices(
     State(env): State<Arc<Env>>,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
     ensure_devices_table(&db).await?;
 
     let rows: Vec<Value> = db
@@ -251,6 +253,7 @@ pub async fn get_device_by_identifier(
     Path(device_identifier): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&env)?;
+    claims.verify_security_stamp(&db).await?;
     ensure_devices_table(&db).await?;
 
     let inferred_name = infer_device_name(&headers);
