@@ -247,7 +247,7 @@ fn default_true() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::Cipher;
+    use super::{Cipher, CreateCipherRequest};
     use serde_json::{json, Value};
 
     #[test]
@@ -292,6 +292,32 @@ mod tests {
             "permissions.restore must exist and be true when edit=true"
         );
     }
+
+    #[test]
+    fn create_cipher_request_deserializes_camelcase() {
+        let body = json!({
+            "cipher": { "type": 1, "name": "n" },
+            "collectionIds": ["c1", "c2"]
+        });
+
+        let req: CreateCipherRequest = serde_json::from_value(body).expect("deserialize");
+        assert_eq!(req.cipher.r#type, 1);
+        assert_eq!(req.cipher.name, "n");
+        assert_eq!(req.collection_ids, vec!["c1".to_string(), "c2".to_string()]);
+    }
+
+    #[test]
+    fn create_cipher_request_deserializes_pascalcase_compat() {
+        let body = json!({
+            "Cipher": { "type": 1, "name": "n" },
+            "CollectionIds": ["c1"]
+        });
+
+        let req: CreateCipherRequest = serde_json::from_value(body).expect("deserialize");
+        assert_eq!(req.cipher.r#type, 1);
+        assert_eq!(req.cipher.name, "n");
+        assert_eq!(req.collection_ids, vec!["c1".to_string()]);
+    }
 }
 
 // Represents the "Cipher" object within the incoming request payload.
@@ -329,10 +355,12 @@ pub struct CipherRequestData {
 
 // Represents the full request payload for creating a cipher.
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "camelCase")]
 pub struct CreateCipherRequest {
+    #[serde(alias = "Cipher")]
     pub cipher: CipherRequestData,
     #[serde(default)]
+    #[serde(alias = "CollectionIds")]
     pub collection_ids: Vec<String>,
 }
 
