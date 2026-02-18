@@ -14,7 +14,7 @@ use uuid::Uuid;
 use worker::{wasm_bindgen::JsValue, Env};
 use sha2::{Digest, Sha256};
 
-use crate::{auth::Claims, crypto, db, error::AppError, models::user::User, two_factor};
+use crate::{auth::Claims, crypto, db, error::AppError, logging::targets, models::user::User, two_factor};
 
 fn deserialize_trimmed_i32_opt<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
 where
@@ -454,6 +454,7 @@ pub async fn token(
             let device_name = payload.device_name.clone();
             let device_type = payload.device_type;
             log::info!(
+                target: targets::AUTH,
                 "token login device id={:?} type={:?} name={:?} 2fa_provider={:?} remember={:?}",
                 device_identifier,
                 device_type,

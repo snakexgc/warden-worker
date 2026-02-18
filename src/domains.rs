@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use worker::{D1Database, Fetch, Method, Request};
 
 use crate::error::AppError;
+use crate::logging::targets;
 
 const GLOBAL_DOMAINS_URL: &str =
     "https://raw.githubusercontent.com/dani-garcia/vaultwarden/main/src/static/global_domains.json";
@@ -89,7 +90,7 @@ async fn get_global_domains() -> Vec<GlobalDomain> {
     let request = match Request::new(GLOBAL_DOMAINS_URL, Method::Get) {
         Ok(r) => r,
         Err(e) => {
-            log::error!("Failed to create request for global domains: {:?}", e);
+            log::error!(target: targets::EXTERNAL, "Failed to create request for global domains: {:?}", e);
             return Vec::new();
         }
     };
@@ -97,21 +98,21 @@ async fn get_global_domains() -> Vec<GlobalDomain> {
     let mut response = match Fetch::Request(request).send().await {
         Ok(r) => r,
         Err(e) => {
-            log::error!("Failed to fetch global domains: {:?}", e);
+            log::error!(target: targets::EXTERNAL, "Failed to fetch global domains: {:?}", e);
             return Vec::new();
         }
     };
 
     let status = response.status_code();
     if !(200..300).contains(&status) {
-        log::warn!("Global domains fetch returned non-2xx status: {}", status);
+        log::warn!(target: targets::EXTERNAL, "Global domains fetch returned non-2xx status: {}", status);
         return Vec::new();
     }
 
     let bytes = match response.bytes().await {
         Ok(b) => b,
         Err(e) => {
-            log::error!("Failed to read global domains response: {:?}", e);
+            log::error!(target: targets::EXTERNAL, "Failed to read global domains response: {:?}", e);
             return Vec::new();
         }
     };
@@ -119,7 +120,7 @@ async fn get_global_domains() -> Vec<GlobalDomain> {
     let text = match String::from_utf8(bytes) {
         Ok(s) => s,
         Err(e) => {
-            log::error!("Global domains response was not valid UTF-8: {:?}", e);
+            log::error!(target: targets::EXTERNAL, "Global domains response was not valid UTF-8: {:?}", e);
             return Vec::new();
         }
     };
@@ -127,7 +128,7 @@ async fn get_global_domains() -> Vec<GlobalDomain> {
     let parsed: Vec<GlobalDomain> = match serde_json::from_str(&text) {
         Ok(v) => v,
         Err(e) => {
-            log::error!("Failed to parse global domains JSON: {:?}", e);
+            log::error!(target: targets::EXTERNAL, "Failed to parse global domains JSON: {:?}", e);
             return Vec::new();
         }
     };

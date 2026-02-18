@@ -4,6 +4,14 @@
   "main": "build/index.js",
   "compatibility_date": "2025-09-19",
 
+  // 环境变量配置
+  "vars": {
+    // 日志级别配置格式: <全局级别>[,<模块>=<级别>]*
+    // 全局级别: trace, debug, info, warn, error, off
+    // 模块级别覆盖示例: info,auth=debug,external=debug
+    // 可用模块: api, auth, db, external, crypto, request, response, error, panic
+    "LOG_LEVEL": "info"
+  },
 
   // D1 数据库绑定（必须完整，否则会被认为是新建/覆盖）
   "d1_databases": [

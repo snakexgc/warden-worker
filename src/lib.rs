@@ -8,6 +8,7 @@ mod db;
 mod domains;
 mod error;
 mod handlers;
+mod logging;
 mod models;
 mod router;
 mod two_factor;
@@ -18,9 +19,9 @@ pub async fn main(
     env: Env,
     _ctx: Context,
 ) -> Result<axum::http::Response<axum::body::Body>> {
-    // Set up logging
     console_error_panic_hook::set_once();
-    let _ = console_log::init_with_level(log::Level::Debug);
+    let log_level = logging::init_logging(&env);
+    log::info!(target: logging::targets::API, "Logging initialized at level: {:?}", log_level);
 
     // Allow all origins for CORS, which is typical for a public API like Bitwarden's.
     let cors = CorsLayer::new()

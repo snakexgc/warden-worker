@@ -7,6 +7,7 @@ use std::sync::Arc;
 use worker::Env;
 
 use crate::error::AppError;
+use crate::logging::targets;
 
 #[worker::send]
 pub async fn get_icon(
@@ -27,7 +28,7 @@ pub async fn get_icon(
         .send()
         .await
         .map_err(|e| {
-            log::error!("Failed to fetch icon from Bitwarden: {:?}", e);
+            log::error!(target: targets::EXTERNAL, "Failed to fetch icon from Bitwarden: {:?}", e);
             AppError::Internal
         })?;
 
@@ -37,7 +38,7 @@ pub async fn get_icon(
         .bytes()
         .await
         .map_err(|e| {
-            log::error!("Failed to read icon response body: {:?}", e);
+            log::error!(target: targets::EXTERNAL, "Failed to read icon response body: {:?}", e);
             AppError::Internal
         })?;
 

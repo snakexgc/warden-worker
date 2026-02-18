@@ -9,6 +9,7 @@ use crate::{
     db,
     domains,
     error::AppError,
+    logging::targets,
     models::{
         cipher::{Cipher, CipherDBModel},
         folder::{Folder, FolderResponse},
@@ -101,7 +102,7 @@ pub async fn get_sync_data(
             |cipher| match serde_json::from_value::<CipherDBModel>(cipher.clone()) {
                 Ok(cipher) => Some(cipher),
                 Err(err) => {
-                    log::warn!("Cannot parse {err:?} {cipher:?}");
+                    log::warn!(target: targets::DB, "Cannot parse {err:?} {cipher:?}");
                     None
                 }
             },
