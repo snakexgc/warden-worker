@@ -12,6 +12,8 @@ const EVENTS_VAR_NAME: &str = "NOTIFY_EVENTS";
 pub enum NotifyEvent {
     Login,
     PasswordChange,
+    EmailChange,
+    KdfChange,
     CipherCreate,
     CipherUpdate,
     CipherDelete,
@@ -27,6 +29,8 @@ impl NotifyEvent {
         match self {
             NotifyEvent::Login => "login",
             NotifyEvent::PasswordChange => "password",
+            NotifyEvent::EmailChange => "email",
+            NotifyEvent::KdfChange => "kdf",
             NotifyEvent::CipherCreate => "cipher_create",
             NotifyEvent::CipherUpdate => "cipher_update",
             NotifyEvent::CipherDelete => "cipher_delete",
@@ -42,6 +46,8 @@ impl NotifyEvent {
         match self {
             NotifyEvent::Login => "登录",
             NotifyEvent::PasswordChange => "修改主密码",
+            NotifyEvent::EmailChange => "修改邮箱",
+            NotifyEvent::KdfChange => "修改 KDF 设置",
             NotifyEvent::CipherCreate => "新增密码项",
             NotifyEvent::CipherUpdate => "修改密码项",
             NotifyEvent::CipherDelete => "删除密码项",
@@ -103,7 +109,10 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 fn format_markdown(event: NotifyEvent, ctx: &NotifyContext) -> String {
-    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = Utc::now()
+        .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
 
     let mut lines = Vec::new();
     lines.push(format!("# Warden Worker 通知"));
@@ -168,6 +177,8 @@ fn parse_enabled_events(env: &Env) -> Vec<NotifyEvent> {
         return vec![
             NotifyEvent::Login,
             NotifyEvent::PasswordChange,
+            NotifyEvent::EmailChange,
+            NotifyEvent::KdfChange,
             NotifyEvent::CipherCreate,
             NotifyEvent::CipherUpdate,
             NotifyEvent::CipherDelete,
@@ -188,6 +199,8 @@ fn parse_enabled_events(env: &Env) -> Vec<NotifyEvent> {
         match part {
             "login" => out.push(NotifyEvent::Login),
             "password" | "password_change" => out.push(NotifyEvent::PasswordChange),
+            "email" | "email_change" => out.push(NotifyEvent::EmailChange),
+            "kdf" | "kdf_change" => out.push(NotifyEvent::KdfChange),
             "cipher_create" | "cipher.add" | "cipher_add" | "create_cipher" => {
                 out.push(NotifyEvent::CipherCreate)
             }

@@ -593,7 +593,7 @@ pub async fn change_master_password(
         security_stamp.into(),
         now.into(),
         to_js_val(Some(password_salt)),
-        claims.sub.into(),
+        claims.sub.clone().into(),
     ])?
     .run()
     .await
@@ -618,6 +618,7 @@ pub async fn change_master_password(
 pub async fn change_email(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Json(payload): Json<ChangeEmailRequest>,
 ) -> Result<Json<Value>, AppError> {
     if payload.master_password_hash.is_empty() || payload.new_master_password_hash.is_empty() {
@@ -670,7 +671,7 @@ pub async fn change_email(
         "UPDATE users SET email = ?1, email_verified = ?2, master_password_hash = ?3, key = ?4, kdf_type = ?5, kdf_iterations = ?6, kdf_memory = ?7, kdf_parallelism = ?8, security_stamp = ?9, updated_at = ?10, password_salt = ?11 WHERE id = ?12",
     )
     .bind(&[
-        new_email.into(),
+        new_email.clone().into(),
         false.into(),
         new_master_password_hash.into(),
         payload.user_symmetric_key.into(),
@@ -681,7 +682,7 @@ pub async fn change_email(
         security_stamp.into(),
         now.into(),
         to_js_val(Some(password_salt)),
-        claims.sub.into(),
+        claims.sub.clone().into(),
     ])?
     .run()
     .await
@@ -693,6 +694,19 @@ pub async fn change_email(
         }
     })?;
 
+    notify::notify_best_effort(
+        env.as_ref(),
+        NotifyEvent::EmailChange, // Email change
+        NotifyContext {
+            user_id: Some(claims.sub),
+            user_email: Some(new_email),
+            detail: Some("Action: Change Email".to_string()),
+            meta: notify::extract_request_meta(&headers),
+            ..Default::default()
+        },
+    )
+    .await;
+
     Ok(Json(json!({})))
 }
 
@@ -700,6 +714,7 @@ pub async fn change_email(
 pub async fn post_kdf(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Json(payload): Json<ChangeKdfPayload>,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&env)?;
@@ -787,11 +802,24 @@ pub async fn post_kdf(
         security_stamp.into(),
         now.into(),
         to_js_val(Some(password_salt)),
-        claims.sub.into(),
+        claims.sub.clone().into(),
     ])?
     .run()
     .await
     .map_err(|_| AppError::Database)?;
+
+    notify::notify_best_effort(
+        env.as_ref(),
+        NotifyEvent::KdfChange, // KDF change updates the key/password hash
+        NotifyContext {
+            user_id: Some(claims.sub),
+            user_email: Some(user.email),
+            detail: Some("Action: Change KDF settings".to_string()),
+            meta: notify::extract_request_meta(&headers),
+            ..Default::default()
+        },
+    )
+    .await;
 
     Ok(Json(json!({})))
 }

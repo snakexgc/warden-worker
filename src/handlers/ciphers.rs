@@ -306,6 +306,7 @@ pub async fn soft_delete_cipher(
 pub async fn restore_cipher(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Cipher>, AppError> {
     let db = db::get_db(&env)?;
@@ -329,6 +330,22 @@ pub async fn restore_cipher(
     let mut cipher: Cipher = existing.into();
     cipher.deleted_at = None;
     cipher.updated_at = now;
+
+    let meta = notify::extract_request_meta(&headers);
+    notify::notify_best_effort(
+        env.as_ref(),
+        NotifyEvent::CipherUpdate, // Restore is effectively an update
+        NotifyContext {
+            user_id: Some(claims.sub),
+            user_email: Some(claims.email),
+            cipher_id: Some(id),
+            detail: Some("Action: Restore Cipher".to_string()),
+            meta,
+            ..Default::default()
+        },
+    )
+    .await;
+
     Ok(Json(cipher))
 }
 
@@ -383,6 +400,7 @@ pub async fn hard_delete_cipher_post(
 pub async fn soft_delete_ciphers(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Json(payload): Json<CipherIdsRequest>,
 ) -> Result<Json<()>, AppError> {
     let db = db::get_db(&env)?;
@@ -390,6 +408,7 @@ pub async fn soft_delete_ciphers(
     let now = Utc::now();
     let now = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
+    let count = payload.ids.len();
     for id in payload.ids {
         query!(
             &db,
@@ -404,6 +423,20 @@ pub async fn soft_delete_ciphers(
         .await?;
     }
 
+    let meta = notify::extract_request_meta(&headers);
+    notify::notify_best_effort(
+        env.as_ref(),
+        NotifyEvent::CipherDelete,
+        NotifyContext {
+            user_id: Some(claims.sub),
+            user_email: Some(claims.email),
+            detail: Some(format!("Action: Batch Soft Delete ({} items)", count)),
+            meta,
+            ..Default::default()
+        },
+    )
+    .await;
+
     Ok(Json(()))
 }
 
@@ -411,6 +444,7 @@ pub async fn soft_delete_ciphers(
 pub async fn restore_ciphers(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Json(payload): Json<CipherIdsRequest>,
 ) -> Result<Json<()>, AppError> {
     let db = db::get_db(&env)?;
@@ -418,6 +452,7 @@ pub async fn restore_ciphers(
     let now = Utc::now();
     let now = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
+    let count = payload.ids.len();
     for id in payload.ids {
         query!(
             &db,
@@ -431,6 +466,20 @@ pub async fn restore_ciphers(
         .await?;
     }
 
+    let meta = notify::extract_request_meta(&headers);
+    notify::notify_best_effort(
+        env.as_ref(),
+        NotifyEvent::CipherUpdate, // Restore
+        NotifyContext {
+            user_id: Some(claims.sub),
+            user_email: Some(claims.email),
+            detail: Some(format!("Action: Batch Restore ({} items)", count)),
+            meta,
+            ..Default::default()
+        },
+    )
+    .await;
+
     Ok(Json(()))
 }
 
@@ -438,11 +487,13 @@ pub async fn restore_ciphers(
 pub async fn hard_delete_ciphers(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Json(payload): Json<CipherIdsRequest>,
 ) -> Result<Json<()>, AppError> {
     let db = db::get_db(&env)?;
     claims.verify_security_stamp(&db).await?;
 
+    let count = payload.ids.len();
     for id in payload.ids {
         query!(
             &db,
@@ -455,6 +506,20 @@ pub async fn hard_delete_ciphers(
         .await?;
     }
 
+    let meta = notify::extract_request_meta(&headers);
+    notify::notify_best_effort(
+        env.as_ref(),
+        NotifyEvent::CipherDelete,
+        NotifyContext {
+            user_id: Some(claims.sub),
+            user_email: Some(claims.email),
+            detail: Some(format!("Action: Batch Hard Delete ({} items)", count)),
+            meta,
+            ..Default::default()
+        },
+    )
+    .await;
+
     Ok(Json(()))
 }
 
@@ -462,7 +527,8 @@ pub async fn hard_delete_ciphers(
 pub async fn hard_delete_ciphers_delete(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Json(payload): Json<CipherIdsRequest>,
 ) -> Result<Json<()>, AppError> {
-    hard_delete_ciphers(claims, State(env), Json(payload)).await
+    hard_delete_ciphers(claims, State(env), headers, Json(payload)).await
 }
