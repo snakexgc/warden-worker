@@ -14,6 +14,7 @@ Warden Worker 是一个运行在 Cloudflare Workers 上的轻量级 Bitwarden �
 - 核心能力：注册/登录、同步、密码项（Cipher）增删改、文件夹、TOTP（Authenticator）二步验证
 - 官方安卓兼容：支持 `/api/devices/knowndevice` 与 remember-device（twoFactorProvider=5）流程
 - **安全增强**：支持“踢出所有已登录设备”（Security Stamp 校验），增强了 Token 刷新时的安全性
+- **消息通知**：支持企业微信 Webhook 推送，覆盖登录/失败、密码库变更等 10+ 种事件，支持 GeoIP 显示 IP 归属地
 
 ## 手动部署（wrangler 命令行）
 
@@ -51,14 +52,20 @@ wrangler secret put JWT_SECRET
 wrangler secret put JWT_REFRESH_SECRET
 wrangler secret put ALLOWED_EMAILS
 wrangler secret put TWO_FACTOR_ENC_KEY
+wrangler secret put WEWORK_WEBHOOK_URL
 ```
 
 - **JWT_SECRET**：访问令牌签名密钥。用于签署短效 Access Token。**必须设置强随机字符串。**
 - **JWT_REFRESH_SECRET**：刷新令牌签名密钥。用于签署长效 Refresh Token。**必须设置强随机字符串，且不要与 JWT_SECRET 相同。**
 - **ALLOWED_EMAILS**：首个账号注册白名单（仅在“数据库还没有任何用户”时启用），多个邮箱用英文逗号分隔。
 - **TWO_FACTOR_ENC_KEY**：可选，Base64 的 32 字节密钥；用于加密存储 TOTP 秘钥（不设置则以 `plain:` 形式存储）。
+- **WEWORK_WEBHOOK_URL**：可选，企业微信群机器人的 Webhook 地址（形如 `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...`）。
 
-### 4. 部署
+### 4. 配置通知（可选）
+
+在 `wrangler.jsonc` 的 `vars` 字段中配置 `NOTIFY_EVENTS` 变量，以控制是否发送通知。默认 `"all"`。
+
+### 5. 部署
 
 ```bash
 wrangler deploy
@@ -66,7 +73,7 @@ wrangler deploy
 
 部署后，把 Workers URL 或自定义域名（例如 `https://key.snakexgc.com`）填入 Bitwarden 客户端的“自托管服务器 URL”。
 
-### 5. 升级
+### 6. 升级
 > 如果你曾经部署过旧版本并准备升级，建议在客户端 **导出密码库**  → **重新部署本项目（全新初始化数据库）** → **再导入密码库（可显著降低迁移/兼容成本）**。
 
 ## 自动部署（GitHub Actions）
@@ -87,20 +94,22 @@ Fork 本仓库到你的 GitHub 账号。
 *** 控制台创建D1数据库后，还需要在执行 `sql/schema.sql`中的代码来初始化数据库。 ***
 
 ### 3. 配置Cloudflare Workers运行环境密钥
-在 Cloudflare Dashboard -> Workers -> Settings -> Variables 中手动添加以下四个机密变量。
+在 Cloudflare Dashboard -> Workers -> Settings -> Variables 中手动添加以下五个机密变量。
 ```
 JWT_SECRET
 JWT_REFRESH_SECRET
 ALLOWED_EMAILS
 TWO_FACTOR_ENC_KEY
+WEWORK_WEBHOOK_URL
 ```
 - **JWT_SECRET**：访问令牌签名密钥。用于签署短效 Access Token。**必须设置强随机字符串。**
 - **JWT_REFRESH_SECRET**：刷新令牌签名密钥。用于签署长效 Refresh Token。**必须设置强随机字符串，且不要与 JWT_SECRET 相同。**
 - **ALLOWED_EMAILS**：首个账号注册白名单（仅在“数据库还没有任何用户”时启用），多个邮箱用英文逗号分隔。
 - **TWO_FACTOR_ENC_KEY**：可选，Base64 的 32 字节密钥；用于加密存储 TOTP 秘钥
+- **WEWORK_WEBHOOK_URL**：可选，企业微信群机器人的 Webhook 地址。
 可以使用PowerShell生成 TWO_FACTOR_ENC_KEY ：
 ```powershell
-[Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+[Convert]::ToBase64String((1..32 | ForEach-Object {Get-Random -Minimum 0 -Maximum 256}))
 ```
 ### 4. 部署
 在 GitHub 仓库的 **Actions** 中触发工作流，即可自动部署到 Cloudflare Workers。
@@ -134,6 +143,42 @@ TWO_FACTOR_ENC_KEY
 
 ## 🔐安全增强
 - 登录校验，防止失效tocken成功登录
+
+## 🔔 消息通知
+
+本项目支持通过企业微信群机器人推送关键事件通知。
+
+### 1. 配置 Webhook
+在 Cloudflare 后台或通过 wrangler 设置密钥 `WEWORK_WEBHOOK_URL`：
+```bash
+wrangler secret put WEWORK_WEBHOOK_URL
+# 输入形如 https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxxxxxx 的地址
+```
+
+### 2. 配置通知开关
+在 `wrangler.jsonc` 的 `vars` 中修改 `NOTIFY_EVENTS` 环境变量来控制发送哪些通知。
+
+- **开启所有**：`"NOTIFY_EVENTS": "all"`
+- **关闭所有**：`"NOTIFY_EVENTS": "none"`
+- **按需开启**：逗号分隔，例如 `"NOTIFY_EVENTS": "login,login_failed,cipher_delete"`
+
+**支持的事件列表：**
+- `login`：登录成功
+- `login_failed`：登录失败（密码错误、用户不存在、2FA 错误）
+- `password`：修改主密码
+- `email`：修改邮箱
+- `kdf`：修改 KDF 设置
+- `cipher_create`：新增密码项
+- `cipher_update`：修改密码项
+- `cipher_delete`：删除密码项（含软删除/恢复/彻底删除）
+- `import`：导入数据
+- `send_create` / `send_delete`：Send 创建与删除
+- `2fa_enable` / `2fa_disable`：两步验证变更
+
+**特性：**
+- **GeoIP**：自动识别并显示操作 IP 的归属地（国家/地区/城市）。
+- **美化模版**：使用 Markdown 格式，支持 Emoji 与关键信息高亮。
+- **时区**：时间自动转换为 UTC+8（北京时间）。
 
 ## 许可证
 
