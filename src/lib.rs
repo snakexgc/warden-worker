@@ -10,6 +10,7 @@ mod error;
 mod handlers;
 mod logging;
 mod models;
+mod notify;
 mod router;
 mod two_factor;
 

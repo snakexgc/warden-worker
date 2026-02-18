@@ -1,4 +1,5 @@
 use axum::{extract::State, Json};
+use axum::http::HeaderMap;
 use chrono::Utc;
 use constant_time_eq::constant_time_eq;
 use serde::Deserialize;
@@ -14,6 +15,7 @@ use crate::{
     db,
     error::AppError,
     models::user::{KeyData, PreloginResponse, RegisterRequest, User},
+    notify::{self, NotifyContext, NotifyEvent},
     two_factor,
 };
 
@@ -520,6 +522,7 @@ pub async fn register(
 pub async fn change_master_password(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Json(payload): Json<ChangeMasterPasswordRequest>,
 ) -> Result<Json<Value>, AppError> {
     if payload.master_password_hash.is_empty() || payload.new_master_password_hash.is_empty() {
@@ -595,6 +598,18 @@ pub async fn change_master_password(
     .run()
     .await
     .map_err(|_| AppError::Database)?;
+
+    notify::notify_best_effort(
+        env.as_ref(),
+        NotifyEvent::PasswordChange,
+        NotifyContext {
+            user_id: Some(user.id),
+            user_email: Some(user.email),
+            meta: notify::extract_request_meta(&headers),
+            ..Default::default()
+        },
+    )
+    .await;
 
     Ok(Json(json!({})))
 }

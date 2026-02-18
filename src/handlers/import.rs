@@ -1,4 +1,5 @@
 use axum::{extract::State, Json};
+use axum::http::HeaderMap;
 use chrono::Utc;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -11,6 +12,7 @@ use crate::error::AppError;
 use crate::models::cipher::CipherData;
 use crate::models::folder::Folder;
 use crate::models::import::ImportRequest;
+use crate::notify::{self, NotifyContext, NotifyEvent};
 
 const IMPORT_BATCH_SIZE: usize = 200;
 
@@ -18,10 +20,13 @@ const IMPORT_BATCH_SIZE: usize = 200;
 pub async fn import_data(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Json(mut payload): Json<ImportRequest>,
 ) -> Result<Json<()>, AppError> {
     let db = db::get_db(&env)?;
     claims.verify_security_stamp(&db).await?;
+    let folder_count = payload.folders.len();
+    let cipher_count = payload.ciphers.len();
     let now = Utc::now();
     let now = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
@@ -100,6 +105,20 @@ pub async fn import_data(
         }
     }
     run_batch(&db, &mut cipher_stmts).await?;
+
+    let meta = notify::extract_request_meta(&headers);
+    notify::notify_best_effort(
+        env.as_ref(),
+        NotifyEvent::Import,
+        NotifyContext {
+            user_id: Some(claims.sub),
+            user_email: Some(claims.email),
+            detail: Some(format!("folders={folder_count}, ciphers={cipher_count}")),
+            meta,
+            ..Default::default()
+        },
+    )
+    .await;
 
     Ok(Json(()))
 }

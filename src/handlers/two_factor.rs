@@ -1,4 +1,5 @@
 use axum::{extract::State, Json};
+use axum::http::HeaderMap;
 use chrono::Utc;
 use constant_time_eq::constant_time_eq;
 use serde::Deserialize;
@@ -10,6 +11,7 @@ use worker::Env;
 use crate::auth::Claims;
 use crate::db;
 use crate::error::AppError;
+use crate::notify::{self, NotifyContext, NotifyEvent};
 use crate::two_factor;
 
 #[derive(Debug, Deserialize)]
@@ -199,6 +201,7 @@ pub async fn get_authenticator(
 pub async fn activate_authenticator(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Json(payload): Json<EnableAuthenticatorData>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = db::get_db(&env)?;
@@ -229,6 +232,20 @@ pub async fn activate_authenticator(
     let secret_enc = two_factor::encrypt_secret_with_optional_key(two_factor_key_b64.as_deref(), &claims.sub, &key)?;
     two_factor::upsert_authenticator_secret(&db, &claims.sub, secret_enc, true, &now).await?;
 
+    let meta = notify::extract_request_meta(&headers);
+    notify::notify_best_effort(
+        env.as_ref(),
+        NotifyEvent::TwoFactorEnable,
+        NotifyContext {
+            user_id: Some(claims.sub),
+            user_email: Some(claims.email),
+            detail: Some("provider=authenticator".to_string()),
+            meta,
+            ..Default::default()
+        },
+    )
+    .await;
+
     Ok(Json(json!({
         "enabled": true,
         "key": key,
@@ -240,15 +257,17 @@ pub async fn activate_authenticator(
 pub async fn activate_authenticator_put(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Json(payload): Json<EnableAuthenticatorData>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    activate_authenticator(claims, State(env), Json(payload)).await
+    activate_authenticator(claims, State(env), headers, Json(payload)).await
 }
 
 #[worker::send]
 pub async fn disable_authenticator_vw(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Json(payload): Json<DisableAuthenticatorData>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = db::get_db(&env)?;
@@ -285,6 +304,20 @@ pub async fn disable_authenticator_vw(
         NumberOrString::String(s) => s.parse::<i32>().unwrap_or(two_factor::TWO_FACTOR_PROVIDER_AUTHENTICATOR),
     };
 
+    let meta = notify::extract_request_meta(&headers);
+    notify::notify_best_effort(
+        env.as_ref(),
+        NotifyEvent::TwoFactorDisable,
+        NotifyContext {
+            user_id: Some(claims.sub),
+            user_email: Some(claims.email),
+            detail: Some(format!("type={type_}")),
+            meta,
+            ..Default::default()
+        },
+    )
+    .await;
+
     Ok(Json(json!({
         "enabled": false,
         "keys": type_,
@@ -296,6 +329,7 @@ pub async fn disable_authenticator_vw(
 pub async fn authenticator_enable(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Json(payload): Json<EnableAuthenticatorRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = db::get_db(&env)?;
@@ -322,6 +356,20 @@ pub async fn authenticator_enable(
     }
 
     two_factor::upsert_authenticator_secret(&db, &claims.sub, secret_enc, true, &now).await?;
+
+    let meta = notify::extract_request_meta(&headers);
+    notify::notify_best_effort(
+        env.as_ref(),
+        NotifyEvent::TwoFactorEnable,
+        NotifyContext {
+            user_id: Some(claims.sub),
+            user_email: Some(claims.email),
+            detail: Some("provider=authenticator".to_string()),
+            meta,
+            ..Default::default()
+        },
+    )
+    .await;
     Ok(Json(json!({})))
 }
 
@@ -329,6 +377,7 @@ pub async fn authenticator_enable(
 pub async fn authenticator_disable(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Json(payload): Json<DisableAuthenticatorRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = db::get_db(&env)?;
@@ -347,5 +396,19 @@ pub async fn authenticator_disable(
     }
 
     two_factor::disable_authenticator(&db, &claims.sub).await?;
+
+    let meta = notify::extract_request_meta(&headers);
+    notify::notify_best_effort(
+        env.as_ref(),
+        NotifyEvent::TwoFactorDisable,
+        NotifyContext {
+            user_id: Some(claims.sub),
+            user_email: Some(claims.email),
+            detail: Some("provider=authenticator".to_string()),
+            meta,
+            ..Default::default()
+        },
+    )
+    .await;
     Ok(Json(json!({})))
 }

@@ -1,4 +1,5 @@
 use axum::{extract::State, Json};
+use axum::http::HeaderMap;
 use chrono::Utc;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -8,6 +9,7 @@ use crate::auth::Claims;
 use crate::db;
 use crate::error::AppError;
 use crate::models::cipher::{Cipher, CipherData, CipherRequestData, CreateCipherRequest, CipherRequestFlat};
+use crate::notify::{self, NotifyContext, NotifyEvent};
 use axum::extract::Path;
 use serde::Deserialize;
 
@@ -39,7 +41,7 @@ async fn create_cipher_inner(
     env: &Arc<Env>,
     cipher_data_req: CipherRequestData,
     collection_ids: Vec<String>,
-) -> Result<Json<Cipher>, AppError> {
+) -> Result<Cipher, AppError> {
     let db = db::get_db(env)?;
     claims.verify_security_stamp(&db).await?;
     let now = Utc::now();
@@ -100,31 +102,72 @@ async fn create_cipher_inner(
     .run()
     .await?;
 
-    Ok(Json(cipher))
+    Ok(cipher)
 }
 
 #[worker::send]
 pub async fn create_cipher(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Json(payload): Json<CreateCipherRequest>,
 ) -> Result<Json<Cipher>, AppError> {
-    create_cipher_inner(claims, &env, payload.cipher, payload.collection_ids).await
+    let user_id = claims.sub.clone();
+    let user_email = Some(claims.email.clone());
+    let meta = notify::extract_request_meta(&headers);
+
+    let cipher = create_cipher_inner(claims, &env, payload.cipher, payload.collection_ids).await?;
+
+    notify::notify_best_effort(
+        env.as_ref(),
+        NotifyEvent::CipherCreate,
+        NotifyContext {
+            user_id: Some(user_id),
+            user_email,
+            cipher_id: Some(cipher.id.clone()),
+            meta,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    Ok(Json(cipher))
 }
 
 #[worker::send]
 pub async fn post_ciphers(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Json(payload): Json<CipherRequestFlat>,
 ) -> Result<Json<Cipher>, AppError> {
-    create_cipher_inner(claims, &env, payload.cipher, payload.collection_ids).await
+    let user_id = claims.sub.clone();
+    let user_email = Some(claims.email.clone());
+    let meta = notify::extract_request_meta(&headers);
+
+    let cipher = create_cipher_inner(claims, &env, payload.cipher, payload.collection_ids).await?;
+
+    notify::notify_best_effort(
+        env.as_ref(),
+        NotifyEvent::CipherCreate,
+        NotifyContext {
+            user_id: Some(user_id),
+            user_email,
+            cipher_id: Some(cipher.id.clone()),
+            meta,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    Ok(Json(cipher))
 }
 
 #[worker::send]
 pub async fn update_cipher(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Json(payload): Json<CipherRequestData>,
 ) -> Result<Json<Cipher>, AppError> {
@@ -195,6 +238,20 @@ pub async fn update_cipher(
     .run()
     .await?;
 
+    let meta = notify::extract_request_meta(&headers);
+    notify::notify_best_effort(
+        env.as_ref(),
+        NotifyEvent::CipherUpdate,
+        NotifyContext {
+            user_id: Some(claims.sub),
+            user_email: Some(claims.email),
+            cipher_id: Some(cipher.id.clone()),
+            meta,
+            ..Default::default()
+        },
+    )
+    .await;
+
     Ok(Json(cipher))
 }
 
@@ -202,6 +259,7 @@ pub async fn update_cipher(
 pub async fn soft_delete_cipher(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Cipher>, AppError> {
     let db = db::get_db(&env)?;
@@ -226,6 +284,21 @@ pub async fn soft_delete_cipher(
     let mut cipher: Cipher = existing.into();
     cipher.deleted_at = Some(now.clone());
     cipher.updated_at = now;
+
+    let meta = notify::extract_request_meta(&headers);
+    notify::notify_best_effort(
+        env.as_ref(),
+        NotifyEvent::CipherDelete,
+        NotifyContext {
+            user_id: Some(claims.sub),
+            user_email: Some(claims.email),
+            cipher_id: Some(id),
+            meta,
+            ..Default::default()
+        },
+    )
+    .await;
+
     Ok(Json(cipher))
 }
 
@@ -263,6 +336,7 @@ pub async fn restore_cipher(
 pub async fn hard_delete_cipher(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<()>, AppError> {
     let db = db::get_db(&env)?;
@@ -278,6 +352,20 @@ pub async fn hard_delete_cipher(
     .run()
     .await?;
 
+    let meta = notify::extract_request_meta(&headers);
+    notify::notify_best_effort(
+        env.as_ref(),
+        NotifyEvent::CipherDelete,
+        NotifyContext {
+            user_id: Some(claims.sub),
+            user_email: Some(claims.email),
+            cipher_id: Some(id),
+            meta,
+            ..Default::default()
+        },
+    )
+    .await;
+
     Ok(Json(()))
 }
 
@@ -285,9 +373,10 @@ pub async fn hard_delete_cipher(
 pub async fn hard_delete_cipher_post(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<()>, AppError> {
-    hard_delete_cipher(claims, State(env), Path(id)).await
+    hard_delete_cipher(claims, State(env), headers, Path(id)).await
 }
 
 #[worker::send]

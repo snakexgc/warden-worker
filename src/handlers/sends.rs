@@ -1,5 +1,6 @@
 use axum::{
     extract::{Multipart, Path, Query, State},
+    http::HeaderMap,
     http::StatusCode,
     response::Response,
     Json,
@@ -19,6 +20,7 @@ use crate::{
     auth::Claims,
     db,
     error::AppError,
+    notify::{self, NotifyContext, NotifyEvent},
     models::send::{
         send_to_json, send_to_json_access, uuid_from_access_id, SendAccessData, SendDBModel,
         SendData, SendFileDBModel, SEND_TYPE_FILE, SEND_TYPE_TEXT,
@@ -229,6 +231,7 @@ pub async fn get_send(
 pub async fn delete_send(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Path(send_id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&env)?;
@@ -270,6 +273,21 @@ pub async fn delete_send(
     .run()
     .await?;
 
+    let meta = notify::extract_request_meta(&headers);
+    notify::notify_best_effort(
+        env.as_ref(),
+        NotifyEvent::SendDelete,
+        NotifyContext {
+            user_id: Some(claims.sub),
+            user_email: Some(claims.email),
+            send_id: Some(send_id),
+            detail: Some(format!("type={}", owned.r#type)),
+            meta,
+            ..Default::default()
+        },
+    )
+    .await;
+
     Ok(Json(json!({})))
 }
 
@@ -277,6 +295,7 @@ pub async fn delete_send(
 pub async fn post_send(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Json(payload): Json<SendData>,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&env)?;
@@ -339,6 +358,21 @@ pub async fn post_send(
     let send = get_send_by_id_and_user(&db, &send_id, &claims.sub)
         .await?
         .ok_or_else(|| AppError::Internal)?;
+
+    let meta = notify::extract_request_meta(&headers);
+    notify::notify_best_effort(
+        env.as_ref(),
+        NotifyEvent::SendCreate,
+        NotifyContext {
+            user_id: Some(claims.sub),
+            user_email: Some(claims.email),
+            send_id: Some(send_id),
+            detail: Some(format!("type={send_type}")),
+            meta,
+            ..Default::default()
+        },
+    )
+    .await;
     Ok(Json(send_to_json(&send)))
 }
 
@@ -346,6 +380,7 @@ pub async fn post_send(
 pub async fn post_send_file_v2(
     claims: Claims,
     State(env): State<Arc<Env>>,
+    headers: HeaderMap,
     Json(payload): Json<SendData>,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&env)?;
@@ -430,6 +465,28 @@ pub async fn post_send_file_v2(
     let send = get_send_by_id_and_user(&db, &send_id, &claims.sub)
         .await?
         .ok_or_else(|| AppError::Internal)?;
+
+    let send_id_for_notify = send_id.clone();
+    let file_name = data_value
+        .get("fileName")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "file".to_string());
+
+    let meta = notify::extract_request_meta(&headers);
+    notify::notify_best_effort(
+        env.as_ref(),
+        NotifyEvent::SendCreate,
+        NotifyContext {
+            user_id: Some(claims.sub),
+            user_email: Some(claims.email),
+            send_id: Some(send_id_for_notify),
+            detail: Some(format!("type={send_type}, file={file_name}")),
+            meta,
+            ..Default::default()
+        },
+    )
+    .await;
 
     Ok(Json(json!({
         "fileUploadType": 0,

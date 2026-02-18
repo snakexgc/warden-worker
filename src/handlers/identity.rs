@@ -15,6 +15,7 @@ use worker::{wasm_bindgen::JsValue, Env};
 use sha2::{Digest, Sha256};
 
 use crate::{auth::Claims, crypto, db, error::AppError, logging::targets, models::user::User, two_factor};
+use crate::notify::{self, NotifyContext, NotifyEvent};
 
 fn deserialize_trimmed_i32_opt<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
 where
@@ -450,6 +451,7 @@ pub async fn token(
             }
 
             let user_id = user.id.clone();
+            let user_email_for_notify = Some(user.email.clone());
             let device_identifier = payload.device_identifier.clone();
             let device_name = payload.device_name.clone();
             let device_type = payload.device_type;
@@ -544,6 +546,21 @@ pub async fn token(
                     Duration::days(30).num_seconds(),
                 )?;
             }
+
+            notify::notify_best_effort(
+                env.as_ref(),
+                NotifyEvent::Login,
+                NotifyContext {
+                    user_id: Some(user_id),
+                    user_email: user_email_for_notify,
+                    device_identifier,
+                    device_name,
+                    device_type,
+                    meta: notify::extract_request_meta(&headers),
+                    ..Default::default()
+                },
+            )
+            .await;
             Ok(resp)
         }
         "refresh_token" => {

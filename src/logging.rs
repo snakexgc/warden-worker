@@ -144,6 +144,7 @@ pub mod targets {
     #[allow(dead_code)]
     pub const CRYPTO: &str = "crypto";
     pub const EXTERNAL: &str = "external";
+    pub const NOTIFY: &str = "notify";
     #[allow(dead_code)]
     pub const ERROR: &str = "error";
     #[allow(dead_code)]
