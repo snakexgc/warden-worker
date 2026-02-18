@@ -336,23 +336,57 @@ pub async fn token(
                 .password
                 .ok_or_else(|| AppError::BadRequest("Missing password".to_string()))?;
 
-            let user: Value = db
+            let user_val: Value = match db
                 .prepare("SELECT * FROM users WHERE email = ?1")
                 .bind(&[username.to_lowercase().into()])?
                 .first(None)
                 .await
                 .map_err(|_| AppError::Unauthorized("Invalid credentials".to_string()))?
-                .ok_or_else(|| AppError::Unauthorized("Invalid credentials".to_string()))?;
-            let user: User = serde_json::from_value(user).map_err(|_| AppError::Internal)?;
-            // Securely compare the provided hash with the stored hash
-            if let Some(salt) = &user.password_salt {
-                if !crypto::verify_password(&password_hash, salt, &user.master_password_hash) {
+            {
+                Some(v) => v,
+                None => {
+                    notify::notify_best_effort(
+                        env.as_ref(),
+                        NotifyEvent::LoginFailed,
+                        NotifyContext {
+                            user_email: Some(username.clone()),
+                            device_identifier: payload.device_identifier.clone(),
+                            device_name: payload.device_name.clone(),
+                            device_type: payload.device_type,
+                            meta: notify::extract_request_meta(&headers),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
                     return Err(AppError::Unauthorized("Invalid credentials".to_string()));
                 }
-            } else if !constant_time_eq(
-                user.master_password_hash.as_bytes(),
-                password_hash.as_bytes(),
-            ) {
+            };
+            let user: User = serde_json::from_value(user_val).map_err(|_| AppError::Internal)?;
+            // Securely compare the provided hash with the stored hash
+            let password_valid = if let Some(salt) = &user.password_salt {
+                crypto::verify_password(&password_hash, salt, &user.master_password_hash)
+            } else {
+                constant_time_eq(
+                    user.master_password_hash.as_bytes(),
+                    password_hash.as_bytes(),
+                )
+            };
+
+            if !password_valid {
+                notify::notify_best_effort(
+                    env.as_ref(),
+                    NotifyEvent::LoginFailed,
+                    NotifyContext {
+                        user_id: Some(user.id.clone()),
+                        user_email: Some(user.email.clone()),
+                        device_identifier: payload.device_identifier.clone(),
+                        device_name: payload.device_name.clone(),
+                        device_type: payload.device_type,
+                        meta: notify::extract_request_meta(&headers),
+                        ..Default::default()
+                    },
+                )
+                .await;
                 return Err(AppError::Unauthorized("Invalid credentials".to_string()));
             }
 
@@ -439,6 +473,21 @@ pub async fn token(
                         &secret_enc,
                     )?;
                     if !two_factor::verify_totp_code(&secret_encoded, token)? {
+                        notify::notify_best_effort(
+                            env.as_ref(),
+                            NotifyEvent::LoginFailed,
+                            NotifyContext {
+                                user_id: Some(user.id.clone()),
+                                user_email: Some(user.email.clone()),
+                                detail: Some("2FA Verification Failed".to_string()),
+                                device_identifier: payload.device_identifier.clone(),
+                                device_name: payload.device_name.clone(),
+                                device_type: payload.device_type,
+                                meta: notify::extract_request_meta(&headers),
+                                ..Default::default()
+                            },
+                        )
+                        .await;
                         return Ok(invalid_two_factor_response());
                     }
 
