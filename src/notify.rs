@@ -12,6 +12,7 @@ const EVENTS_VAR_NAME: &str = "NOTIFY_EVENTS";
 pub enum NotifyEvent {
     Login,
     LoginFailed,
+    PasswordHint,
     PasswordChange,
     EmailChange,
     KdfChange,
@@ -30,6 +31,7 @@ impl NotifyEvent {
         match self {
             NotifyEvent::Login => "login",
             NotifyEvent::LoginFailed => "login_failed",
+            NotifyEvent::PasswordHint => "password_hint",
             NotifyEvent::PasswordChange => "password",
             NotifyEvent::EmailChange => "email",
             NotifyEvent::KdfChange => "kdf",
@@ -48,6 +50,7 @@ impl NotifyEvent {
         match self {
             NotifyEvent::Login => "登录成功",
             NotifyEvent::LoginFailed => "登录失败",
+            NotifyEvent::PasswordHint => "密码提示",
             NotifyEvent::PasswordChange => "修改主密码",
             NotifyEvent::EmailChange => "修改邮箱",
             NotifyEvent::KdfChange => "修改 KDF 设置",
@@ -66,6 +69,7 @@ impl NotifyEvent {
         match self {
             NotifyEvent::Login => "🔐",
             NotifyEvent::LoginFailed => "🚫",
+            NotifyEvent::PasswordHint => "💡",
             NotifyEvent::PasswordChange => "🔑",
             NotifyEvent::EmailChange => "📧",
             NotifyEvent::KdfChange => "⚙️",
@@ -84,6 +88,7 @@ impl NotifyEvent {
         match self {
             NotifyEvent::Login => "info",
             NotifyEvent::LoginFailed => "warning",
+            NotifyEvent::PasswordHint => "warning",
             NotifyEvent::PasswordChange => "warning",
             NotifyEvent::EmailChange => "warning",
             NotifyEvent::KdfChange => "warning",
@@ -256,6 +261,7 @@ fn parse_enabled_events(env: &Env) -> Vec<NotifyEvent> {
         return vec![
             NotifyEvent::Login,
             NotifyEvent::LoginFailed,
+            NotifyEvent::PasswordHint,
             NotifyEvent::PasswordChange,
             NotifyEvent::EmailChange,
             NotifyEvent::KdfChange,
@@ -279,6 +285,7 @@ fn parse_enabled_events(env: &Env) -> Vec<NotifyEvent> {
         match part {
             "login" => out.push(NotifyEvent::Login),
             "login_failed" | "login_fail" => out.push(NotifyEvent::LoginFailed),
+            "password_hint" | "password-hint" => out.push(NotifyEvent::PasswordHint),
             "password" | "password_change" => out.push(NotifyEvent::PasswordChange),
             "email" | "email_change" => out.push(NotifyEvent::EmailChange),
             "kdf" | "kdf_change" => out.push(NotifyEvent::KdfChange),
@@ -323,7 +330,22 @@ pub async fn notify_best_effort(env: &Env, event: NotifyEvent, ctx: NotifyContex
         }
     };
 
-    let content = format_markdown(event, &ctx);
+    if let Err(e) = send_markdown(&webhook, event, &ctx).await {
+        log::warn!(target: targets::NOTIFY, "notify send failed event={} err={:?}", event.key(), e);
+    }
+}
+
+pub fn is_webhook_configured(env: &Env) -> bool {
+    env.secret(WEBHOOK_SECRET_NAME).is_ok()
+}
+
+pub async fn send_password_hint(env: &Env, ctx: NotifyContext) -> Result<(), worker::Error> {
+    let webhook = env.secret(WEBHOOK_SECRET_NAME)?.to_string();
+    send_markdown(&webhook, NotifyEvent::PasswordHint, &ctx).await
+}
+
+async fn send_markdown(webhook: &str, event: NotifyEvent, ctx: &NotifyContext) -> Result<(), worker::Error> {
+    let content = format_markdown(event, ctx);
     let body = json!({
         "msgtype": "markdown",
         "markdown": { "content": content }
@@ -333,13 +355,7 @@ pub async fn notify_best_effort(env: &Env, event: NotifyEvent, ctx: NotifyContex
     let mut init = RequestInit::new();
     init.with_method(Method::Post);
     init.with_body(Some(JsValue::from_str(&body)));
-    let mut request = match Request::new_with_init(&webhook, &init) {
-        Ok(r) => r,
-        Err(e) => {
-            log::warn!(target: targets::NOTIFY, "notify request init failed: {:?}", e);
-            return;
-        }
-    };
+    let mut request = Request::new_with_init(webhook, &init)?;
 
     if let Ok(headers) = request.headers_mut() {
         let _ = headers.set("content-type", "application/json; charset=utf-8");
@@ -353,18 +369,11 @@ pub async fn notify_best_effort(env: &Env, event: NotifyEvent, ctx: NotifyContex
         ctx.meta.ip.as_deref()
     );
 
-    let res = Fetch::Request(request).send().await;
-    match res {
-        Ok(r) => {
-            let status = r.status_code();
-            if (200..300).contains(&status) {
-                log::info!(target: targets::NOTIFY, "notify sent event={} status={}", event.key(), status);
-            } else {
-                log::warn!(target: targets::NOTIFY, "notify failed event={} status={}", event.key(), status);
-            }
-        }
-        Err(e) => {
-            log::warn!(target: targets::NOTIFY, "notify send failed event={} err={:?}", event.key(), e);
-        }
+    let r = Fetch::Request(request).send().await?;
+    let status = r.status_code();
+    if (200..300).contains(&status) {
+        Ok(())
+    } else {
+        Err(worker::Error::RustError(format!("notify failed status={}", status)))
     }
 }

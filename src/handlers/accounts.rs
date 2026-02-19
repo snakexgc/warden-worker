@@ -1,13 +1,14 @@
 use axum::{extract::State, Json};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use chrono::Utc;
 use constant_time_eq::constant_time_eq;
+use rand::Rng;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
 use wasm_bindgen::JsValue;
-use worker::{query, Env};
+use worker::{query, Delay, Env};
 
 use crate::{
     auth::Claims,
@@ -23,6 +24,20 @@ const KDF_TYPE_PBKDF2: i32 = 0;
 const KDF_TYPE_ARGON2ID: i32 = 1;
 const ARGON2ID_MEMORY_DEFAULT_MB: i32 = 64;
 const ARGON2ID_PARALLELISM_DEFAULT: i32 = 4;
+
+fn clean_password_hint(password_hint: Option<String>) -> Option<String> {
+    match password_hint {
+        None => None,
+        Some(h) => {
+            let ht = h.trim();
+            if ht.is_empty() {
+                None
+            } else {
+                Some(ht.to_string())
+            }
+        }
+    }
+}
 
 fn validate_kdf(
     kdf_type: i32,
@@ -462,6 +477,7 @@ pub async fn register(
 
     let password_salt = crypto::generate_salt();
     let master_password_hash = crypto::hash_password(&payload.master_password_hash, &password_salt);
+    let master_password_hint = clean_password_hint(payload.master_password_hint);
 
     let user = User {
         id: Uuid::new_v4().to_string(),
@@ -470,7 +486,7 @@ pub async fn register(
         email_verified: false,
         avatar_color: None,
         master_password_hash,
-        master_password_hint: payload.master_password_hint,
+        master_password_hint,
         key: payload.user_symmetric_key,
         private_key: payload.user_asymmetric_keys.encrypted_private_key,
         public_key: payload.user_asymmetric_keys.public_key,
@@ -556,7 +572,7 @@ pub async fn change_master_password(
 
     let now = Utc::now().to_rfc3339();
     let security_stamp = Uuid::new_v4().to_string();
-    let master_password_hint = payload.master_password_hint.clone();
+    let master_password_hint = clean_password_hint(payload.master_password_hint.clone());
     let private_key = payload
         .user_asymmetric_keys
         .as_ref()
@@ -828,6 +844,73 @@ fn to_js_val<T: Into<JsValue>>(val: Option<T>) -> JsValue {
     val.map(Into::into).unwrap_or(JsValue::NULL)
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasswordHintRequest {
+    pub email: String,
+}
+
+#[worker::send]
+pub async fn password_hint(
+    State(env): State<Arc<Env>>,
+    headers: HeaderMap,
+    Json(payload): Json<PasswordHintRequest>,
+) -> Result<(StatusCode, Json<Value>), AppError> {
+    if !notify::is_webhook_configured(env.as_ref()) {
+        return Err(AppError::BadRequest(
+            "This server is not configured to provide password hints.".to_string(),
+        ));
+    }
+
+    let email = payload.email.trim().to_lowercase();
+    if email.is_empty() {
+        return Err(AppError::BadRequest("Missing email".to_string()));
+    }
+
+    let db = db::get_db(&env)?;
+    let row: Option<Value> = db
+        .prepare("SELECT master_password_hint FROM users WHERE email = ?1")
+        .bind(&[email.clone().into()])?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?;
+
+    const NO_HINT: &str = "当前未配置密码提示词";
+    let (registered, detail) = match row {
+        None => {
+            let sleep_ms = rand::thread_rng().gen_range(900..=1100);
+            Delay::from(std::time::Duration::from_millis(sleep_ms as u64)).await;
+            (false, NO_HINT.to_string())
+        }
+        Some(row) => {
+            let hint = row
+                .get("master_password_hint")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let hint = clean_password_hint(hint);
+            (true, hint.unwrap_or_else(|| NO_HINT.to_string()))
+        }
+    };
+
+    notify::send_password_hint(
+        env.as_ref(),
+        NotifyContext {
+            user_email: Some(email),
+            detail: Some(detail.clone()),
+            meta: notify::extract_request_meta(&headers),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    let status = if registered {
+        StatusCode::OK
+    } else {
+        StatusCode::NOT_FOUND
+    };
+    Ok((status, Json(json!({ "hint": detail }))))
+}
+
 #[worker::send]
 pub async fn send_verification_email() -> String {
     "fixed-token-to-mock".to_string()
@@ -836,6 +919,24 @@ pub async fn send_verification_email() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clean_password_hint_none() {
+        assert_eq!(clean_password_hint(None), None);
+    }
+
+    #[test]
+    fn clean_password_hint_blank_to_none() {
+        assert_eq!(clean_password_hint(Some("   ".to_string())), None);
+    }
+
+    #[test]
+    fn clean_password_hint_trims() {
+        assert_eq!(
+            clean_password_hint(Some("  hint  ".to_string())),
+            Some("hint".to_string())
+        );
+    }
 
     #[test]
     fn validate_kdf_pbkdf2_ok() {

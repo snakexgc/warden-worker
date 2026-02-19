@@ -125,6 +125,7 @@ WEWORK_WEBHOOK_URL
 - 配置与探测：`GET /api/config`、`GET /api/alive`、`GET /api/now`、`GET /api/version`
 - 登录：`POST /identity/accounts/prelogin`、`POST /identity/connect/token`
 - 账户安全：`POST /api/accounts/security-stamp` (踢出设备)
+- 密码提示：`POST /api/accounts/password-hint`（需要启用企业微信 Webhook）
 - 同步：`GET /api/sync`
 - 密码项：`POST /api/ciphers/create`、`PUT /api/ciphers/{id}`、`PUT /api/ciphers/{id}/delete`
 - 文件夹：`POST /api/folders`、`PUT /api/folders/{id}`、`DELETE /api/folders/{id}`
@@ -165,6 +166,7 @@ wrangler secret put WEWORK_WEBHOOK_URL
 **支持的事件列表：**
 - `login`：登录成功
 - `login_failed`：登录失败（密码错误、用户不存在、2FA 错误）
+- `password_hint`：密码提示（调用 `/api/accounts/password-hint` 时触发）
 - `password`：修改主密码
 - `email`：修改邮箱
 - `kdf`：修改 KDF 设置
