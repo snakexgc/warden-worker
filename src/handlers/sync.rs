@@ -2,7 +2,6 @@ use axum::{extract::{Query, State}, Json};
 use serde_json::Value;
 use serde::Deserialize;
 use std::sync::Arc;
-use worker::Env;
 
 use crate::{
     auth::Claims,
@@ -17,6 +16,7 @@ use crate::{
         sync::{Profile, SyncResponse, UserDecryption},
         user::User,
     },
+    router::AppState,
     two_factor,
 };
 
@@ -57,17 +57,17 @@ fn normalize_kdf_for_response(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SyncQuery {
+pub struct ExcludeSubdomainsQuery {
     exclude_domains: Option<bool>,
 }
 
 #[worker::send]
-pub async fn get_sync_data(
+pub async fn sync(
     claims: Claims,
-    State(env): State<Arc<Env>>,
-    Query(q): Query<SyncQuery>,
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ExcludeSubdomainsQuery>,
 ) -> Result<Json<SyncResponse>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let user_id = claims.sub;
 

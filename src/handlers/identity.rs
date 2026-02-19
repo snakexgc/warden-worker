@@ -11,11 +11,12 @@ use serde::de::{self, Deserializer};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
-use worker::{wasm_bindgen::JsValue, Env};
+use worker::wasm_bindgen::JsValue;
 use sha2::{Digest, Sha256};
 
 use crate::{auth::Claims, crypto, db, error::AppError, logging::targets, models::user::User, two_factor};
 use crate::notify::{self, NotifyContext, NotifyEvent};
+use crate::router::AppState;
 
 fn deserialize_trimmed_i32_opt<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
 where
@@ -131,7 +132,7 @@ fn normalize_kdf_for_response(
 
 fn generate_tokens_and_response(
     user: User,
-    env: &Arc<Env>,
+    state: &Arc<AppState>,
 ) -> Result<Value, AppError> {
     let now = Utc::now();
     let expires_in = Duration::hours(2);
@@ -149,7 +150,7 @@ fn generate_tokens_and_response(
         security_stamp: Some(user.security_stamp.clone()),
     };
 
-    let jwt_secret = env.secret("JWT_SECRET")?.to_string();
+    let jwt_secret = state.env.secret("JWT_SECRET")?.to_string();
     let access_token = encode(
         &Header::default(),
         &access_claims,
@@ -169,7 +170,7 @@ fn generate_tokens_and_response(
         amr: vec!["Application".into()],
         security_stamp: Some(user.security_stamp.clone()),
     };
-    let jwt_refresh_secret = env.secret("JWT_REFRESH_SECRET")?.to_string();
+    let jwt_refresh_secret = state.env.secret("JWT_REFRESH_SECRET")?.to_string();
     let refresh_token = encode(
         &Header::default(),
         &refresh_claims,
@@ -322,11 +323,11 @@ fn invalid_two_factor_response() -> Response {
 
 #[worker::send]
 pub async fn token(
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Form(payload): Form<TokenRequest>,
 ) -> Result<Response, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     match payload.grant_type.as_str() {
         "password" => {
             let username = payload
@@ -345,8 +346,9 @@ pub async fn token(
             {
                 Some(v) => v,
                 None => {
-                    notify::notify_best_effort(
-                        env.as_ref(),
+                    notify::notify_background(
+                        &state.ctx,
+                        state.env.clone(),
                         NotifyEvent::LoginFailed,
                         NotifyContext {
                             user_email: Some(username.clone()),
@@ -356,13 +358,11 @@ pub async fn token(
                             meta: notify::extract_request_meta(&headers),
                             ..Default::default()
                         },
-                    )
-                    .await;
+                    );
                     return Err(AppError::Unauthorized("Invalid credentials".to_string()));
                 }
             };
             let user: User = serde_json::from_value(user_val).map_err(|_| AppError::Internal)?;
-            // Securely compare the provided hash with the stored hash
             let password_valid = if let Some(salt) = &user.password_salt {
                 crypto::verify_password(&password_hash, salt, &user.master_password_hash).await
             } else {
@@ -373,8 +373,9 @@ pub async fn token(
             };
 
             if !password_valid {
-                notify::notify_best_effort(
-                    env.as_ref(),
+                notify::notify_background(
+                    &state.ctx,
+                    state.env.clone(),
                     NotifyEvent::LoginFailed,
                     NotifyContext {
                         user_id: Some(user.id.clone()),
@@ -385,8 +386,7 @@ pub async fn token(
                         meta: notify::extract_request_meta(&headers),
                         ..Default::default()
                     },
-                )
-                .await;
+                );
                 return Err(AppError::Unauthorized("Invalid credentials".to_string()));
             }
 
@@ -466,15 +466,16 @@ pub async fn token(
                         .await?
                         .ok_or_else(|| AppError::Internal)?;
                     let two_factor_key_b64 =
-                        env.secret("TWO_FACTOR_ENC_KEY").ok().map(|s| s.to_string());
+                        state.env.secret("TWO_FACTOR_ENC_KEY").ok().map(|s| s.to_string());
                     let secret_encoded = two_factor::decrypt_secret_with_optional_key(
                         two_factor_key_b64.as_deref(),
                         &user.id,
                         &secret_enc,
                     )?;
                     if !two_factor::verify_totp_code(&secret_encoded, token)? {
-                        notify::notify_best_effort(
-                            env.as_ref(),
+                        notify::notify_background(
+                            &state.ctx,
+                            state.env.clone(),
                             NotifyEvent::LoginFailed,
                             NotifyContext {
                                 user_id: Some(user.id.clone()),
@@ -486,8 +487,7 @@ pub async fn token(
                                 meta: notify::extract_request_meta(&headers),
                                 ..Default::default()
                             },
-                        )
-                        .await;
+                        );
                         return Ok(invalid_two_factor_response());
                     }
 
@@ -514,7 +514,7 @@ pub async fn token(
                 payload.two_factor_remember
             );
 
-            let mut response = generate_tokens_and_response(user, &env)?;
+            let mut response = generate_tokens_and_response(user, &state)?;
             let remember_token_to_set = remember_token_to_return.clone();
 
             if let Some(device_identifier) = device_identifier.as_deref() {
@@ -596,8 +596,9 @@ pub async fn token(
                 )?;
             }
 
-            notify::notify_best_effort(
-                env.as_ref(),
+            notify::notify_background(
+                &state.ctx,
+                state.env.clone(),
                 NotifyEvent::Login,
                 NotifyContext {
                     user_id: Some(user_id),
@@ -608,8 +609,7 @@ pub async fn token(
                     meta: notify::extract_request_meta(&headers),
                     ..Default::default()
                 },
-            )
-            .await;
+            );
             Ok(resp)
         }
         "refresh_token" => {
@@ -618,7 +618,7 @@ pub async fn token(
                 .or_else(|| get_cookie(&headers, "bw_refresh_token"))
                 .ok_or_else(|| AppError::BadRequest("Missing refresh_token".to_string()))?;
 
-            let jwt_refresh_secret = env.secret("JWT_REFRESH_SECRET")?.to_string();
+            let jwt_refresh_secret = state.env.secret("JWT_REFRESH_SECRET")?.to_string();
             let token_data = decode::<Claims>(
                 &refresh_token,
                 &DecodingKey::from_secret(jwt_refresh_secret.as_ref()),
@@ -644,7 +644,7 @@ pub async fn token(
                 return Err(AppError::Unauthorized("Invalid security stamp".to_string()));
             }
 
-            let response = generate_tokens_and_response(user, &env)?;
+            let response = generate_tokens_and_response(user, &state)?;
             let mut resp = Json(response.clone()).into_response();
             if let Some(v) = response.get("access_token").and_then(|v| v.as_str()) {
                 set_cookie(

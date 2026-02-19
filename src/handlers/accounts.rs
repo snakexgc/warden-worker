@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
 use wasm_bindgen::JsValue;
-use worker::{query, Delay, Env};
+use worker::{query, Delay};
 
 use crate::{
     auth::Claims,
@@ -17,6 +17,7 @@ use crate::{
     error::AppError,
     models::user::{KeyData, PreloginResponse, RegisterRequest, User},
     notify::{self, NotifyContext, NotifyEvent},
+    router::AppState,
     two_factor,
 };
 
@@ -236,9 +237,9 @@ pub struct AvatarData {
 #[worker::send]
 pub async fn profile(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let two_factor_enabled = two_factor::is_authenticator_enabled(&db, &claims.sub).await?;
     let user: User = query!(
@@ -273,7 +274,7 @@ pub async fn profile(
 #[worker::send]
 pub async fn post_profile(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     Json(payload): Json<ProfileData>,
 ) -> Result<Json<Value>, AppError> {
     let name = payload.name.unwrap_or_default();
@@ -284,7 +285,7 @@ pub async fn post_profile(
         ));
     }
 
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let now = Utc::now().to_rfc3339();
 
@@ -298,13 +299,13 @@ pub async fn post_profile(
         .await
         .map_err(|_| AppError::Database)?;
 
-    profile(claims, State(env)).await
+    profile(claims, State(state)).await
 }
 
 #[worker::send]
 pub async fn put_avatar(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     Json(payload): Json<AvatarData>,
 ) -> Result<Json<Value>, AppError> {
     if let Some(color) = payload.avatar_color.as_deref() {
@@ -316,7 +317,7 @@ pub async fn put_avatar(
         }
     }
 
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let now = Utc::now().to_rfc3339();
 
@@ -330,15 +331,15 @@ pub async fn put_avatar(
         .await
         .map_err(|_| AppError::Database)?;
 
-    profile(claims, State(env)).await
+    profile(claims, State(state)).await
 }
 
 #[worker::send]
 pub async fn post_security_stamp(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let now = Utc::now().to_rfc3339();
     let security_stamp = Uuid::new_v4().to_string();
@@ -386,19 +387,20 @@ pub async fn post_security_stamp(
 #[worker::send]
 pub async fn revision_date(
     _claims: Claims,
+    State(_state): State<Arc<AppState>>,
 ) -> Result<Json<i64>, AppError> {
     Ok(Json(chrono::Utc::now().timestamp_millis()))
 }
 
 #[worker::send]
 pub async fn prelogin(
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     Json(payload): Json<serde_json::Value>,
 ) -> Result<Json<PreloginResponse>, AppError> {
     let email = payload["email"]
         .as_str()
         .ok_or_else(|| AppError::BadRequest("Missing email".to_string()))?;
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
 
     let stmt = db.prepare(
         "SELECT kdf_type, kdf_iterations, kdf_memory, kdf_parallelism FROM users WHERE email = ?1",
@@ -441,10 +443,10 @@ pub async fn prelogin(
 
 #[worker::send]
 pub async fn register(
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     let user_count: Option<i64> = db
         .prepare("SELECT COUNT(1) AS user_count FROM users")
         .first(Some("user_count"))
@@ -452,7 +454,7 @@ pub async fn register(
         .map_err(|_| AppError::Database)?;
     let user_count = user_count.unwrap_or(0);
     if user_count == 0 {
-        let allowed_emails = env
+        let allowed_emails = state.env
             .secret("ALLOWED_EMAILS")
             .map_err(|_| AppError::Internal)?;
         let allowed_emails = allowed_emails
@@ -539,7 +541,7 @@ pub async fn register(
 #[worker::send]
 pub async fn change_master_password(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<ChangeMasterPasswordRequest>,
 ) -> Result<Json<Value>, AppError> {
@@ -550,7 +552,7 @@ pub async fn change_master_password(
         return Err(AppError::BadRequest("Missing userSymmetricKey".to_string()));
     }
 
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let user: Value = db
         .prepare("SELECT * FROM users WHERE id = ?1")
@@ -619,8 +621,9 @@ pub async fn change_master_password(
     .await
     .map_err(|_| AppError::Database)?;
 
-    notify::notify_best_effort(
-        env.as_ref(),
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
         NotifyEvent::PasswordChange,
         NotifyContext {
             user_id: Some(user.id),
@@ -628,8 +631,7 @@ pub async fn change_master_password(
             meta: notify::extract_request_meta(&headers),
             ..Default::default()
         },
-    )
-    .await;
+    );
 
     Ok(Json(json!({})))
 }
@@ -637,7 +639,7 @@ pub async fn change_master_password(
 #[worker::send]
 pub async fn change_email(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<ChangeEmailRequest>,
 ) -> Result<Json<Value>, AppError> {
@@ -653,7 +655,7 @@ pub async fn change_email(
 
     let new_email = payload.new_email.to_lowercase();
 
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let user: Value = db
         .prepare("SELECT * FROM users WHERE id = ?1")
@@ -716,9 +718,10 @@ pub async fn change_email(
         }
     })?;
 
-    notify::notify_best_effort(
-        env.as_ref(),
-        NotifyEvent::EmailChange, // Email change
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
+        NotifyEvent::EmailChange,
         NotifyContext {
             user_id: Some(claims.sub),
             user_email: Some(new_email),
@@ -726,8 +729,7 @@ pub async fn change_email(
             meta: notify::extract_request_meta(&headers),
             ..Default::default()
         },
-    )
-    .await;
+    );
 
     Ok(Json(json!({})))
 }
@@ -735,11 +737,11 @@ pub async fn change_email(
 #[worker::send]
 pub async fn post_kdf(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<ChangeKdfPayload>,
 ) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let user: Value = db
         .prepare("SELECT * FROM users WHERE id = ?1")
@@ -832,9 +834,10 @@ pub async fn post_kdf(
     .await
     .map_err(|_| AppError::Database)?;
 
-    notify::notify_best_effort(
-        env.as_ref(),
-        NotifyEvent::KdfChange, // KDF change updates the key/password hash
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
+        NotifyEvent::KdfChange,
         NotifyContext {
             user_id: Some(claims.sub),
             user_email: Some(user.email),
@@ -842,8 +845,7 @@ pub async fn post_kdf(
             meta: notify::extract_request_meta(&headers),
             ..Default::default()
         },
-    )
-    .await;
+    );
 
     Ok(Json(json!({})))
 }
@@ -860,11 +862,11 @@ pub struct PasswordHintRequest {
 
 #[worker::send]
 pub async fn password_hint(
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<PasswordHintRequest>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
-    if !notify::is_webhook_configured(env.as_ref()) {
+    if !notify::is_webhook_configured(&state.env) {
         return Err(AppError::BadRequest(
             "This server is not configured to provide password hints.".to_string(),
         ));
@@ -875,7 +877,7 @@ pub async fn password_hint(
         return Err(AppError::BadRequest("Missing email".to_string()));
     }
 
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     let row: Option<Value> = db
         .prepare("SELECT master_password_hint FROM users WHERE email = ?1")
         .bind(&[email.clone().into()])?
@@ -900,16 +902,16 @@ pub async fn password_hint(
         }
     };
 
-    notify::send_password_hint(
-        env.as_ref(),
+    notify::send_password_hint_background(
+        &state.ctx,
+        state.env.clone(),
         NotifyContext {
             user_email: Some(email),
             detail: Some(detail.clone()),
             meta: notify::extract_request_meta(&headers),
             ..Default::default()
         },
-    )
-    .await?;
+    );
 
     let status = if registered {
         StatusCode::OK
@@ -920,7 +922,7 @@ pub async fn password_hint(
 }
 
 #[worker::send]
-pub async fn send_verification_email() -> String {
+pub async fn send_verification_email(State(_state): State<Arc<AppState>>) -> String {
     "fixed-token-to-mock".to_string()
 }
 

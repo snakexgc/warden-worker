@@ -6,9 +6,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
-use worker::{wasm_bindgen::JsValue, Env};
+use worker::wasm_bindgen::JsValue;
 
-use crate::{auth::Claims, db, error::AppError};
+use crate::{auth::Claims, db, error::AppError, router::AppState};
 
 async fn ensure_devices_table(db: &worker::D1Database) -> Result<(), AppError> {
     db.prepare(
@@ -81,9 +81,9 @@ fn js_opt_i64(v: Option<i64>) -> JsValue {
 #[worker::send]
 pub async fn knowndevice(
     headers: HeaderMap,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     ensure_devices_table(&db).await?;
 
     let email_b64 = headers
@@ -136,11 +136,11 @@ pub struct PushTokenRequest {
 pub async fn device_token(
     claims: Claims,
     headers: HeaderMap,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     Path(device_identifier): Path<String>,
     Json(_payload): Json<PushTokenRequest>,
 ) -> Result<Json<()>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     ensure_devices_table(&db).await?;
 
@@ -175,9 +175,9 @@ pub async fn device_token(
 #[worker::send]
 pub async fn get_devices(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     ensure_devices_table(&db).await?;
 
@@ -249,10 +249,10 @@ pub async fn get_devices(
 pub async fn get_device_by_identifier(
     claims: Claims,
     headers: HeaderMap,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     Path(device_identifier): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     ensure_devices_table(&db).await?;
 

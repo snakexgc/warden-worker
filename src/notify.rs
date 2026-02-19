@@ -1,7 +1,7 @@
 use axum::http::HeaderMap;
 use chrono::Utc;
 use serde_json::json;
-use worker::{wasm_bindgen::JsValue, Env, Fetch, Method, Request, RequestInit};
+use worker::{wasm_bindgen::JsValue, Context, Env, Fetch, Method, Request, RequestInit};
 
 use crate::logging::targets;
 
@@ -335,6 +335,12 @@ pub async fn notify_best_effort(env: &Env, event: NotifyEvent, ctx: NotifyContex
     }
 }
 
+pub fn notify_background(context: &Context, env: Env, event: NotifyEvent, notify_ctx: NotifyContext) {
+    context.wait_until(async move {
+        notify_best_effort(&env, event, notify_ctx).await;
+    });
+}
+
 pub fn is_webhook_configured(env: &Env) -> bool {
     env.secret(WEBHOOK_SECRET_NAME).is_ok()
 }
@@ -342,6 +348,14 @@ pub fn is_webhook_configured(env: &Env) -> bool {
 pub async fn send_password_hint(env: &Env, ctx: NotifyContext) -> Result<(), worker::Error> {
     let webhook = env.secret(WEBHOOK_SECRET_NAME)?.to_string();
     send_markdown(&webhook, NotifyEvent::PasswordHint, &ctx).await
+}
+
+pub fn send_password_hint_background(context: &Context, env: Env, notify_ctx: NotifyContext) {
+    context.wait_until(async move {
+        if let Err(e) = send_password_hint(&env, notify_ctx).await {
+            log::warn!(target: targets::NOTIFY, "send_password_hint failed err={:?}", e);
+        }
+    });
 }
 
 async fn send_markdown(webhook: &str, event: NotifyEvent, ctx: &NotifyContext) -> Result<(), worker::Error> {

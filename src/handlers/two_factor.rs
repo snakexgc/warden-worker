@@ -6,12 +6,12 @@ use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 use totp_rs::{Algorithm, Secret, TOTP};
-use worker::Env;
 
 use crate::auth::Claims;
 use crate::db;
 use crate::error::AppError;
 use crate::notify::{self, NotifyContext, NotifyEvent};
+use crate::router::AppState;
 use crate::two_factor;
 
 #[derive(Debug, Deserialize)]
@@ -97,9 +97,9 @@ pub struct DisableAuthenticatorData {
 #[worker::send]
 pub async fn two_factor_status(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let enabled = two_factor::is_authenticator_enabled(&db, &claims.sub).await?;
     let providers: Vec<i32> = if enabled {
@@ -116,9 +116,9 @@ pub async fn two_factor_status(
 #[worker::send]
 pub async fn authenticator_request(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let now = Utc::now().to_rfc3339();
 
@@ -131,7 +131,7 @@ pub async fn authenticator_request(
     let user_email = user_email.ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
     let secret_encoded = two_factor::generate_totp_secret_base32_20();
-    let two_factor_key_b64 = env.secret("TWO_FACTOR_ENC_KEY").ok().map(|s| s.to_string());
+    let two_factor_key_b64 = state.env.secret("TWO_FACTOR_ENC_KEY").ok().map(|s| s.to_string());
     let secret_enc = two_factor::encrypt_secret_with_optional_key(
         two_factor_key_b64.as_deref(),
         &claims.sub,
@@ -140,7 +140,7 @@ pub async fn authenticator_request(
 
     two_factor::upsert_authenticator_secret(&db, &claims.sub, secret_enc, false, &now).await?;
 
-    let issuer = env
+    let issuer = state.env
         .var("TWO_FACTOR_ISSUER")
         .ok()
         .map(|v| v.to_string())
@@ -172,10 +172,10 @@ pub async fn authenticator_request(
 #[worker::send]
 pub async fn get_authenticator(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     Json(payload): Json<PasswordOrOtpData>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     payload.validate(&db, &claims.sub).await?;
 
@@ -184,7 +184,7 @@ pub async fn get_authenticator(
         let secret_enc = two_factor::get_authenticator_secret_enc(&db, &claims.sub)
             .await?
             .ok_or_else(|| AppError::Internal)?;
-        let two_factor_key_b64 = env.secret("TWO_FACTOR_ENC_KEY").ok().map(|s| s.to_string());
+        let two_factor_key_b64 = state.env.secret("TWO_FACTOR_ENC_KEY").ok().map(|s| s.to_string());
         two_factor::decrypt_secret_with_optional_key(two_factor_key_b64.as_deref(), &claims.sub, &secret_enc)?
     } else {
         two_factor::generate_totp_secret_base32_20()
@@ -200,11 +200,11 @@ pub async fn get_authenticator(
 #[worker::send]
 pub async fn activate_authenticator(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<EnableAuthenticatorData>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
 
     PasswordOrOtpData {
@@ -228,13 +228,14 @@ pub async fn activate_authenticator(
     }
 
     let now = Utc::now().to_rfc3339();
-    let two_factor_key_b64 = env.secret("TWO_FACTOR_ENC_KEY").ok().map(|s| s.to_string());
+    let two_factor_key_b64 = state.env.secret("TWO_FACTOR_ENC_KEY").ok().map(|s| s.to_string());
     let secret_enc = two_factor::encrypt_secret_with_optional_key(two_factor_key_b64.as_deref(), &claims.sub, &key)?;
     two_factor::upsert_authenticator_secret(&db, &claims.sub, secret_enc, true, &now).await?;
 
     let meta = notify::extract_request_meta(&headers);
-    notify::notify_best_effort(
-        env.as_ref(),
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
         NotifyEvent::TwoFactorEnable,
         NotifyContext {
             user_id: Some(claims.sub),
@@ -243,8 +244,7 @@ pub async fn activate_authenticator(
             meta,
             ..Default::default()
         },
-    )
-    .await;
+    );
 
     Ok(Json(json!({
         "enabled": true,
@@ -256,21 +256,21 @@ pub async fn activate_authenticator(
 #[worker::send]
 pub async fn activate_authenticator_put(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<EnableAuthenticatorData>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    activate_authenticator(claims, State(env), headers, Json(payload)).await
+    activate_authenticator(claims, State(state), headers, Json(payload)).await
 }
 
 #[worker::send]
 pub async fn disable_authenticator_vw(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<DisableAuthenticatorData>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
 
     let stored_hash: Option<String> = db
@@ -287,7 +287,7 @@ pub async fn disable_authenticator_vw(
     }
 
     if let Some(secret_enc) = two_factor::get_authenticator_secret_enc(&db, &claims.sub).await? {
-        let two_factor_key_b64 = env.secret("TWO_FACTOR_ENC_KEY").ok().map(|s| s.to_string());
+        let two_factor_key_b64 = state.env.secret("TWO_FACTOR_ENC_KEY").ok().map(|s| s.to_string());
         let secret_encoded =
             two_factor::decrypt_secret_with_optional_key(two_factor_key_b64.as_deref(), &claims.sub, &secret_enc)?;
         if secret_encoded.eq_ignore_ascii_case(payload.key.trim()) {
@@ -305,8 +305,9 @@ pub async fn disable_authenticator_vw(
     };
 
     let meta = notify::extract_request_meta(&headers);
-    notify::notify_best_effort(
-        env.as_ref(),
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
         NotifyEvent::TwoFactorDisable,
         NotifyContext {
             user_id: Some(claims.sub),
@@ -315,8 +316,7 @@ pub async fn disable_authenticator_vw(
             meta,
             ..Default::default()
         },
-    )
-    .await;
+    );
 
     Ok(Json(json!({
         "enabled": false,
@@ -328,18 +328,18 @@ pub async fn disable_authenticator_vw(
 #[worker::send]
 pub async fn authenticator_enable(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<EnableAuthenticatorRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let now = Utc::now().to_rfc3339();
 
     let secret_enc = two_factor::get_authenticator_secret_enc(&db, &claims.sub)
         .await?
         .ok_or_else(|| AppError::BadRequest("No pending authenticator setup".to_string()))?;
-    let two_factor_key_b64 = env.secret("TWO_FACTOR_ENC_KEY").ok().map(|s| s.to_string());
+    let two_factor_key_b64 = state.env.secret("TWO_FACTOR_ENC_KEY").ok().map(|s| s.to_string());
     let secret_encoded = match two_factor::decrypt_secret_with_optional_key(
         two_factor_key_b64.as_deref(),
         &claims.sub,
@@ -358,8 +358,9 @@ pub async fn authenticator_enable(
     two_factor::upsert_authenticator_secret(&db, &claims.sub, secret_enc, true, &now).await?;
 
     let meta = notify::extract_request_meta(&headers);
-    notify::notify_best_effort(
-        env.as_ref(),
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
         NotifyEvent::TwoFactorEnable,
         NotifyContext {
             user_id: Some(claims.sub),
@@ -368,24 +369,23 @@ pub async fn authenticator_enable(
             meta,
             ..Default::default()
         },
-    )
-    .await;
+    );
     Ok(Json(json!({})))
 }
 
 #[worker::send]
 pub async fn authenticator_disable(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<DisableAuthenticatorRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let secret_enc = two_factor::get_authenticator_secret_enc(&db, &claims.sub)
         .await?
         .ok_or_else(|| AppError::BadRequest("Authenticator not enabled".to_string()))?;
-    let two_factor_key_b64 = env.secret("TWO_FACTOR_ENC_KEY").ok().map(|s| s.to_string());
+    let two_factor_key_b64 = state.env.secret("TWO_FACTOR_ENC_KEY").ok().map(|s| s.to_string());
     let secret_encoded = two_factor::decrypt_secret_with_optional_key(
         two_factor_key_b64.as_deref(),
         &claims.sub,
@@ -398,8 +398,9 @@ pub async fn authenticator_disable(
     two_factor::disable_authenticator(&db, &claims.sub).await?;
 
     let meta = notify::extract_request_meta(&headers);
-    notify::notify_best_effort(
-        env.as_ref(),
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
         NotifyEvent::TwoFactorDisable,
         NotifyContext {
             user_id: Some(claims.sub),
@@ -408,7 +409,6 @@ pub async fn authenticator_disable(
             meta,
             ..Default::default()
         },
-    )
-    .await;
+    );
     Ok(Json(json!({})))
 }

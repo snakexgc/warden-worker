@@ -18,13 +18,12 @@ mod two_factor;
 pub async fn main(
     req: Request,
     env: Env,
-    _ctx: Context,
+    ctx: Context,
 ) -> Result<axum::http::Response<axum::body::Body>> {
     console_error_panic_hook::set_once();
     let log_level = logging::init_logging(&env);
     log::info!(target: logging::targets::API, "Logging initialized at level: {:?}", log_level);
 
-    // Extract CF info and inject into headers
     let (city, region, country) = {
         if let Some(cf) = req.cf() {
             (cf.city(), cf.region(), cf.country())
@@ -46,13 +45,12 @@ pub async fn main(
     inject("X-CF-Region", region);
     inject("X-CF-Country", country);
 
-    // Allow all origins for CORS, which is typical for a public API like Bitwarden's.
     let cors = CorsLayer::new()
         .allow_methods(Any)
         .allow_headers(Any)
         .allow_origin(Any);
 
-    let mut app = router::api_router(env).layer(cors);
+    let mut app = router::api_router(env, ctx).layer(cors);
 
-    Ok(app.call(http_req).await?)
+    Ok(Service::call(&mut app, http_req).await?)
 }

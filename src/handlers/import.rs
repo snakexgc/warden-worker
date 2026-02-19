@@ -3,7 +3,7 @@ use axum::http::HeaderMap;
 use chrono::Utc;
 use std::sync::Arc;
 use uuid::Uuid;
-use worker::{D1Database, D1PreparedStatement, Env};
+use worker::{D1Database, D1PreparedStatement};
 use wasm_bindgen::JsValue;
 
 use crate::auth::Claims;
@@ -13,17 +13,18 @@ use crate::models::cipher::CipherData;
 use crate::models::folder::Folder;
 use crate::models::import::ImportRequest;
 use crate::notify::{self, NotifyContext, NotifyEvent};
+use crate::router::AppState;
 
 const IMPORT_BATCH_SIZE: usize = 200;
 
 #[worker::send]
 pub async fn import_data(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(mut payload): Json<ImportRequest>,
 ) -> Result<Json<()>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let folder_count = payload.folders.len();
     let cipher_count = payload.ciphers.len();
@@ -107,8 +108,9 @@ pub async fn import_data(
     run_batch(&db, &mut cipher_stmts).await?;
 
     let meta = notify::extract_request_meta(&headers);
-    notify::notify_best_effort(
-        env.as_ref(),
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
         NotifyEvent::Import,
         NotifyContext {
             user_id: Some(claims.sub),
@@ -117,8 +119,7 @@ pub async fn import_data(
             meta,
             ..Default::default()
         },
-    )
-    .await;
+    );
 
     Ok(Json(()))
 }

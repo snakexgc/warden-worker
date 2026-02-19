@@ -4,14 +4,14 @@ use axum::{
     response::Response,
 };
 use std::sync::Arc;
-use worker::Env;
 
 use crate::error::AppError;
 use crate::logging::targets;
+use crate::router::AppState;
 
 #[worker::send]
 pub async fn get_icon(
-    State(_env): State<Arc<Env>>,
+    State(_state): State<Arc<AppState>>,
     Path(path): Path<String>,
 ) -> Result<Response, AppError> {
     let domain = path

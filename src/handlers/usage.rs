@@ -2,9 +2,8 @@ use axum::{extract::{Query, State}, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use worker::Env;
 
-use crate::{db, error::AppError};
+use crate::{db, error::AppError, router::AppState};
 
 const D1_MAX_BYTES: i64 = 500 * 1024 * 1024;
 
@@ -26,10 +25,10 @@ async fn sum_i64(db: &worker::D1Database, sql: &str, binds: &[worker::wasm_bindg
 
 #[worker::send]
 pub async fn d1_usage(
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     Query(q): Query<UsageQuery>,
 ) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     let user_id = q.user_id.as_deref();
 
     let (ciphers_bytes, sends_text_bytes, sends_file_meta_bytes) = match user_id {

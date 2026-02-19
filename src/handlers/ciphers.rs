@@ -3,13 +3,14 @@ use axum::http::HeaderMap;
 use chrono::Utc;
 use std::sync::Arc;
 use uuid::Uuid;
-use worker::{query, Env};
+use worker::query;
 
 use crate::auth::Claims;
 use crate::db;
 use crate::error::AppError;
 use crate::models::cipher::{Cipher, CipherData, CipherRequestData, CreateCipherRequest, CipherRequestFlat};
 use crate::notify::{self, NotifyContext, NotifyEvent};
+use crate::router::AppState;
 use axum::extract::Path;
 use serde::Deserialize;
 
@@ -19,11 +20,11 @@ pub struct CipherIdsRequest {
 }
 
 async fn get_cipher_dbmodel(
-    env: &Arc<Env>,
+    state: &Arc<AppState>,
     cipher_id: &str,
     user_id: &str,
 ) -> Result<crate::models::cipher::CipherDBModel, AppError> {
-    let db = db::get_db(env)?;
+    let db = db::get_db(&state.env)?;
     query!(
         &db,
         "SELECT * FROM ciphers WHERE id = ?1 AND user_id = ?2",
@@ -38,11 +39,11 @@ async fn get_cipher_dbmodel(
 
 async fn create_cipher_inner(
     claims: Claims,
-    env: &Arc<Env>,
+    state: &Arc<AppState>,
     cipher_data_req: CipherRequestData,
     collection_ids: Vec<String>,
 ) -> Result<Cipher, AppError> {
-    let db = db::get_db(env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let now = Utc::now();
     let now = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
@@ -108,7 +109,7 @@ async fn create_cipher_inner(
 #[worker::send]
 pub async fn create_cipher(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<CreateCipherRequest>,
 ) -> Result<Json<Cipher>, AppError> {
@@ -116,10 +117,11 @@ pub async fn create_cipher(
     let user_email = Some(claims.email.clone());
     let meta = notify::extract_request_meta(&headers);
 
-    let cipher = create_cipher_inner(claims, &env, payload.cipher, payload.collection_ids).await?;
+    let cipher = create_cipher_inner(claims, &state, payload.cipher, payload.collection_ids).await?;
 
-    notify::notify_best_effort(
-        env.as_ref(),
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
         NotifyEvent::CipherCreate,
         NotifyContext {
             user_id: Some(user_id),
@@ -128,8 +130,7 @@ pub async fn create_cipher(
             meta,
             ..Default::default()
         },
-    )
-    .await;
+    );
 
     Ok(Json(cipher))
 }
@@ -137,7 +138,7 @@ pub async fn create_cipher(
 #[worker::send]
 pub async fn post_ciphers(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<CipherRequestFlat>,
 ) -> Result<Json<Cipher>, AppError> {
@@ -145,10 +146,11 @@ pub async fn post_ciphers(
     let user_email = Some(claims.email.clone());
     let meta = notify::extract_request_meta(&headers);
 
-    let cipher = create_cipher_inner(claims, &env, payload.cipher, payload.collection_ids).await?;
+    let cipher = create_cipher_inner(claims, &state, payload.cipher, payload.collection_ids).await?;
 
-    notify::notify_best_effort(
-        env.as_ref(),
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
         NotifyEvent::CipherCreate,
         NotifyContext {
             user_id: Some(user_id),
@@ -157,8 +159,7 @@ pub async fn post_ciphers(
             meta,
             ..Default::default()
         },
-    )
-    .await;
+    );
 
     Ok(Json(cipher))
 }
@@ -166,12 +167,12 @@ pub async fn post_ciphers(
 #[worker::send]
 pub async fn update_cipher(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
     Json(payload): Json<CipherRequestData>,
 ) -> Result<Json<Cipher>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let now = Utc::now();
     let now = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
@@ -239,8 +240,9 @@ pub async fn update_cipher(
     .await?;
 
     let meta = notify::extract_request_meta(&headers);
-    notify::notify_best_effort(
-        env.as_ref(),
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
         NotifyEvent::CipherUpdate,
         NotifyContext {
             user_id: Some(claims.sub),
@@ -249,8 +251,7 @@ pub async fn update_cipher(
             meta,
             ..Default::default()
         },
-    )
-    .await;
+    );
 
     Ok(Json(cipher))
 }
@@ -258,16 +259,16 @@ pub async fn update_cipher(
 #[worker::send]
 pub async fn soft_delete_cipher(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Cipher>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let now = Utc::now();
     let now = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
-    let existing = get_cipher_dbmodel(&env, &id, &claims.sub).await?;
+    let existing = get_cipher_dbmodel(&state, &id, &claims.sub).await?;
 
     query!(
         &db,
@@ -286,8 +287,9 @@ pub async fn soft_delete_cipher(
     cipher.updated_at = now;
 
     let meta = notify::extract_request_meta(&headers);
-    notify::notify_best_effort(
-        env.as_ref(),
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
         NotifyEvent::CipherDelete,
         NotifyContext {
             user_id: Some(claims.sub),
@@ -296,8 +298,7 @@ pub async fn soft_delete_cipher(
             meta,
             ..Default::default()
         },
-    )
-    .await;
+    );
 
     Ok(Json(cipher))
 }
@@ -305,16 +306,16 @@ pub async fn soft_delete_cipher(
 #[worker::send]
 pub async fn restore_cipher(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Cipher>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let now = Utc::now();
     let now = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
-    let existing = get_cipher_dbmodel(&env, &id, &claims.sub).await?;
+    let existing = get_cipher_dbmodel(&state, &id, &claims.sub).await?;
 
     query!(
         &db,
@@ -332,9 +333,10 @@ pub async fn restore_cipher(
     cipher.updated_at = now;
 
     let meta = notify::extract_request_meta(&headers);
-    notify::notify_best_effort(
-        env.as_ref(),
-        NotifyEvent::CipherUpdate, // Restore is effectively an update
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
+        NotifyEvent::CipherUpdate,
         NotifyContext {
             user_id: Some(claims.sub),
             user_email: Some(claims.email),
@@ -343,8 +345,7 @@ pub async fn restore_cipher(
             meta,
             ..Default::default()
         },
-    )
-    .await;
+    );
 
     Ok(Json(cipher))
 }
@@ -352,11 +353,11 @@ pub async fn restore_cipher(
 #[worker::send]
 pub async fn hard_delete_cipher(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<()>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
 
     query!(
@@ -370,8 +371,9 @@ pub async fn hard_delete_cipher(
     .await?;
 
     let meta = notify::extract_request_meta(&headers);
-    notify::notify_best_effort(
-        env.as_ref(),
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
         NotifyEvent::CipherDelete,
         NotifyContext {
             user_id: Some(claims.sub),
@@ -380,8 +382,7 @@ pub async fn hard_delete_cipher(
             meta,
             ..Default::default()
         },
-    )
-    .await;
+    );
 
     Ok(Json(()))
 }
@@ -389,21 +390,21 @@ pub async fn hard_delete_cipher(
 #[worker::send]
 pub async fn hard_delete_cipher_post(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<()>, AppError> {
-    hard_delete_cipher(claims, State(env), headers, Path(id)).await
+    hard_delete_cipher(claims, State(state), headers, Path(id)).await
 }
 
 #[worker::send]
 pub async fn soft_delete_ciphers(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<CipherIdsRequest>,
 ) -> Result<Json<()>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let now = Utc::now();
     let now = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
@@ -424,8 +425,9 @@ pub async fn soft_delete_ciphers(
     }
 
     let meta = notify::extract_request_meta(&headers);
-    notify::notify_best_effort(
-        env.as_ref(),
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
         NotifyEvent::CipherDelete,
         NotifyContext {
             user_id: Some(claims.sub),
@@ -434,8 +436,7 @@ pub async fn soft_delete_ciphers(
             meta,
             ..Default::default()
         },
-    )
-    .await;
+    );
 
     Ok(Json(()))
 }
@@ -443,11 +444,11 @@ pub async fn soft_delete_ciphers(
 #[worker::send]
 pub async fn restore_ciphers(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<CipherIdsRequest>,
 ) -> Result<Json<()>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let now = Utc::now();
     let now = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
@@ -467,9 +468,10 @@ pub async fn restore_ciphers(
     }
 
     let meta = notify::extract_request_meta(&headers);
-    notify::notify_best_effort(
-        env.as_ref(),
-        NotifyEvent::CipherUpdate, // Restore
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
+        NotifyEvent::CipherUpdate,
         NotifyContext {
             user_id: Some(claims.sub),
             user_email: Some(claims.email),
@@ -477,8 +479,7 @@ pub async fn restore_ciphers(
             meta,
             ..Default::default()
         },
-    )
-    .await;
+    );
 
     Ok(Json(()))
 }
@@ -486,11 +487,11 @@ pub async fn restore_ciphers(
 #[worker::send]
 pub async fn hard_delete_ciphers(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<CipherIdsRequest>,
 ) -> Result<Json<()>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
 
     let count = payload.ids.len();
@@ -507,8 +508,9 @@ pub async fn hard_delete_ciphers(
     }
 
     let meta = notify::extract_request_meta(&headers);
-    notify::notify_best_effort(
-        env.as_ref(),
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
         NotifyEvent::CipherDelete,
         NotifyContext {
             user_id: Some(claims.sub),
@@ -517,8 +519,7 @@ pub async fn hard_delete_ciphers(
             meta,
             ..Default::default()
         },
-    )
-    .await;
+    );
 
     Ok(Json(()))
 }
@@ -526,9 +527,9 @@ pub async fn hard_delete_ciphers(
 #[worker::send]
 pub async fn hard_delete_ciphers_delete(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<CipherIdsRequest>,
 ) -> Result<Json<()>, AppError> {
-    hard_delete_ciphers(claims, State(env), headers, Json(payload)).await
+    hard_delete_ciphers(claims, State(state), headers, Json(payload)).await
 }

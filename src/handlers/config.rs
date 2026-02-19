@@ -1,23 +1,15 @@
-use axum::{http::HeaderMap, Json};
+use axum::{extract::State, http::HeaderMap, Json};
 use chrono::Utc;
 use serde_json::{json, Value};
+use std::sync::Arc;
+
+use crate::router::AppState;
 
 #[worker::send]
-pub async fn config(headers: HeaderMap) -> Json<Value> {
-    // let domain = crate::CONFIG.domain();
-    // Official available feature flags can be found here:
-    // Server (v2025.6.2): https://github.com/bitwarden/server/blob/d094be3267f2030bd0dc62106bc6871cf82682f5/src/Core/Constants.cs#L103
-    // Client (web-v2025.6.1): https://github.com/bitwarden/clients/blob/747c2fd6a1c348a57a76e4a7de8128466ffd3c01/libs/common/src/enums/feature-flag.enum.ts#L12
-    // Android (v2025.6.0): https://github.com/bitwarden/android/blob/b5b022caaad33390c31b3021b2c1205925b0e1a2/app/src/main/kotlin/com/x8bit/bitwarden/data/platform/manager/model/FlagKey.kt#L22
-    // iOS (v2025.6.0): https://github.com/bitwarden/ios/blob/ff06d9c6cc8da89f78f37f376495800201d7261a/BitwardenShared/Core/Platform/Models/Enum/FeatureFlag.swift#L7
-    // let mut feature_states =
-    //     parse_experimental_client_feature_flags(&crate::CONFIG.experimental_client_feature_flags());
-    // feature_states.insert("duo-redirect".to_string(), true);
-    // feature_states.insert("email-verification".to_string(), true);
-    // feature_states.insert("unauth-ui-refresh".to_string(), true);
-    // feature_states.insert("enable-pm-flight-recorder".to_string(), true);
-    // feature_states.insert("mobile-error-reporting".to_string(), true);
-
+pub async fn config(
+    State(_state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Json<Value> {
     let host = headers
         .get("host")
         .and_then(|v| v.to_str().ok())
@@ -28,11 +20,6 @@ pub async fn config(headers: HeaderMap) -> Json<Value> {
         .unwrap_or("https");
     let domain = format!("{proto}://{host}");
     Json(json!({
-        // Note: The clients use this version to handle backwards compatibility concerns
-        // This means they expect a version that closely matches the Bitwarden server version
-        // We should make sure that we keep this updated when we support the new server features
-        // Version history:
-        // - Individual cipher key encryption: 2024.2.0
         "version": "2025.12.0",
         "gitHash": "25cf6119-dirty",
         "server": {
@@ -50,7 +37,6 @@ pub async fn config(headers: HeaderMap) -> Json<Value> {
           "sso": null,
           "cloudRegion": null,
         },
-        // Bitwarden uses this for the self-hosted servers to indicate the default push technology
         "push": {
           "pushTechnology": 0,
           "vapidPublicKey": null
@@ -63,22 +49,22 @@ pub async fn config(headers: HeaderMap) -> Json<Value> {
 }
 
 #[worker::send]
-pub async fn now() -> Json<String> {
+pub async fn now(State(_state): State<Arc<AppState>>) -> Json<String> {
     Json(Utc::now().to_rfc3339())
 }
 
 #[worker::send]
-pub async fn alive() -> Json<String> {
-    now().await
+pub async fn alive(State(_state): State<Arc<AppState>>) -> Json<String> {
+    now(State(_state)).await
 }
 
 #[worker::send]
-pub async fn version() -> Json<&'static str> {
+pub async fn version(State(_state): State<Arc<AppState>>) -> Json<&'static str> {
     Json("2025.12.0")
 }
 
 #[worker::send]
-pub async fn webauthn() -> Json<Value> {
+pub async fn webauthn(State(_state): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({
         "object": "list",
         "data": [],

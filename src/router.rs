@@ -2,18 +2,28 @@ use axum::{
     routing::{get, post, put, delete},
     Router,
     response::Html,
+    extract::State as AxumState,
 };
 use axum::extract::DefaultBodyLimit;
 use std::sync::Arc;
-use worker::Env;
+use worker::{Context, Env};
 
 use crate::handlers::{accounts, ciphers, compat, config, identity, sync, folders, import, two_factor, devices, sends, usage, icons, settings};
 
-pub fn api_router(env: Env) -> Router {
-    let app_state = Arc::new(env);
+pub struct AppState {
+    pub env: Env,
+    pub ctx: Context,
+}
+
+async fn demo_html(AxumState(_state): AxumState<Arc<AppState>>) -> Html<&'static str> {
+    Html(include_str!("../static/demo.html"))
+}
+
+pub fn api_router(env: Env, ctx: Context) -> Router<()> {
+    let app_state = Arc::new(AppState { env, ctx });
 
     Router::new()
-        .route("/demo.html", get(|| async { Html(include_str!("../static/demo.html")) }))
+        .route("/demo.html", get(demo_html))
         .route("/icons/{*path}", get(icons::get_icon))
         // Identity/Auth routes
         .route("/identity/accounts/prelogin", post(accounts::prelogin))
@@ -90,7 +100,7 @@ pub fn api_router(env: Env) -> Router {
         .route("/api/policies", get(compat::get_policies))
         .route("/api/organizations", get(compat::get_organizations))
         // Main data sync route
-        .route("/api/sync", get(sync::get_sync_data))
+        .route("/api/sync", get(sync::sync))
         // Ciphers CRUD
         .route("/api/ciphers/create", post(ciphers::create_cipher))
         .route(

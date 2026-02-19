@@ -14,13 +14,14 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use uuid::Uuid;
-use worker::{query, Env};
+use worker::query;
 
 use crate::{
     auth::Claims,
     db,
     error::AppError,
     notify::{self, NotifyContext, NotifyEvent},
+    router::AppState,
     models::send::{
         send_to_json, send_to_json_access, uuid_from_access_id, SendAccessData, SendDBModel,
         SendData, SendFileDBModel, SEND_TYPE_FILE, SEND_TYPE_TEXT,
@@ -188,9 +189,9 @@ fn validate_send_password(send: &SendDBModel, password: Option<String>) -> Resul
 #[worker::send]
 pub async fn get_sends(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let rows: Vec<Value> = db
         .prepare("SELECT * FROM sends WHERE user_id = ?1 ORDER BY updated_at DESC")
@@ -216,10 +217,10 @@ pub async fn get_sends(
 #[worker::send]
 pub async fn get_send(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     Path(send_id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let send = get_send_by_id_and_user(&db, &send_id, &claims.sub)
         .await?
@@ -230,11 +231,11 @@ pub async fn get_send(
 #[worker::send]
 pub async fn delete_send(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(send_id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
 
     let owned = get_send_by_id_and_user(&db, &send_id, &claims.sub)
@@ -274,8 +275,9 @@ pub async fn delete_send(
     .await?;
 
     let meta = notify::extract_request_meta(&headers);
-    notify::notify_best_effort(
-        env.as_ref(),
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
         NotifyEvent::SendDelete,
         NotifyContext {
             user_id: Some(claims.sub),
@@ -285,8 +287,7 @@ pub async fn delete_send(
             meta,
             ..Default::default()
         },
-    )
-    .await;
+    );
 
     Ok(Json(json!({})))
 }
@@ -294,11 +295,11 @@ pub async fn delete_send(
 #[worker::send]
 pub async fn post_send(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<SendData>,
 ) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
 
     if payload.r#type == SEND_TYPE_FILE {
@@ -360,8 +361,9 @@ pub async fn post_send(
         .ok_or_else(|| AppError::Internal)?;
 
     let meta = notify::extract_request_meta(&headers);
-    notify::notify_best_effort(
-        env.as_ref(),
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
         NotifyEvent::SendCreate,
         NotifyContext {
             user_id: Some(claims.sub),
@@ -371,19 +373,18 @@ pub async fn post_send(
             meta,
             ..Default::default()
         },
-    )
-    .await;
+    );
     Ok(Json(send_to_json(&send)))
 }
 
 #[worker::send]
 pub async fn post_send_file_v2(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<SendData>,
 ) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
 
     if payload.r#type != SEND_TYPE_FILE {
@@ -474,8 +475,9 @@ pub async fn post_send_file_v2(
         .unwrap_or_else(|| "file".to_string());
 
     let meta = notify::extract_request_meta(&headers);
-    notify::notify_best_effort(
-        env.as_ref(),
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
         NotifyEvent::SendCreate,
         NotifyContext {
             user_id: Some(claims.sub),
@@ -485,8 +487,7 @@ pub async fn post_send_file_v2(
             meta,
             ..Default::default()
         },
-    )
-    .await;
+    );
 
     Ok(Json(json!({
         "fileUploadType": 0,
@@ -499,11 +500,11 @@ pub async fn post_send_file_v2(
 #[worker::send]
 pub async fn post_send_file_v2_data(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     Path((send_id, file_id)): Path<(String, String)>,
     mut multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let send = get_send_by_id_and_user(&db, &send_id, &claims.sub)
         .await?
@@ -688,11 +689,11 @@ pub async fn post_send_file_v2_data(
 
 #[worker::send]
 pub async fn post_access(
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     Path(access_id): Path<String>,
     Json(payload): Json<SendAccessData>,
 ) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     let send_id = uuid_from_access_id(&access_id).ok_or_else(|| AppError::NotFound("Send not found".to_string()))?;
     let send = get_send_by_id(&db, &send_id)
         .await?
@@ -711,11 +712,11 @@ pub async fn post_access(
 
 #[worker::send]
 pub async fn post_access_file(
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     Path((send_id, file_id)): Path<(String, String)>,
     Json(payload): Json<SendAccessData>,
 ) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     let send = get_send_by_id(&db, &send_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Send not found".to_string()))?;
@@ -735,7 +736,7 @@ pub async fn post_access_file(
 
     update_send_access_count(&db, &send.id, 1).await?;
 
-    let token = generate_download_token(&env, &send_id, &file_id)?;
+    let token = generate_download_token(&state, &send_id, &file_id)?;
     let url = format!("/api/sends/{send_id}/{file_id}?t={token}");
 
     Ok(Json(json!({
@@ -756,8 +757,8 @@ struct SendDownloadClaims {
     exp: usize,
 }
 
-fn generate_download_token(env: &Arc<Env>, send_id: &str, file_id: &str) -> Result<String, AppError> {
-    let secret = env.secret("JWT_SECRET")?.to_string();
+fn generate_download_token(state: &Arc<AppState>, send_id: &str, file_id: &str) -> Result<String, AppError> {
+    let secret = state.env.secret("JWT_SECRET")?.to_string();
     let exp = (Utc::now() + chrono::Duration::minutes(5)).timestamp() as usize;
     let claims = SendDownloadClaims {
         sub: format!("{send_id}/{file_id}"),
@@ -771,8 +772,8 @@ fn generate_download_token(env: &Arc<Env>, send_id: &str, file_id: &str) -> Resu
     Ok(token)
 }
 
-fn validate_download_token(env: &Arc<Env>, token: &str, send_id: &str, file_id: &str) -> Result<(), AppError> {
-    let secret = env.secret("JWT_SECRET")?.to_string();
+fn validate_download_token(state: &Arc<AppState>, token: &str, send_id: &str, file_id: &str) -> Result<(), AppError> {
+    let secret = state.env.secret("JWT_SECRET")?.to_string();
     let data = jsonwebtoken::decode::<SendDownloadClaims>(
         token,
         &jsonwebtoken::DecodingKey::from_secret(secret.as_bytes()),
@@ -788,12 +789,12 @@ fn validate_download_token(env: &Arc<Env>, token: &str, send_id: &str, file_id: 
 
 #[worker::send]
 pub async fn download_send(
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     Path((send_id, file_id)): Path<(String, String)>,
     Query(q): Query<DownloadQuery>,
 ) -> Result<Response, AppError> {
-    validate_download_token(&env, &q.t, &send_id, &file_id)?;
-    let db = db::get_db(&env)?;
+    validate_download_token(&state, &q.t, &send_id, &file_id)?;
+    let db = db::get_db(&state.env)?;
 
     let row: Option<Value> = db
         .prepare("SELECT * FROM send_files WHERE id = ?1 AND send_id = ?2 LIMIT 1")

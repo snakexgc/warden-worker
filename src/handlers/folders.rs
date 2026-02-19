@@ -2,21 +2,22 @@ use axum::{extract::State, Json};
 use chrono::Utc;
 use std::sync::Arc;
 use uuid::Uuid;
-use worker::{query, Env};
+use worker::query;
 
 use crate::auth::Claims;
 use crate::db;
 use crate::error::AppError;
 use crate::models::folder::{CreateFolderRequest, Folder, FolderResponse};
+use crate::router::AppState;
 use axum::extract::Path;
 
 #[worker::send]
 pub async fn create_folder(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     Json(payload): Json<CreateFolderRequest>,
 ) -> Result<Json<FolderResponse>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let now = Utc::now();
     let now = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
@@ -55,10 +56,10 @@ pub async fn create_folder(
 #[worker::send]
 pub async fn delete_folder(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<()>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
 
     query!(
@@ -76,11 +77,11 @@ pub async fn delete_folder(
 #[worker::send]
 pub async fn update_folder(
     claims: Claims,
-    State(env): State<Arc<Env>>,
+    State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(payload): Json<CreateFolderRequest>,
 ) -> Result<Json<FolderResponse>, AppError> {
-    let db = db::get_db(&env)?;
+    let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     let now = Utc::now();
     let now = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();

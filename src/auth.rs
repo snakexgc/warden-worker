@@ -5,17 +5,17 @@ use axum::{
 use jsonwebtoken::{decode, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use worker::Env;
 
 use crate::error::AppError;
+use crate::router::AppState;
 use serde_json::Value;
 use worker::D1Database;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub: String, // User ID
-    pub exp: usize,  // Expiration time
-    pub nbf: usize,  // Not before time
+    pub sub: String,
+    pub exp: usize,
+    pub nbf: usize,
 
     pub premium: bool,
     pub name: String,
@@ -25,11 +25,11 @@ pub struct Claims {
     pub security_stamp: Option<String>,
 }
 
-impl FromRequestParts<Arc<Env>> for Claims
+impl FromRequestParts<Arc<AppState>> for Claims
 {
     type Rejection = AppError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &Arc<Env>) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, state: &Arc<AppState>) -> Result<Self, Self::Rejection> {
         let token = parts
             .headers
             .get(header::AUTHORIZATION)
@@ -55,9 +55,8 @@ impl FromRequestParts<Arc<Env>> for Claims
             })
             .ok_or_else(|| AppError::Unauthorized("Missing or invalid token".to_string()))?;
 
-        let secret = state.secret("JWT_SECRET")?;
+        let secret = state.env.secret("JWT_SECRET")?;
 
-        // Decode and validate the token
         let decoding_key = DecodingKey::from_secret(secret.to_string().as_ref());
         let token_data = decode::<Claims>(&token, &decoding_key, &Validation::default())
             .map_err(|_| AppError::Unauthorized("Invalid token".to_string()))?;
