@@ -25,7 +25,7 @@ worker-macros = { version = "0.6", features = ['http'] }
 wasm-bindgen = "0.2.106"
 js-sys = "0.3"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["Crypto", "CryptoKey", "SubtleCrypto", "WorkerGlobalScope", "Pbkdf2Params"] }
+web-sys = { version = "0.3", features = ["Crypto", "CryptoKey", "SubtleCrypto", "WorkerGlobalScope", "Pbkdf2Params", "TextEncoder"] }
 console_error_panic_hook = "0.1.7"
 
 # Axum and Routing

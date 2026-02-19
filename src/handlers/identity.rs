@@ -364,7 +364,7 @@ pub async fn token(
             let user: User = serde_json::from_value(user_val).map_err(|_| AppError::Internal)?;
             // Securely compare the provided hash with the stored hash
             let password_valid = if let Some(salt) = &user.password_salt {
-                crypto::verify_password(&password_hash, salt, &user.master_password_hash)
+                crypto::verify_password(&password_hash, salt, &user.master_password_hash).await
             } else {
                 constant_time_eq(
                     user.master_password_hash.as_bytes(),

@@ -476,7 +476,9 @@ pub async fn register(
     )?;
 
     let password_salt = crypto::generate_salt();
-    let master_password_hash = crypto::hash_password(&payload.master_password_hash, &password_salt);
+    let master_password_hash = crypto::hash_password(&payload.master_password_hash, &password_salt)
+        .await
+        .map_err(|_| AppError::Internal)?;
     let master_password_hint = clean_password_hint(payload.master_password_hint);
 
     let user = User {
@@ -560,7 +562,7 @@ pub async fn change_master_password(
     let user: User = serde_json::from_value(user).map_err(|_| AppError::Internal)?;
 
     if let Some(salt) = &user.password_salt {
-        if !crypto::verify_password(&payload.master_password_hash, salt, &user.master_password_hash) {
+        if !crypto::verify_password(&payload.master_password_hash, salt, &user.master_password_hash).await {
             return Err(AppError::Unauthorized("Invalid credentials".to_string()));
         }
     } else if !constant_time_eq(
@@ -591,7 +593,9 @@ pub async fn change_master_password(
         validate_kdf(kdf_type, kdf_iterations, kdf_memory_in, kdf_parallelism_in)?;
 
     let password_salt = crypto::generate_salt();
-    let new_master_password_hash = crypto::hash_password(&payload.new_master_password_hash, &password_salt);
+    let new_master_password_hash = crypto::hash_password(&payload.new_master_password_hash, &password_salt)
+        .await
+        .map_err(|_| AppError::Internal)?;
 
     db.prepare(
         "UPDATE users SET master_password_hash = ?1, master_password_hint = ?2, key = ?3, private_key = ?4, public_key = ?5, kdf_type = ?6, kdf_iterations = ?7, kdf_memory = ?8, kdf_parallelism = ?9, security_stamp = ?10, updated_at = ?11, password_salt = ?12 WHERE id = ?13",
@@ -661,7 +665,7 @@ pub async fn change_email(
     let user: User = serde_json::from_value(user).map_err(|_| AppError::Internal)?;
 
     if let Some(salt) = &user.password_salt {
-        if !crypto::verify_password(&payload.master_password_hash, salt, &user.master_password_hash) {
+        if !crypto::verify_password(&payload.master_password_hash, salt, &user.master_password_hash).await {
             return Err(AppError::Unauthorized("Invalid credentials".to_string()));
         }
     } else if !constant_time_eq(
@@ -681,7 +685,9 @@ pub async fn change_email(
         validate_kdf(kdf_type, kdf_iterations, kdf_memory_in, kdf_parallelism_in)?;
 
     let password_salt = crypto::generate_salt();
-    let new_master_password_hash = crypto::hash_password(&payload.new_master_password_hash, &password_salt);
+    let new_master_password_hash = crypto::hash_password(&payload.new_master_password_hash, &password_salt)
+        .await
+        .map_err(|_| AppError::Internal)?;
 
     db.prepare(
         "UPDATE users SET email = ?1, email_verified = ?2, master_password_hash = ?3, key = ?4, kdf_type = ?5, kdf_iterations = ?6, kdf_memory = ?7, kdf_parallelism = ?8, security_stamp = ?9, updated_at = ?10, password_salt = ?11 WHERE id = ?12",
@@ -750,7 +756,7 @@ pub async fn post_kdf(
     };
 
     if let Some(salt) = &user.password_salt {
-        if !crypto::verify_password(provided_old_hash, salt, &user.master_password_hash) {
+        if !crypto::verify_password(provided_old_hash, salt, &user.master_password_hash).await {
             return Err(AppError::Unauthorized("Invalid credentials".to_string()));
         }
     } else if !constant_time_eq(
@@ -803,7 +809,9 @@ pub async fn post_kdf(
     let security_stamp = Uuid::new_v4().to_string();
 
     let password_salt = crypto::generate_salt();
-    let hashed_new_password = crypto::hash_password(new_master_password_hash, &password_salt);
+    let hashed_new_password = crypto::hash_password(new_master_password_hash, &password_salt)
+        .await
+        .map_err(|_| AppError::Internal)?;
 
     db.prepare(
         "UPDATE users SET master_password_hash = ?1, key = ?2, kdf_type = ?3, kdf_iterations = ?4, kdf_memory = ?5, kdf_parallelism = ?6, security_stamp = ?7, updated_at = ?8, password_salt = ?9 WHERE id = ?10",
