@@ -71,7 +71,7 @@ wrangler secret put WEWORK_WEBHOOK_URL
 wrangler deploy
 ```
 
-部署后，把 Workers URL 或自定义域名（例如 `https://key.snakexgc.com`）填入 Bitwarden 客户端的“自托管服务器 URL”。
+部署后，把 Workers URL 或自定义域名填入 Bitwarden 客户端的“自托管服务器 URL”。
 
 ### 6. 升级
 > 如果你曾经部署过旧版本并准备升级，建议在客户端 **导出密码库**  → **重新部署本项目（全新初始化数据库）** → **再导入密码库（可显著降低迁移/兼容成本）**。
