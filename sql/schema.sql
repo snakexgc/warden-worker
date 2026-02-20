@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS users (
     password_salt TEXT,
     equivalent_domains TEXT NOT NULL DEFAULT '[]',
     excluded_globals TEXT NOT NULL DEFAULT '[]',
+    ua_history TEXT DEFAULT '{"records":[]}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );

@@ -1,12 +1,15 @@
 use axum::http::HeaderMap;
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use worker::{wasm_bindgen::JsValue, Context, Env, Fetch, Method, Request, RequestInit};
 
+use crate::db::get_db;
 use crate::logging::targets;
 
 const WEBHOOK_SECRET_NAME: &str = "WEWORK_WEBHOOK_URL";
 const EVENTS_VAR_NAME: &str = "NOTIFY_EVENTS";
+const MAX_UA_HISTORY: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotifyEvent {
@@ -173,6 +176,58 @@ pub struct NotifyContext {
     pub send_id: Option<String>,
     pub detail: Option<String>,
     pub meta: RequestMeta,
+    pub is_new_ua: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UaRecord {
+    ua: String,
+    last_seen_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UaHistory {
+    records: Vec<UaRecord>,
+}
+
+impl Default for UaHistory {
+    fn default() -> Self {
+        Self { records: Vec::new() }
+    }
+}
+
+impl UaHistory {
+    fn is_new_ua(&self, ua: &str) -> bool {
+        !self.records.iter().any(|r| r.ua == ua)
+    }
+
+    fn update_ua(&mut self, ua: &str) {
+        let now = Utc::now()
+            .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+
+        if let Some(pos) = self.records.iter().position(|r| r.ua == ua) {
+            self.records.remove(pos);
+        }
+
+        self.records.push(UaRecord {
+            ua: ua.to_string(),
+            last_seen_at: now,
+        });
+
+        if self.records.len() > MAX_UA_HISTORY {
+            self.records.remove(0);
+        }
+    }
+
+    fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "{\"records\":[]}".to_string())
+    }
+
+    fn from_json(json_str: &str) -> Self {
+        serde_json::from_str(json_str).unwrap_or_default()
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -182,6 +237,51 @@ fn truncate(s: &str, max: usize) -> String {
     let mut out = s[..max].to_string();
     out.push_str("…");
     out
+}
+
+async fn get_user_ua_history(user_id: &str, env: &Env) -> Result<UaHistory, worker::Error> {
+    let db = match get_db(env) {
+        Ok(db) => db,
+        Err(e) => return Err(worker::Error::RustError(e.to_string())),
+    };
+    let query = "SELECT ua_history FROM users WHERE id = ?";
+    let result = db.prepare(query).bind(&[user_id.into()])?.first::<serde_json::Value>(None).await?;
+
+    match result {
+        Some(row) => {
+            let history_json = row.get("ua_history").and_then(|v| v.as_str()).unwrap_or("{\"records\":[]}");
+            Ok(UaHistory::from_json(history_json))
+        }
+        None => Ok(UaHistory::default()),
+    }
+}
+
+async fn update_user_ua_history(user_id: &str, env: &Env, ua: &str) -> Result<(), worker::Error> {
+    let db = match get_db(env) {
+        Ok(db) => db,
+        Err(e) => return Err(worker::Error::RustError(e.to_string())),
+    };
+
+    let query = "SELECT ua_history FROM users WHERE id = ?";
+    let result = db.prepare(query).bind(&[user_id.into()])?.first::<serde_json::Value>(None).await?;
+
+    let mut history = match result {
+        Some(row) => {
+            let history_json = row.get("ua_history").and_then(|v| v.as_str()).unwrap_or("{\"records\":[]}");
+            UaHistory::from_json(history_json)
+        }
+        None => UaHistory::default(),
+    };
+
+    history.update_ua(ua);
+
+    let update_query = "UPDATE users SET ua_history = ? WHERE id = ?";
+    db.prepare(update_query)
+        .bind(&[history.to_json().into(), user_id.into()])?
+        .run()
+        .await?;
+
+    Ok(())
 }
 
 fn format_markdown(event: NotifyEvent, ctx: &NotifyContext) -> String {
@@ -241,11 +341,18 @@ fn format_markdown(event: NotifyEvent, ctx: &NotifyContext) -> String {
         lines.push(format!("> <font color=\"comment\">🌐 网络：</font>{}", truncate(&loc_info, 128)));
     }
 
-    /*
     if let Some(ua) = ctx.meta.user_agent.as_deref() {
-        lines.push(format!("> <font color=\"comment\">💻 UA：</font>{}", truncate(ua, 512)));
+        let new_ua_tag = if ctx.is_new_ua {
+            "<font color=\"warning\">[新设备]</font> "
+        } else {
+            ""
+        };
+        lines.push(format!(
+            "> <font color=\"comment\">💻 UA：</font>{}{}",
+            new_ua_tag,
+            truncate(ua, 512)
+        ));
     }
-    */
 
     truncate(&lines.join("\n"), 3800)
 }
@@ -317,11 +424,26 @@ fn should_notify(env: &Env, event: NotifyEvent) -> bool {
     enabled.iter().any(|e| *e == event)
 }
 
-pub async fn notify_best_effort(env: &Env, event: NotifyEvent, ctx: NotifyContext) {
+pub async fn notify_best_effort(env: &Env, event: NotifyEvent, mut ctx: NotifyContext) {
     if !should_notify(env, event) {
         log::debug!(target: targets::NOTIFY, "notify skipped event={}", event.key());
         return;
     }
+
+    if let (Some(user_id), Some(ua)) = (ctx.user_id.as_deref(), ctx.meta.user_agent.as_deref()) {
+        match get_user_ua_history(user_id, env).await {
+            Ok(history) => {
+                ctx.is_new_ua = history.is_new_ua(ua);
+                if let Err(e) = update_user_ua_history(user_id, env, ua).await {
+                    log::warn!(target: targets::NOTIFY, "update ua history failed user_id={} err={:?}", user_id, e);
+                }
+            }
+            Err(e) => {
+                log::warn!(target: targets::NOTIFY, "get ua history failed user_id={} err={:?}", user_id, e);
+            }
+        }
+    }
+
     let webhook = match env.secret(WEBHOOK_SECRET_NAME) {
         Ok(s) => s.to_string(),
         Err(_) => {
