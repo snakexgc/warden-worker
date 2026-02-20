@@ -18,6 +18,107 @@ use crate::{auth::Claims, crypto, db, error::AppError, logging::targets, models:
 use crate::notify::{self, NotifyContext, NotifyEvent};
 use crate::router::AppState;
 
+/// 后台更新设备信息
+/// 将设备表的创建和更新操作放入后台执行，减少登录响应延迟
+fn update_device_background(
+    ctx: &worker::Context,
+    env: worker::Env,
+    user_id: String,
+    device_identifier: String,
+    device_name: Option<String>,
+    device_type: Option<i32>,
+    remember_token: Option<String>,
+) {
+    ctx.wait_until(async move {
+        log::debug!(
+            target: targets::DB,
+            "background device update started user_id={} device_id={}",
+            user_id,
+            device_identifier
+        );
+
+        let db = match db::get_db(&env) {
+            Ok(db) => db,
+            Err(e) => {
+                log::warn!(
+                    target: targets::DB,
+                    "background device update failed: cannot get database user_id={} error={:?}",
+                    user_id,
+                    e
+                );
+                return;
+            }
+        };
+
+        if let Err(e) = ensure_devices_table(&db).await {
+            log::warn!(
+                target: targets::DB,
+                "background device update failed: cannot ensure devices table user_id={} error={:?}",
+                user_id,
+                e
+            );
+            return;
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let remember_hash = remember_token.as_deref().map(sha256_hex);
+
+        match db
+            .prepare(
+                "INSERT INTO devices (id, user_id, device_identifier, device_name, device_type, remember_token_hash, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(user_id, device_identifier) DO UPDATE SET
+                   updated_at = excluded.updated_at,
+                   device_name = COALESCE(excluded.device_name, devices.device_name),
+                   device_type = COALESCE(excluded.device_type, devices.device_type),
+                   remember_token_hash = COALESCE(excluded.remember_token_hash, devices.remember_token_hash)",
+            )
+            .bind(&[
+                Uuid::new_v4().to_string().into(),
+                user_id.clone().into(),
+                device_identifier.clone().into(),
+                js_opt_string(device_name.clone()),
+                js_opt_i64(device_type.map(|v| v as i64)),
+                js_opt_string(remember_hash.clone()),
+                now.clone().into(),
+                now.into(),
+            ])
+        {
+            Ok(stmt) => {
+                match stmt.run().await {
+                    Ok(_) => {
+                        log::info!(
+                            target: targets::DB,
+                            "background device update success user_id={} device_id={} device_name={:?}",
+                            user_id,
+                            device_identifier,
+                            device_name
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            target: targets::DB,
+                            "background device update failed: database error user_id={} device_id={} error={:?}",
+                            user_id,
+                            device_identifier,
+                            e
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!(
+                    target: targets::DB,
+                    "background device update failed: bind error user_id={} device_id={} error={:?}",
+                    user_id,
+                    device_identifier,
+                    e
+                );
+            }
+        }
+    });
+}
+
 fn deserialize_trimmed_i32_opt<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
 where
     D: Deserializer<'de>,
@@ -517,36 +618,23 @@ pub async fn token(
             let mut response = generate_tokens_and_response(user, &state)?;
             let remember_token_to_set = remember_token_to_return.clone();
 
-            if let Some(device_identifier) = device_identifier.as_deref() {
-                ensure_devices_table(&db).await?;
-
-                let now = Utc::now().to_rfc3339();
-                let remember_hash = remember_token_to_return
-                    .as_deref()
-                    .map(sha256_hex);
-
-                db.prepare(
-                    "INSERT INTO devices (id, user_id, device_identifier, device_name, device_type, remember_token_hash, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                     ON CONFLICT(user_id, device_identifier) DO UPDATE SET
-                       updated_at = excluded.updated_at,
-                       device_name = COALESCE(excluded.device_name, devices.device_name),
-                       device_type = COALESCE(excluded.device_type, devices.device_type),
-                       remember_token_hash = COALESCE(excluded.remember_token_hash, devices.remember_token_hash)",
-                )
-                .bind(&[
-                    Uuid::new_v4().to_string().into(),
-                    user_id.clone().into(),
-                    device_identifier.into(),
-                    js_opt_string(device_name.clone()),
-                    js_opt_i64(device_type.map(|v| v as i64)),
-                    js_opt_string(remember_hash.clone()),
-                    now.clone().into(),
-                    now.into(),
-                ])?
-                .run()
-                .await
-                .map_err(|_| AppError::Database)?;
+            // 后台异步更新设备信息，减少登录响应延迟
+            if let Some(device_identifier) = device_identifier.clone() {
+                log::debug!(
+                    target: targets::AUTH,
+                    "scheduling background device update user_id={} device_id={}",
+                    user_id,
+                    device_identifier
+                );
+                update_device_background(
+                    &state.ctx,
+                    state.env.clone(),
+                    user_id.clone(),
+                    device_identifier,
+                    device_name.clone(),
+                    device_type,
+                    remember_token_to_return.clone(),
+                );
             }
 
             if let Some(token) = remember_token_to_return {
