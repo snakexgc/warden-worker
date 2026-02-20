@@ -732,7 +732,7 @@ pub async fn token(
                 return Err(AppError::Unauthorized("Invalid security stamp".to_string()));
             }
 
-            let response = generate_tokens_and_response(user, &state)?;
+            let response = generate_tokens_and_response(user.clone(), &state)?;
             let mut resp = Json(response.clone()).into_response();
             if let Some(v) = response.get("access_token").and_then(|v| v.as_str()) {
                 set_cookie(
@@ -750,6 +750,23 @@ pub async fn token(
                     Duration::days(30).num_seconds(),
                 )?;
             }
+
+            // 发送解锁通知 - 使用 refresh_token 通常表示解锁密码库
+            notify::notify_background(
+                &state.ctx,
+                state.env.clone(),
+                NotifyEvent::Unlock,
+                NotifyContext {
+                    user_id: Some(user.id.clone()),
+                    user_email: Some(user.email.clone()),
+                    device_identifier: payload.device_identifier.clone(),
+                    device_name: payload.device_name.clone(),
+                    device_type: payload.device_type,
+                    meta: notify::extract_request_meta(&headers),
+                    ..Default::default()
+                },
+            );
+
             Ok(resp)
         }
         _ => Err(AppError::BadRequest("Unsupported grant_type".to_string())),

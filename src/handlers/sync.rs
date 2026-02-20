@@ -1,4 +1,5 @@
 use axum::{extract::{Query, State}, Json};
+use axum::http::HeaderMap;
 use serde_json::Value;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -16,6 +17,7 @@ use crate::{
         sync::{Profile, SyncResponse, UserDecryption},
         user::User,
     },
+    notify::{self, NotifyContext, NotifyEvent},
     router::AppState,
     two_factor,
 };
@@ -66,6 +68,7 @@ pub async fn sync(
     claims: Claims,
     State(state): State<Arc<AppState>>,
     Query(q): Query<ExcludeSubdomainsQuery>,
+    headers: HeaderMap,
 ) -> Result<Json<SyncResponse>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
@@ -188,6 +191,19 @@ pub async fn sync(
         user_decryption,
         object: "sync".to_string(),
     };
+
+    // 发送同步通知 - 使用后台任务减少响应延迟
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
+        NotifyEvent::Sync,
+        NotifyContext {
+            user_id: Some(user_id),
+            user_email: Some(user_email),
+            meta: notify::extract_request_meta(&headers),
+            ..Default::default()
+        },
+    );
 
     Ok(Json(response))
 }

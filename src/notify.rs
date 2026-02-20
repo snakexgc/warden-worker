@@ -27,6 +27,8 @@ pub enum NotifyEvent {
     SendDelete,
     TwoFactorEnable,
     TwoFactorDisable,
+    Unlock,
+    Sync,
 }
 
 impl NotifyEvent {
@@ -46,6 +48,8 @@ impl NotifyEvent {
             NotifyEvent::SendDelete => "send_delete",
             NotifyEvent::TwoFactorEnable => "2fa_enable",
             NotifyEvent::TwoFactorDisable => "2fa_disable",
+            NotifyEvent::Unlock => "unlock",
+            NotifyEvent::Sync => "sync",
         }
     }
 
@@ -65,6 +69,8 @@ impl NotifyEvent {
             NotifyEvent::SendDelete => "删除 Send",
             NotifyEvent::TwoFactorEnable => "启用 2FA",
             NotifyEvent::TwoFactorDisable => "关闭 2FA",
+            NotifyEvent::Unlock => "解锁密码库",
+            NotifyEvent::Sync => "同步数据",
         }
     }
 
@@ -84,6 +90,8 @@ impl NotifyEvent {
             NotifyEvent::SendDelete => "🗑️",
             NotifyEvent::TwoFactorEnable => "🛡️",
             NotifyEvent::TwoFactorDisable => "🔓",
+            NotifyEvent::Unlock => "🔓",
+            NotifyEvent::Sync => "🔄",
         }
     }
 
@@ -96,6 +104,7 @@ impl NotifyEvent {
             NotifyEvent::EmailChange => "warning",
             NotifyEvent::KdfChange => "warning",
             NotifyEvent::CipherDelete | NotifyEvent::SendDelete => "warning",
+            NotifyEvent::Unlock => "info",
             _ => "comment",
         }
     }
@@ -380,6 +389,8 @@ fn parse_enabled_events(env: &Env) -> Vec<NotifyEvent> {
             NotifyEvent::SendDelete,
             NotifyEvent::TwoFactorEnable,
             NotifyEvent::TwoFactorDisable,
+            NotifyEvent::Unlock,
+            NotifyEvent::Sync,
         ];
     }
 
@@ -410,6 +421,8 @@ fn parse_enabled_events(env: &Env) -> Vec<NotifyEvent> {
             "send_delete" | "send.del" | "send_remove" => out.push(NotifyEvent::SendDelete),
             "2fa_enable" | "two_factor_enable" | "twofactor_enable" => out.push(NotifyEvent::TwoFactorEnable),
             "2fa_disable" | "two_factor_disable" | "twofactor_disable" => out.push(NotifyEvent::TwoFactorDisable),
+            "unlock" => out.push(NotifyEvent::Unlock),
+            "sync" => out.push(NotifyEvent::Sync),
             _ => {}
         }
     }
