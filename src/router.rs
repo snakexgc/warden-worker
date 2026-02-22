@@ -74,6 +74,15 @@ pub fn api_router(env: Env, ctx: Context) -> Router<()> {
         .route("/api/two-factor/authenticator/request", post(two_factor::authenticator_request))
         .route("/api/two-factor/authenticator/enable", post(two_factor::authenticator_enable))
         .route("/api/two-factor/authenticator/disable", post(two_factor::authenticator_disable))
+        .route("/api/two-factor/get-email", post(two_factor::get_email))
+        .route("/api/two-factor/send-email", post(two_factor::send_email))
+        .route(
+            "/api/two-factor/email",
+            put(two_factor::verify_email).delete(two_factor::disable_email),
+        )
+        .route("/api/two-factor/disable", post(two_factor::disable_twofactor).put(two_factor::disable_twofactor_put))
+        .route("/two-factor/send-email-login", post(two_factor::send_email_login))
+        .route("/api/two-factor/send-email-login", post(two_factor::send_email_login))
         .route("/api/sends", get(sends::get_sends).post(sends::post_send))
         .route("/api/sends/file/v2", post(sends::post_send_file_v2))
         .route("/api/sends/access/{access_id}", post(sends::post_access))

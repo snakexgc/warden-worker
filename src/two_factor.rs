@@ -1,15 +1,19 @@
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use base64::{engine::general_purpose, Engine as _};
+use chrono::Utc;
 use js_sys::Date;
 use rand::rngs::OsRng;
 use rand::RngCore;
+use serde::{Deserialize, Serialize};
 use totp_rs::{Algorithm, Secret, TOTP};
 use worker::D1Database;
 
 use crate::error::AppError;
 
 pub const TWO_FACTOR_PROVIDER_AUTHENTICATOR: i32 = 0;
+pub const TWO_FACTOR_PROVIDER_EMAIL: i32 = 1;
+pub const TWO_FACTOR_TYPE_EMAIL_VERIFICATION_CHALLENGE: i32 = 1002;
 
 pub fn generate_totp_secret_base32_20() -> String {
     let mut bytes = [0u8; 20];
@@ -199,6 +203,168 @@ pub fn verify_totp_code(secret_encoded: &str, token: &str) -> Result<bool, AppEr
     .map_err(|_| AppError::Internal)?;
     let unix_seconds = (Date::now() / 1000.0).floor() as u64;
     Ok(totp.check(token, unix_seconds))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailTokenData {
+    pub email: String,
+    pub last_token: Option<String>,
+    pub token_sent: i64,
+    pub attempts: u64,
+}
+
+impl EmailTokenData {
+    pub fn new(email: String, token: String) -> Self {
+        Self {
+            email,
+            last_token: Some(token),
+            token_sent: Utc::now().timestamp(),
+            attempts: 0,
+        }
+    }
+
+    pub fn set_token(&mut self, token: String) {
+        self.last_token = Some(token);
+        self.token_sent = Utc::now().timestamp();
+    }
+
+    pub fn reset_token(&mut self) {
+        self.last_token = None;
+        self.attempts = 0;
+    }
+
+    pub fn add_attempt(&mut self) {
+        self.attempts = self.attempts.saturating_add(1);
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    pub fn from_json(json_str: &str) -> Result<Self, AppError> {
+        serde_json::from_str(json_str).map_err(|_| AppError::Internal)
+    }
+}
+
+pub fn generate_email_token(token_size: u8) -> String {
+    let mut rng = OsRng;
+    let mut result = String::with_capacity(token_size as usize);
+    for _ in 0..token_size {
+        let digit = rng.next_u32() % 10;
+        result.push(char::from(b'0' + digit as u8));
+    }
+    result
+}
+
+pub async fn ensure_two_factor_email_table(db: &D1Database) -> Result<(), AppError> {
+    db.prepare(
+        "CREATE TABLE IF NOT EXISTS two_factor_email (
+            user_id TEXT PRIMARY KEY NOT NULL,
+            atype INTEGER NOT NULL DEFAULT 1,
+            enabled BOOLEAN NOT NULL DEFAULT 0,
+            data TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )",
+    )
+    .run()
+    .await
+    .map_err(|_| AppError::Database)?;
+    Ok(())
+}
+
+pub async fn get_email_2fa(
+    db: &D1Database,
+    user_id: &str,
+) -> Result<Option<(bool, String)>, AppError> {
+    ensure_two_factor_email_table(db).await?;
+    let result: Option<serde_json::Value> = db
+        .prepare("SELECT enabled, data FROM two_factor_email WHERE user_id = ?1 AND atype = 1")
+        .bind(&[user_id.into()])?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?;
+    
+    match result {
+        Some(row) => {
+            let enabled = row.get("enabled").and_then(|v| v.as_i64()).unwrap_or(0) == 1;
+            let data = row.get("data").and_then(|v| v.as_str()).unwrap_or("{}").to_string();
+            Ok(Some((enabled, data)))
+        }
+        None => Ok(None),
+    }
+}
+
+pub async fn is_email_2fa_enabled(db: &D1Database, user_id: &str) -> Result<bool, AppError> {
+    match get_email_2fa(db, user_id).await? {
+        Some((enabled, _)) => Ok(enabled),
+        None => Ok(false),
+    }
+}
+
+pub async fn upsert_email_2fa(
+    db: &D1Database,
+    user_id: &str,
+    atype: i32,
+    enabled: bool,
+    data: &str,
+    now: &str,
+) -> Result<(), AppError> {
+    ensure_two_factor_email_table(db).await?;
+    db.prepare(
+        "INSERT INTO two_factor_email (user_id, atype, enabled, data, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(user_id) DO UPDATE SET atype = excluded.atype, enabled = excluded.enabled, data = excluded.data, updated_at = excluded.updated_at",
+    )
+    .bind(&[
+        user_id.into(),
+        atype.into(),
+        (if enabled { 1 } else { 0 }).into(),
+        data.into(),
+        now.into(),
+        now.into(),
+    ])?
+    .run()
+    .await
+    .map_err(|_| AppError::Database)?;
+    Ok(())
+}
+
+pub async fn delete_email_2fa(db: &D1Database, user_id: &str) -> Result<(), AppError> {
+    ensure_two_factor_email_table(db).await?;
+    db.prepare("DELETE FROM two_factor_email WHERE user_id = ?1")
+        .bind(&[user_id.into()])?
+        .run()
+        .await
+        .map_err(|_| AppError::Database)?;
+    Ok(())
+}
+
+pub async fn get_email_2fa_verification(
+    db: &D1Database,
+    user_id: &str,
+) -> Result<Option<String>, AppError> {
+    ensure_two_factor_email_table(db).await?;
+    let result: Option<serde_json::Value> = db
+        .prepare("SELECT data FROM two_factor_email WHERE user_id = ?1 AND atype = ?2")
+        .bind(&[user_id.into(), TWO_FACTOR_TYPE_EMAIL_VERIFICATION_CHALLENGE.into()])?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?;
+    
+    match result {
+        Some(row) => {
+            let data = row.get("data").and_then(|v| v.as_str()).unwrap_or("{}").to_string();
+            Ok(Some(data))
+        }
+        None => Ok(None),
+    }
+}
+
+pub fn is_token_expired(token_sent: i64, max_seconds: i64) -> bool {
+    let now = Utc::now().timestamp();
+    now - token_sent > max_seconds
 }
 
 #[cfg(test)]

@@ -4,6 +4,7 @@
 PRAGMA foreign_keys = ON;
 
 DROP TABLE IF EXISTS devices;
+DROP TABLE IF EXISTS two_factor_email;
 DROP TABLE IF EXISTS two_factor_authenticator;
 DROP TABLE IF EXISTS folders;
 DROP TABLE IF EXISTS ciphers;
@@ -111,6 +112,16 @@ CREATE TABLE IF NOT EXISTS two_factor_authenticator (
     user_id TEXT PRIMARY KEY NOT NULL,
     enabled BOOLEAN NOT NULL DEFAULT 0,
     secret_enc TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS two_factor_email (
+    user_id TEXT PRIMARY KEY NOT NULL,
+    atype INTEGER NOT NULL DEFAULT 1,
+    enabled BOOLEAN NOT NULL DEFAULT 0,
+    data TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE

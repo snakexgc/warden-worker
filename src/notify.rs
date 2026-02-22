@@ -526,3 +526,96 @@ async fn send_markdown(webhook: &str, event: NotifyEvent, ctx: &NotifyContext) -
         Err(worker::Error::RustError(format!("notify failed status={}", status)))
     }
 }
+
+pub async fn send_email_token_webhook(
+    env: &Env,
+    email: &str,
+    token: &str,
+    email_type: EmailType,
+) -> Result<(), worker::Error> {
+    let webhook = match env.secret(WEBHOOK_SECRET_NAME) {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            log::warn!(target: targets::NOTIFY, "WEWORK_WEBHOOK_URL not configured");
+            return Err(worker::Error::RustError("WEWORK_WEBHOOK_URL not configured".to_string()));
+        }
+    };
+
+    let (_title, emoji) = match email_type {
+        EmailType::TwoFactorEmail => ("邮箱两步验证设置", "📧"),
+        EmailType::TwoFactorLogin => ("登录两步验证", "🔐"),
+    };
+
+    let now = Utc::now()
+        .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+
+    let content = format!(
+        "# {} Warden Worker 验证码\n> <font color=\"comment\">🕒 时间：</font>{}\n> <font color=\"comment\">📧 邮箱：</font>{}\n\n您的验证码是：<font color=\"warning\">**{}**</font>\n\n验证码有效期为10分钟，请尽快完成验证。",
+        emoji, now, email, token
+    );
+
+    let body = json!({
+        "msgtype": "markdown",
+        "markdown": { "content": content }
+    })
+    .to_string();
+
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post);
+    init.with_body(Some(JsValue::from_str(&body)));
+    let mut request = Request::new_with_init(&webhook, &init)?;
+
+    if let Ok(headers) = request.headers_mut() {
+        let _ = headers.set("content-type", "application/json; charset=utf-8");
+    }
+
+    log::info!(
+        target: targets::NOTIFY,
+        "sending email token email={} type={}",
+        email,
+        email_type.key()
+    );
+
+    let r = Fetch::Request(request).send().await?;
+    let status = r.status_code();
+    if (200..300).contains(&status) {
+        Ok(())
+    } else {
+        Err(worker::Error::RustError(format!("email webhook failed status={}", status)))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum EmailType {
+    TwoFactorEmail,
+    TwoFactorLogin,
+}
+
+impl EmailType {
+    pub fn key(self) -> &'static str {
+        match self {
+            EmailType::TwoFactorEmail => "2fa_email",
+            EmailType::TwoFactorLogin => "2fa_login",
+        }
+    }
+}
+
+pub fn send_email_token_background(
+    context: &Context,
+    env: Env,
+    email: String,
+    token: String,
+    email_type: EmailType,
+) {
+    context.wait_until(async move {
+        if let Err(e) = send_email_token_webhook(&env, &email, &token, email_type).await {
+            log::warn!(target: targets::NOTIFY, "send_email_token failed email={} err={:?}", email, e);
+        }
+    });
+}
+
+pub fn is_email_webhook_configured(env: &Env) -> bool {
+    env.secret(WEBHOOK_SECRET_NAME).is_ok()
+}
