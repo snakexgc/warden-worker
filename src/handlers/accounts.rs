@@ -460,26 +460,20 @@ pub async fn register(
     log::info!("Register payload: name={:?}, email={}", payload.name, payload.email);
     
     let db = db::get_db(&state.env)?;
-    let user_count: Option<i64> = db
-        .prepare("SELECT COUNT(1) AS user_count FROM users")
-        .first(Some("user_count"))
-        .await
-        .map_err(|_| AppError::Database)?;
-    let user_count = user_count.unwrap_or(0);
-    if user_count == 0 {
-        let allowed_emails = state.env
-            .secret("ALLOWED_EMAILS")
-            .map_err(|_| AppError::Internal)?;
-        let allowed_emails = allowed_emails
-            .as_ref()
-            .as_string()
-            .ok_or_else(|| AppError::Internal)?;
-        if allowed_emails
-            .split(",")
-            .all(|email| email.trim() != payload.email)
-        {
-            return Err(AppError::Unauthorized("Not allowed to signup".to_string()));
-        }
+    
+    // Check if email is in ALLOWED_EMAILS list
+    let allowed_emails = state.env
+        .secret("ALLOWED_EMAILS")
+        .map_err(|_| AppError::Internal)?;
+    let allowed_emails = allowed_emails
+        .as_ref()
+        .as_string()
+        .ok_or_else(|| AppError::Internal)?;
+    if allowed_emails
+        .split(",")
+        .all(|email| email.trim().to_lowercase() != payload.email.to_lowercase())
+    {
+        return Err(AppError::Unauthorized("Not allowed to signup".to_string()));
     }
     let now = Utc::now().to_rfc3339();
     let email = payload.email.to_lowercase();
