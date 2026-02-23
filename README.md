@@ -173,7 +173,7 @@ wrangler secret put WEWORK_WEBHOOK_URL
 - `cipher_delete`：删除密码项（含软删除/恢复/彻底删除）
 - `import`：导入数据
 - `send_create` / `send_delete`：Send 创建与删除
-- `2fa_enable` / `2fa_disable`：两步验证变更
+- `2fa_enable` / `2fa_disable` / `2fa_recover`：两步验证变更与恢复
 
 **特性：**
 - **GeoIP**：自动识别并显示操作 IP 的归属地（国家/地区/城市）。
@@ -220,6 +220,8 @@ wrangler secret put WEWORK_WEBHOOK_URL
 | `/api/two-factor/email` | PUT | 验证邮箱并启用邮箱 2FA |
 | `/api/two-factor/email` | DELETE | 禁用邮箱 2FA |
 | `/api/two-factor/disable` | POST/PUT | 通用禁用 2FA 端点（支持 type 参数） |
+| `/api/two-factor/get-recover` | POST | 获取两步验证恢复代码 |
+| `/api/two-factor/recover` | POST | 使用恢复码恢复账户（删除所有 2FA） |
 | `/two-factor/send-email-login` | POST | 登录时发送验证码邮件 |
 | `/api/two-factor/send-email-login` | POST | 登录时发送验证码邮件（API 路径） |
 

@@ -287,6 +287,8 @@ pub async fn activate_authenticator(
     let secret_enc = two_factor::encrypt_secret_with_optional_key(two_factor_key_b64.as_deref(), &claims.sub, &key)?;
     two_factor::upsert_authenticator_secret(&db, &claims.sub, secret_enc, true, &now).await?;
 
+    let _ = two_factor::get_or_create_recovery_code(&db, &claims.sub).await?;
+
     let meta = notify::extract_request_meta(&headers);
     notify::notify_background(
         &state.ctx,
@@ -717,6 +719,8 @@ pub async fn verify_email(
         email_data.email
     );
 
+    let _ = two_factor::get_or_create_recovery_code(&db, &claims.sub).await?;
+
     let meta = notify::extract_request_meta(&headers);
     notify::notify_background(
         &state.ctx,
@@ -757,9 +761,9 @@ pub async fn send_email_login(
         if email.is_empty() {
             return Err(AppError::BadRequest("Email is required".to_string()));
         }
-        
+
         let result: Option<serde_json::Value> = db
-            .prepare("SELECT id, master_password_hash FROM users WHERE email = ?1")
+            .prepare("SELECT id, master_password_hash, password_salt FROM users WHERE email = ?1")
             .bind(&[email.into()])?
             .first(None)
             .await
@@ -771,9 +775,16 @@ pub async fn send_email_login(
 
         let user_id = row.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let stored_hash = row.get("master_password_hash").and_then(|v| v.as_str()).unwrap_or("");
+        let password_salt = row.get("password_salt").and_then(|v| v.as_str());
 
         if let Some(master_password_hash) = &payload.master_password_hash {
-            if !constant_time_eq(stored_hash.as_bytes(), master_password_hash.as_bytes()) {
+            let password_valid = if let Some(salt) = password_salt {
+                crate::crypto::verify_password(master_password_hash, salt, stored_hash).await
+            } else {
+                constant_time_eq(stored_hash.as_bytes(), master_password_hash.as_bytes())
+            };
+
+            if !password_valid {
                 return Err(AppError::Unauthorized("Username or password is incorrect".to_string()));
             }
         }
@@ -996,4 +1007,127 @@ pub async fn disable_twofactor_put(
     payload: Json<DisableTwoFactorData>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     disable_twofactor(claims, state, headers, payload).await
+}
+
+#[worker::send]
+pub async fn get_recover(
+    claims: Claims,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<PasswordOrOtpData>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = db::get_db(&state.env)?;
+    claims.verify_security_stamp(&db).await?;
+    payload.validate(&db, &claims.sub).await?;
+
+    log::debug!(
+        target: targets::AUTH,
+        "get_recover called user_id={}",
+        claims.sub
+    );
+
+    let code = two_factor::get_or_create_recovery_code(&db, &claims.sub).await?;
+
+    log::info!(
+        target: targets::AUTH,
+        "get_recover success user_id={}",
+        claims.sub
+    );
+
+    Ok(Json(json!({
+        "code": code,
+        "object": "twoFactorRecover"
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoverTwoFactorData {
+    pub master_password_hash: String,
+    pub email: String,
+    pub recovery_code: String,
+}
+
+#[worker::send]
+pub async fn recover(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<RecoverTwoFactorData>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = db::get_db(&state.env)?;
+
+    log::info!(
+        target: targets::AUTH,
+        "recover called email={}",
+        payload.email
+    );
+
+    let result: Option<serde_json::Value> = db
+        .prepare("SELECT id, master_password_hash, password_salt FROM users WHERE email = ?1")
+        .bind(&[payload.email.to_lowercase().into()])?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?;
+
+    let Some(row) = result else {
+        log::warn!(
+            target: targets::AUTH,
+            "recover failed: user not found email={}",
+            payload.email
+        );
+        return Err(AppError::Unauthorized("Username or password is incorrect. Try again.".to_string()));
+    };
+
+    let user_id = row.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let stored_hash = row.get("master_password_hash").and_then(|v| v.as_str()).unwrap_or("");
+    let password_salt = row.get("password_salt").and_then(|v| v.as_str());
+
+    let password_valid = if let Some(salt) = password_salt {
+        crate::crypto::verify_password(&payload.master_password_hash, salt, stored_hash).await
+    } else {
+        constant_time_eq::constant_time_eq(stored_hash.as_bytes(), payload.master_password_hash.as_bytes())
+    };
+
+    if !password_valid {
+        log::warn!(
+            target: targets::AUTH,
+            "recover failed: password mismatch email={}",
+            payload.email
+        );
+        return Err(AppError::Unauthorized("Username or password is incorrect. Try again.".to_string()));
+    }
+
+    let recovery_valid = two_factor::verify_recovery_code(&db, &user_id, &payload.recovery_code).await?;
+    if !recovery_valid {
+        log::warn!(
+            target: targets::AUTH,
+            "recover failed: invalid recovery code email={}",
+            payload.email
+        );
+        return Err(AppError::BadRequest("Recovery code is incorrect. Try again.".to_string()));
+    }
+
+    two_factor::delete_all_two_factors(&db, &user_id).await?;
+    two_factor::clear_recovery_code(&db, &user_id).await?;
+
+    log::info!(
+        target: targets::AUTH,
+        "recover success: all 2fa removed user_id={} email={}",
+        user_id,
+        payload.email
+    );
+
+    let meta = notify::extract_request_meta(&headers);
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
+        NotifyEvent::TwoFactorRecover,
+        NotifyContext {
+            user_id: Some(user_id),
+            user_email: Some(payload.email),
+            meta,
+            ..Default::default()
+        },
+    );
+
+    Ok(Json(json!({})))
 }

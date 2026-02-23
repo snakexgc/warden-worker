@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS users (
     kdf_parallelism INTEGER,
     security_stamp TEXT,
     password_salt TEXT,
+    totp_recover TEXT,
     equivalent_domains TEXT NOT NULL DEFAULT '[]',
     excluded_globals TEXT NOT NULL DEFAULT '[]',
     ua_history TEXT DEFAULT '{"records":[]}',

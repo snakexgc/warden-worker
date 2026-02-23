@@ -394,6 +394,51 @@ fn set_cookie(
     Ok(())
 }
 
+async fn get_email_2fa_display_info(
+    providers: &[i32],
+    user_id: &str,
+    state: &Arc<AppState>,
+) -> Option<(String, String)> {
+    if !providers.contains(&two_factor::TWO_FACTOR_PROVIDER_EMAIL) {
+        return None;
+    }
+
+    let db = match db::get_db(&state.env) {
+        Ok(db) => db,
+        Err(_) => return None,
+    };
+
+    let (_, data) = match two_factor::get_email_2fa(&db, user_id).await {
+        Ok(Some((enabled, data))) if enabled => (enabled, data),
+        _ => return None,
+    };
+
+    let email_data = match two_factor::EmailTokenData::from_json(&data) {
+        Ok(d) => d,
+        Err(_) => return None,
+    };
+
+    let obscured = obscure_email(&email_data.email);
+    Some((obscured, email_data.email))
+}
+
+fn obscure_email(email: &str) -> String {
+    let parts: Vec<&str> = email.split('@').collect();
+    if parts.len() != 2 {
+        return "***".to_string();
+    }
+    let name = parts[0];
+    let domain = parts[1];
+
+    let obscured_name = if name.len() <= 2 {
+        "*".repeat(name.len())
+    } else {
+        format!("{}***", &name[..2])
+    };
+
+    format!("{}@{}", obscured_name, domain)
+}
+
 fn two_factor_required_response(providers: &[i32], email_2fa_data: Option<(String, String)>) -> Response {
     let mut providers2 = serde_json::Map::new();
     for &p in providers {
@@ -422,112 +467,6 @@ fn two_factor_required_response(providers: &[i32], email_2fa_data: Option<(Strin
         .into_response()
 }
 
-/// 自动发送邮箱验证码（如果邮箱是唯一的2FA选项）
-async fn auto_send_email_2fa_if_needed(
-    providers: &[i32],
-    user_id: &str,
-    _user_email: &str,
-    state: &Arc<AppState>,
-) -> Option<(String, String)> {
-    // 只有当邮箱是唯一的2FA选项时才自动发送
-    if providers.len() == 1 && providers[0] == two_factor::TWO_FACTOR_PROVIDER_EMAIL {
-        let db = match db::get_db(&state.env) {
-            Ok(db) => db,
-            Err(_) => return None,
-        };
-
-        // 检查webhook是否配置
-        if !notify::is_email_webhook_configured(&state.env) {
-            log::warn!(
-                target: targets::AUTH,
-                "auto_send_email_2fa: webhook not configured user_id={}",
-                user_id
-            );
-            return None;
-        }
-
-        // 获取邮箱2FA数据
-        let (_, data) = match two_factor::get_email_2fa(&db, user_id).await {
-            Ok(Some((enabled, data))) if enabled => (enabled, data),
-            _ => {
-                log::warn!(
-                    target: targets::AUTH,
-                    "auto_send_email_2fa: email 2fa not enabled user_id={}",
-                    user_id
-                );
-                return None;
-            }
-        };
-
-        let mut email_data = match two_factor::EmailTokenData::from_json(&data) {
-            Ok(d) => d,
-            Err(_) => return None,
-        };
-
-        // 生成新token
-        let generated_token = two_factor::generate_email_token(6);
-        email_data.set_token(generated_token.clone());
-
-        // 保存到数据库
-        let now = Utc::now().to_rfc3339();
-        if let Err(e) = two_factor::upsert_email_2fa(
-            &db,
-            user_id,
-            two_factor::TWO_FACTOR_PROVIDER_EMAIL,
-            true,
-            &email_data.to_json(),
-            &now,
-        ).await {
-            log::warn!(
-                target: targets::AUTH,
-                "auto_send_email_2fa: failed to save token user_id={} error={:?}",
-                user_id,
-                e
-            );
-            return None;
-        }
-
-        // 发送验证码
-        notify::send_email_token_background(
-            &state.ctx,
-            state.env.clone(),
-            email_data.email.clone(),
-            generated_token,
-            notify::EmailType::TwoFactorLogin,
-        );
-
-        log::info!(
-            target: targets::AUTH,
-            "auto_send_email_2fa: sent email login token user_id={} email={}",
-            user_id,
-            email_data.email
-        );
-
-        // 返回模糊化的邮箱地址
-        let obscured_email = obscure_email(&email_data.email);
-        return Some((obscured_email, email_data.email));
-    }
-    None
-}
-
-/// 模糊化邮箱地址，只显示前两个字符和域名
-fn obscure_email(email: &str) -> String {
-    let parts: Vec<&str> = email.split('@').collect();
-    if parts.len() != 2 {
-        return "***".to_string();
-    }
-    let name = parts[0];
-    let domain = parts[1];
-
-    let obscured_name = if name.len() <= 2 {
-        "*".repeat(name.len())
-    } else {
-        format!("{}***", &name[..2])
-    };
-
-    format!("{}@{}", obscured_name, domain)
-}
-
 fn invalid_two_factor_response(providers: &[i32]) -> Response {
     let mut providers2 = serde_json::Map::new();
     for &p in providers {
@@ -547,6 +486,7 @@ fn invalid_two_factor_response(providers: &[i32]) -> Response {
 }
 
 #[worker::send]
+#[allow(unused_assignments)]
 pub async fn token(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -618,7 +558,7 @@ pub async fn token(
             let authenticator_enabled = two_factor::is_authenticator_enabled(&db, &user.id).await?;
             let email_2fa_enabled = two_factor::is_email_2fa_enabled(&db, &user.id).await?;
             let two_factor_enabled = authenticator_enabled || email_2fa_enabled;
-            
+
             let mut providers: Vec<i32> = Vec::new();
             if authenticator_enabled {
                 providers.push(two_factor::TWO_FACTOR_PROVIDER_AUTHENTICATOR);
@@ -626,8 +566,11 @@ pub async fn token(
             if email_2fa_enabled {
                 providers.push(two_factor::TWO_FACTOR_PROVIDER_EMAIL);
             }
+            // 注意：Recovery Code (type=8) 不在这里添加，因为它不是常规的2FA方式
+            // 它只在登录验证时作为一种特殊的恢复选项处理
             
             let mut remember_token_to_return: Option<String> = None;
+            let mut two_factor_verified: bool = false;
             if two_factor_enabled {
                 let wants_remember = payload.two_factor_remember.unwrap_or(0) == 1;
                 let provider = payload.two_factor_provider;
@@ -635,15 +578,13 @@ pub async fn token(
 
                 if provider.is_none() && token.is_none() {
                     let Some(device_identifier) = payload.device_identifier.as_deref() else {
-                        // 没有设备标识符，尝试自动发送邮箱验证码
-                        let email_data = auto_send_email_2fa_if_needed(&providers, &user.id, &user.email, &state).await;
+                        let email_data = get_email_2fa_display_info(&providers, &user.id, &state).await;
                         return Ok(two_factor_required_response(&providers, email_data));
                     };
                     let cookie_token = get_cookie(&headers, "twoFactorRemember")
                         .or_else(|| get_cookie(&headers, "TwoFactorRemember"));
                     let Some(cookie_token) = cookie_token.as_deref() else {
-                        // 没有记住设备cookie，尝试自动发送邮箱验证码
-                        let email_data = auto_send_email_2fa_if_needed(&providers, &user.id, &user.email, &state).await;
+                        let email_data = get_email_2fa_display_info(&providers, &user.id, &state).await;
                         return Ok(two_factor_required_response(&providers, email_data));
                     };
 
@@ -660,27 +601,26 @@ pub async fn token(
                         .and_then(|v| v.get("remember_token_hash").cloned())
                         .and_then(|v| v.as_str().map(|s| s.to_string()));
                     let Some(stored_hash) = stored_hash else {
-                        // 没有存储的记住token，尝试自动发送邮箱验证码
-                        let email_data = auto_send_email_2fa_if_needed(&providers, &user.id, &user.email, &state).await;
+                        let email_data = get_email_2fa_display_info(&providers, &user.id, &state).await;
                         return Ok(two_factor_required_response(&providers, email_data));
                     };
                     let candidate_hash = sha256_hex(cookie_token.trim());
                     if !constant_time_eq(stored_hash.as_bytes(), candidate_hash.as_bytes()) {
-                        // 记住token不匹配，尝试自动发送邮箱验证码
-                        let email_data = auto_send_email_2fa_if_needed(&providers, &user.id, &user.email, &state).await;
+                        let email_data = get_email_2fa_display_info(&providers, &user.id, &state).await;
                         return Ok(two_factor_required_response(&providers, email_data));
                     }
 
+                    two_factor_verified = true;
                     if wants_remember && payload.device_identifier.is_some() {
                         remember_token_to_return = Some(generate_remember_token());
                     }
                 } else if provider == Some(5) {
                     let Some(device_identifier) = payload.device_identifier.as_deref() else {
-                        let email_data = auto_send_email_2fa_if_needed(&providers, &user.id, &user.email, &state).await;
+                        let email_data = get_email_2fa_display_info(&providers, &user.id, &state).await;
                         return Ok(two_factor_required_response(&providers, email_data));
                     };
                     let Some(token) = token.as_deref() else {
-                        let email_data = auto_send_email_2fa_if_needed(&providers, &user.id, &user.email, &state).await;
+                        let email_data = get_email_2fa_display_info(&providers, &user.id, &state).await;
                         return Ok(two_factor_required_response(&providers, email_data));
                     };
 
@@ -697,17 +637,17 @@ pub async fn token(
                         .and_then(|v| v.get("remember_token_hash").cloned())
                         .and_then(|v| v.as_str().map(|s| s.to_string()));
                     let Some(stored_hash) = stored_hash else {
-                        let email_data = auto_send_email_2fa_if_needed(&providers, &user.id, &user.email, &state).await;
+                        let email_data = get_email_2fa_display_info(&providers, &user.id, &state).await;
                         return Ok(two_factor_required_response(&providers, email_data));
                     };
                     let candidate_hash = sha256_hex(token.trim());
                     if !constant_time_eq(stored_hash.as_bytes(), candidate_hash.as_bytes()) {
-                        let email_data = auto_send_email_2fa_if_needed(&providers, &user.id, &user.email, &state).await;
+                        let email_data = get_email_2fa_display_info(&providers, &user.id, &state).await;
                         return Ok(two_factor_required_response(&providers, email_data));
                     }
                 } else if provider == Some(two_factor::TWO_FACTOR_PROVIDER_AUTHENTICATOR) && authenticator_enabled {
                     let Some(token) = token.as_deref() else {
-                        let email_data = auto_send_email_2fa_if_needed(&providers, &user.id, &user.email, &state).await;
+                        let email_data = get_email_2fa_display_info(&providers, &user.id, &state).await;
                         return Ok(two_factor_required_response(&providers, email_data));
                     };
 
@@ -745,7 +685,7 @@ pub async fn token(
                     }
                 } else if provider == Some(two_factor::TWO_FACTOR_PROVIDER_EMAIL) && email_2fa_enabled {
                     let Some(token) = token.as_deref() else {
-                        let email_data = auto_send_email_2fa_if_needed(&providers, &user.id, &user.email, &state).await;
+                        let email_data = get_email_2fa_display_info(&providers, &user.id, &state).await;
                         return Ok(two_factor_required_response(&providers, email_data));
                     };
 
@@ -837,8 +777,66 @@ pub async fn token(
                     if wants_remember && payload.device_identifier.is_some() {
                         remember_token_to_return = Some(generate_remember_token());
                     }
-                } else {
-                    let email_data = auto_send_email_2fa_if_needed(&providers, &user.id, &user.email, &state).await;
+                } else if provider == Some(two_factor::TWO_FACTOR_PROVIDER_RECOVERY_CODE) {
+                    let Some(token) = token.as_deref() else {
+                        let email_data = get_email_2fa_display_info(&providers, &user.id, &state).await;
+                        return Ok(two_factor_required_response(&providers, email_data));
+                    };
+
+                    // 验证恢复码
+                    let recovery_valid = two_factor::verify_recovery_code(&db, &user.id, token).await?;
+                    if !recovery_valid {
+                        log::warn!(
+                            target: targets::AUTH,
+                            "recovery code login failed: invalid code user_id={}",
+                            user.id
+                        );
+
+                        notify::notify_background(
+                            &state.ctx,
+                            state.env.clone(),
+                            NotifyEvent::LoginFailed,
+                            NotifyContext {
+                                user_id: Some(user.id.clone()),
+                                user_email: Some(user.email.clone()),
+                                detail: Some("2FA Recovery Code Verification Failed".to_string()),
+                                device_identifier: payload.device_identifier.clone(),
+                                device_name: payload.device_name.clone(),
+                                device_type: payload.device_type,
+                                meta: notify::extract_request_meta(&headers),
+                                ..Default::default()
+                            },
+                        );
+                        return Ok(invalid_two_factor_response(&providers));
+                    }
+
+                    // 恢复码验证成功，删除所有2FA并清除恢复码
+                    log::info!(
+                        target: targets::AUTH,
+                        "recovery code login success: removing all 2fa user_id={}",
+                        user.id
+                    );
+
+                    two_factor::delete_all_two_factors(&db, &user.id).await?;
+                    two_factor::clear_recovery_code(&db, &user.id).await?;
+
+                    // 发送恢复通知
+                    notify::notify_background(
+                        &state.ctx,
+                        state.env.clone(),
+                        NotifyEvent::TwoFactorRecover,
+                        NotifyContext {
+                            user_id: Some(user.id.clone()),
+                            user_email: Some(user.email.clone()),
+                            device_identifier: payload.device_identifier.clone(),
+                            device_name: payload.device_name.clone(),
+                            device_type: payload.device_type,
+                            meta: notify::extract_request_meta(&headers),
+                            ..Default::default()
+                        },
+                    );
+                } else if !two_factor_verified {
+                    let email_data = get_email_2fa_display_info(&providers, &user.id, &state).await;
                     return Ok(two_factor_required_response(&providers, email_data));
                 }
             }

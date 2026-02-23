@@ -2,6 +2,7 @@ use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use base64::{engine::general_purpose, Engine as _};
 use chrono::Utc;
+use data_encoding::BASE32;
 use js_sys::Date;
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -13,6 +14,8 @@ use crate::error::AppError;
 
 pub const TWO_FACTOR_PROVIDER_AUTHENTICATOR: i32 = 0;
 pub const TWO_FACTOR_PROVIDER_EMAIL: i32 = 1;
+// 注意：2=Duo, 3=YubiKey, 4=U2f, 5=Remember, 6=OrganizationDuo, 7=Webauthn
+pub const TWO_FACTOR_PROVIDER_RECOVERY_CODE: i32 = 8;
 pub const TWO_FACTOR_TYPE_EMAIL_VERIFICATION_CHALLENGE: i32 = 1002;
 
 pub fn generate_totp_secret_base32_20() -> String {
@@ -365,6 +368,75 @@ pub async fn get_email_2fa_verification(
 pub fn is_token_expired(token_sent: i64, max_seconds: i64) -> bool {
     let now = Utc::now().timestamp();
     now - token_sent > max_seconds
+}
+
+pub fn generate_recovery_code() -> String {
+    let mut bytes = [0u8; 20];
+    OsRng.fill_bytes(&mut bytes);
+    BASE32.encode(&bytes)
+}
+
+pub async fn get_or_create_recovery_code(db: &D1Database, user_id: &str) -> Result<String, AppError> {
+    let existing: Option<String> = db
+        .prepare("SELECT totp_recover FROM users WHERE id = ?1")
+        .bind(&[user_id.into()])?
+        .first(Some("totp_recover"))
+        .await
+        .map_err(|_| AppError::Database)?;
+    
+    if let Some(code) = existing {
+        if !code.is_empty() {
+            return Ok(code);
+        }
+    }
+    
+    let new_code = generate_recovery_code();
+    let now = Utc::now().to_rfc3339();
+    
+    db.prepare("UPDATE users SET totp_recover = ?1, updated_at = ?2 WHERE id = ?3")
+        .bind(&[new_code.clone().into(), now.into(), user_id.into()])?
+        .run()
+        .await
+        .map_err(|_| AppError::Database)?;
+    
+    Ok(new_code)
+}
+
+pub async fn verify_recovery_code(db: &D1Database, user_id: &str, code: &str) -> Result<bool, AppError> {
+    let stored: Option<String> = db
+        .prepare("SELECT totp_recover FROM users WHERE id = ?1")
+        .bind(&[user_id.into()])?
+        .first(Some("totp_recover"))
+        .await
+        .map_err(|_| AppError::Database)?;
+    
+    match stored {
+        Some(stored_code) if !stored_code.is_empty() => {
+            Ok(constant_time_eq::constant_time_eq(
+                code.to_lowercase().as_bytes(),
+                stored_code.to_lowercase().as_bytes(),
+            ))
+        }
+        _ => Ok(false),
+    }
+}
+
+pub async fn clear_recovery_code(db: &D1Database, user_id: &str) -> Result<(), AppError> {
+    let now = Utc::now().to_rfc3339();
+    
+    db.prepare("UPDATE users SET totp_recover = NULL, updated_at = ?1 WHERE id = ?2")
+        .bind(&[now.into(), user_id.into()])?
+        .run()
+        .await
+        .map_err(|_| AppError::Database)?;
+    
+    Ok(())
+}
+
+pub async fn delete_all_two_factors(db: &D1Database, user_id: &str) -> Result<(), AppError> {
+    disable_authenticator(db, user_id).await?;
+    delete_email_2fa(db, user_id).await?;
+    Ok(())
 }
 
 #[cfg(test)]
