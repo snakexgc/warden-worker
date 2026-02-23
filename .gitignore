@@ -2,5 +2,6 @@ target
 node_modules
 .wrangler
 vaultwarden
+cfvw_web_builds
 keyguard-app-master
 log

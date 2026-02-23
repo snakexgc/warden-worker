@@ -415,19 +415,29 @@ pub async fn prelogin(
             let kdf_type = v
                 .get("kdf_type")
                 .and_then(|x| x.as_i64())
-                .unwrap_or(0) as i32;
+                .unwrap_or(KDF_TYPE_ARGON2ID as i64) as i32;
             let kdf_iterations = v
                 .get("kdf_iterations")
                 .and_then(|x| x.as_i64())
-                .unwrap_or(600_000) as i32;
-            let kdf_memory = v.get("kdf_memory").and_then(|x| x.as_i64()).map(|v| v as i32);
+                .unwrap_or(3) as i32;
+            let kdf_memory = v
+                .get("kdf_memory")
+                .and_then(|x| x.as_i64())
+                .map(|v| v as i32)
+                .or(Some(ARGON2ID_MEMORY_DEFAULT_MB));
             let kdf_parallelism = v
                 .get("kdf_parallelism")
                 .and_then(|x| x.as_i64())
-                .map(|v| v as i32);
+                .map(|v| v as i32)
+                .or(Some(ARGON2ID_PARALLELISM_DEFAULT));
             (kdf_type, kdf_iterations, kdf_memory, kdf_parallelism)
         }
-        None => (KDF_TYPE_PBKDF2, 600_000, None, None),
+        None => (
+            KDF_TYPE_ARGON2ID,
+            3,
+            Some(ARGON2ID_MEMORY_DEFAULT_MB),
+            Some(ARGON2ID_PARALLELISM_DEFAULT),
+        ),
     };
 
     let (kdf_memory, kdf_parallelism) =
