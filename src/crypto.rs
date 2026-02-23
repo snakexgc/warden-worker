@@ -5,7 +5,7 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::CryptoKey;
 
-pub const ITERATIONS: u32 = 100_000;
+pub const ITERATIONS: u32 = 10_000;
 
 async fn get_subtle_crypto() -> Result<web_sys::SubtleCrypto, String> {
     let global = js_sys::global();
