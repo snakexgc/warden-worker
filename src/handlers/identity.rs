@@ -992,11 +992,10 @@ pub async fn token(
                 )?;
             }
 
-            // 发送解锁通知 - 使用 refresh_token 通常表示解锁密码库
             notify::notify_background(
                 &state.ctx,
                 state.env.clone(),
-                NotifyEvent::Unlock,
+                NotifyEvent::TokenRefresh,
                 NotifyContext {
                     user_id: Some(user.id.clone()),
                     user_email: Some(user.email.clone()),

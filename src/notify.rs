@@ -27,8 +27,9 @@ pub enum NotifyEvent {
     SendDelete,
     TwoFactorEnable,
     TwoFactorDisable,
+    TwoFactorRecoveryCodeView,
     TwoFactorRecover,
-    Unlock,
+    TokenRefresh,
     Sync,
 }
 
@@ -49,8 +50,9 @@ impl NotifyEvent {
             NotifyEvent::SendDelete => "send_delete",
             NotifyEvent::TwoFactorEnable => "2fa_enable",
             NotifyEvent::TwoFactorDisable => "2fa_disable",
+            NotifyEvent::TwoFactorRecoveryCodeView => "2fa_recovery_code_view",
             NotifyEvent::TwoFactorRecover => "2fa_recover",
-            NotifyEvent::Unlock => "unlock",
+            NotifyEvent::TokenRefresh => "token_refresh",
             NotifyEvent::Sync => "sync",
         }
     }
@@ -71,8 +73,9 @@ impl NotifyEvent {
             NotifyEvent::SendDelete => "删除 Send",
             NotifyEvent::TwoFactorEnable => "启用 2FA",
             NotifyEvent::TwoFactorDisable => "关闭 2FA",
+            NotifyEvent::TwoFactorRecoveryCodeView => "查看恢复码",
             NotifyEvent::TwoFactorRecover => "恢复账户",
-            NotifyEvent::Unlock => "解锁密码库",
+            NotifyEvent::TokenRefresh => "刷新令牌",
             NotifyEvent::Sync => "同步数据",
         }
     }
@@ -93,8 +96,9 @@ impl NotifyEvent {
             NotifyEvent::SendDelete => "🗑️",
             NotifyEvent::TwoFactorEnable => "🛡️",
             NotifyEvent::TwoFactorDisable => "🔓",
-            NotifyEvent::TwoFactorRecover => "🔄",
-            NotifyEvent::Unlock => "🔓",
+            NotifyEvent::TwoFactorRecoveryCodeView => "👀",
+            NotifyEvent::TwoFactorRecover => "🔓",
+            NotifyEvent::TokenRefresh => "🔄",
             NotifyEvent::Sync => "🔄",
         }
     }
@@ -108,8 +112,9 @@ impl NotifyEvent {
             NotifyEvent::EmailChange => "warning",
             NotifyEvent::KdfChange => "warning",
             NotifyEvent::CipherDelete | NotifyEvent::SendDelete => "warning",
+            NotifyEvent::TwoFactorRecoveryCodeView => "warning",
             NotifyEvent::TwoFactorRecover => "warning",
-            NotifyEvent::Unlock => "info",
+            NotifyEvent::TokenRefresh => "info",
             _ => "comment",
         }
     }
@@ -394,8 +399,9 @@ fn parse_enabled_events(env: &Env) -> Vec<NotifyEvent> {
             NotifyEvent::SendDelete,
             NotifyEvent::TwoFactorEnable,
             NotifyEvent::TwoFactorDisable,
+            NotifyEvent::TwoFactorRecoveryCodeView,
             NotifyEvent::TwoFactorRecover,
-            NotifyEvent::Unlock,
+            NotifyEvent::TokenRefresh,
             NotifyEvent::Sync,
         ];
     }
@@ -427,8 +433,9 @@ fn parse_enabled_events(env: &Env) -> Vec<NotifyEvent> {
             "send_delete" | "send.del" | "send_remove" => out.push(NotifyEvent::SendDelete),
             "2fa_enable" | "two_factor_enable" | "twofactor_enable" => out.push(NotifyEvent::TwoFactorEnable),
             "2fa_disable" | "two_factor_disable" | "twofactor_disable" => out.push(NotifyEvent::TwoFactorDisable),
+            "2fa_recovery_code_view" | "two_factor_recovery_code_view" | "twofactor_recovery_code_view" => out.push(NotifyEvent::TwoFactorRecoveryCodeView),
             "2fa_recover" | "two_factor_recover" | "twofactor_recover" => out.push(NotifyEvent::TwoFactorRecover),
-            "unlock" => out.push(NotifyEvent::Unlock),
+            "token_refresh" | "unlock" => out.push(NotifyEvent::TokenRefresh),
             "sync" => out.push(NotifyEvent::Sync),
             _ => {}
         }

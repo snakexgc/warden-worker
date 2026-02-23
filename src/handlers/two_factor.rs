@@ -1013,6 +1013,7 @@ pub async fn disable_twofactor_put(
 pub async fn get_recover(
     claims: Claims,
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<PasswordOrOtpData>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = db::get_db(&state.env)?;
@@ -1031,6 +1032,18 @@ pub async fn get_recover(
         target: targets::AUTH,
         "get_recover success user_id={}",
         claims.sub
+    );
+
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
+        NotifyEvent::TwoFactorRecoveryCodeView,
+        NotifyContext {
+            user_id: Some(claims.sub.clone()),
+            user_email: Some(claims.email.clone()),
+            meta: notify::extract_request_meta(&headers),
+            ..Default::default()
+        },
     );
 
     Ok(Json(json!({
