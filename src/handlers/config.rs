@@ -42,7 +42,11 @@ pub async fn config(
           "vapidPublicKey": null
         },
         "featureStates": {
-            "unauth-ui-refresh": true
+            "duo-redirect": true,
+            "email-verification": true,
+            "unauth-ui-refresh": true,
+            "enable-pm-flight-recorder": true,
+            "mobile-error-reporting": true
         },
         "object": "config",
     }))

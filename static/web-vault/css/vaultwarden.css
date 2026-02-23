@@ -72,9 +72,17 @@ app-login form button[type="submit"][buttontype="primary"] {
   display: inline-flex !important;
 }
 
-/* 确保注册链接显示 */
+/* 确保注册链接显示 - 支持多种选择器 */
 app-login form a[routerlink="/signup"],
-app-login form a[href*="/signup"] {
+app-login form a[href*="/signup"],
+app-root a[routerlink="/signup"],
+a[routerlink="/signup"] {
+  display: inline-flex !important;
+}
+
+/* 确保创建账户按钮显示 */
+app-login form button[buttontype="secondary"]:not([type="submit"]),
+app-login form a[buttontype="secondary"] {
   display: inline-flex !important;
 }
 
