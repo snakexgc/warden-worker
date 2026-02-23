@@ -479,7 +479,8 @@ pub async fn register(
         }
     }
     let now = Utc::now().to_rfc3339();
-    let name = payload.name.unwrap_or_default();
+    let email = payload.email.to_lowercase();
+    let name = payload.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| email.clone());
     let (kdf_memory, kdf_parallelism) = validate_kdf(
         payload.kdf,
         payload.kdf_iterations,
@@ -496,7 +497,7 @@ pub async fn register(
     let user = User {
         id: Uuid::new_v4().to_string(),
         name: Some(name),
-        email: payload.email.to_lowercase(),
+        email,
         email_verified: false,
         avatar_color: None,
         master_password_hash,

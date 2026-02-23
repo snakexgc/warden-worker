@@ -1,3 +1,10 @@
+# 特别注意！
+---
+注册账户后，请在**Web端**访问 设置 -> 安全 -> 密钥，将 算法 修改为Argon2id，其他参数可以保持默认即可。或者直接访问如下路径 https://<你的链接>/#/settings/security/security-keys 进行修改
+**如果不修改，大概率会导致Workers CPU Timeout错误，导致服务不可用！**
+**修改之后登录/增删密码等需要加密的操作，将会很快完成，效果远优于使用PBKDF2算法！。**
+---
+
 # Warden Worker
 
 Warden Worker 是一个运行在 Cloudflare Workers 上的轻量级 Bitwarden 兼容服务端实现，使用 Cloudflare D1（SQLite）作为数据存储，核心代码用 Rust 编写，目标是“个人可用、部署成本低、无需维护服务器”。
