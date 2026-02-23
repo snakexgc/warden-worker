@@ -10,6 +10,8 @@ use crate::logging::targets;
 const WEBHOOK_SECRET_NAME: &str = "WEWORK_WEBHOOK_URL";
 const EVENTS_VAR_NAME: &str = "NOTIFY_EVENTS";
 const MAX_UA_HISTORY: usize = 3;
+const TELEGRAM_BOT_TOKEN: &str = "TELEGRAM_BOT_TOKEN";
+const TELEGRAM_CHAT_ID: &str = "TELEGRAM_CHAT_ID";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotifyEvent {
@@ -258,6 +260,76 @@ fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn format_telegram_html(event: NotifyEvent, ctx: &NotifyContext) -> String {
+    let now = Utc::now()
+        .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+
+    let mut lines = Vec::new();
+    lines.push(format!("<b>{} Warden Worker 通知</b>", event.emoji()));
+    lines.push(format!("🕒 时间：{}", escape_html(&now)));
+    lines.push(format!("🛠️ 操作：{}", escape_html(event.title())));
+
+    if let Some(email) = ctx.user_email.as_deref() {
+        lines.push(format!("👤 用户：{}", escape_html(&truncate(email, 256))));
+    } else if let Some(uid) = ctx.user_id.as_deref() {
+        lines.push(format!("🆔 ID：{}", escape_html(&truncate(uid, 64))));
+    }
+
+    if ctx.device_identifier.is_some() || ctx.device_name.is_some() || ctx.device_type.is_some() {
+        let name = ctx
+            .device_name
+            .as_deref()
+            .map(|s| truncate(s, 128))
+            .unwrap_or_else(|| "-".to_string());
+        let dtype = ctx
+            .device_type
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        lines.push(format!("📱 设备：{} (Type: {})", escape_html(&name), escape_html(&dtype)));
+    }
+
+    if let Some(cipher_id) = ctx.cipher_id.as_deref() {
+        lines.push(format!("🔑 Cipher：{}", escape_html(&truncate(cipher_id, 64))));
+    }
+
+    if let Some(send_id) = ctx.send_id.as_deref() {
+        lines.push(format!("📦 Send：{}", escape_html(&truncate(send_id, 64))));
+    }
+
+    if let Some(detail) = ctx.detail.as_deref() {
+        lines.push(format!("📝 详情：{}", escape_html(&truncate(detail, 512))));
+    }
+
+    if let Some(ip) = ctx.meta.ip.as_deref() {
+        let geo_str = ctx.meta.geo.as_ref().map(|g| g.to_string()).unwrap_or_else(|| "".to_string());
+        let loc_info = if geo_str.is_empty() {
+            ip.to_string()
+        } else {
+            format!("{} ({})", ip, geo_str)
+        };
+        lines.push(format!("🌐 网络：{}", escape_html(&truncate(&loc_info, 128))));
+    }
+
+    if let Some(ua) = ctx.meta.user_agent.as_deref() {
+        let new_ua_tag = if ctx.is_new_ua {
+            "<b>[新设备]</b> "
+        } else {
+            ""
+        };
+        lines.push(format!("💻 UA：{}{}", new_ua_tag, escape_html(&truncate(ua, 512))));
+    }
+
+    truncate(&lines.join("\n"), 4000)
+}
+
 async fn get_user_ua_history(user_id: &str, env: &Env) -> Result<UaHistory, worker::Error> {
     let db = match get_db(env) {
         Ok(db) => db,
@@ -471,16 +543,72 @@ pub async fn notify_best_effort(env: &Env, event: NotifyEvent, mut ctx: NotifyCo
         }
     }
 
-    let webhook = match env.secret(WEBHOOK_SECRET_NAME) {
-        Ok(s) => s.to_string(),
-        Err(_) => {
-            log::warn!(target: targets::NOTIFY, "notify skipped: secret '{}' not configured", WEBHOOK_SECRET_NAME);
-            return;
-        }
-    };
+    let wework_webhook = env.secret(WEBHOOK_SECRET_NAME).ok().map(|s| s.to_string());
+    let telegram_config = get_telegram_config(env);
 
-    if let Err(e) = send_markdown(&webhook, event, &ctx).await {
-        log::warn!(target: targets::NOTIFY, "notify send failed event={} err={:?}", event.key(), e);
+    if wework_webhook.is_none() && telegram_config.is_none() {
+        log::warn!(target: targets::NOTIFY, "notify skipped: no webhook configured");
+        return;
+    }
+
+    if let Some(webhook) = wework_webhook {
+        if let Err(e) = send_markdown(&webhook, event, &ctx).await {
+            log::warn!(target: targets::NOTIFY, "wework notify failed event={} err={:?}", event.key(), e);
+        }
+    }
+
+    if let Some((bot_token, chat_id)) = telegram_config {
+        if let Err(e) = send_telegram(&bot_token, &chat_id, event, &ctx).await {
+            log::warn!(target: targets::NOTIFY, "telegram notify failed event={} err={:?}", event.key(), e);
+        }
+    }
+}
+
+fn get_telegram_config(env: &Env) -> Option<(String, String)> {
+    let bot_token = env.secret(TELEGRAM_BOT_TOKEN).ok()?.to_string();
+    let chat_id = env.secret(TELEGRAM_CHAT_ID).ok()?.to_string();
+    Some((bot_token, chat_id))
+}
+
+async fn send_telegram(
+    bot_token: &str,
+    chat_id: &str,
+    event: NotifyEvent,
+    ctx: &NotifyContext,
+) -> Result<(), worker::Error> {
+    let text = format_telegram_html(event, ctx);
+    let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
+
+    let body = json!({
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML"
+    })
+    .to_string();
+
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post);
+    init.with_body(Some(JsValue::from_str(&body)));
+    let mut request = Request::new_with_init(&url, &init)?;
+
+    if let Ok(headers) = request.headers_mut() {
+        let _ = headers.set("content-type", "application/json; charset=utf-8");
+    }
+
+    log::info!(
+        target: targets::NOTIFY,
+        "telegram sending event={} user_id={:?} ip={:?}",
+        event.key(),
+        ctx.user_id.as_deref(),
+        ctx.meta.ip.as_deref()
+    );
+
+    let r = Fetch::Request(request).send().await?;
+    let status = r.status_code();
+    if (200..300).contains(&status) {
+        Ok(())
+    } else {
+        Err(worker::Error::RustError(format!("telegram failed status={}", status)))
     }
 }
 
@@ -491,12 +619,26 @@ pub fn notify_background(context: &Context, env: Env, event: NotifyEvent, notify
 }
 
 pub fn is_webhook_configured(env: &Env) -> bool {
-    env.secret(WEBHOOK_SECRET_NAME).is_ok()
+    env.secret(WEBHOOK_SECRET_NAME).is_ok() || get_telegram_config(env).is_some()
 }
 
 pub async fn send_password_hint(env: &Env, ctx: NotifyContext) -> Result<(), worker::Error> {
-    let webhook = env.secret(WEBHOOK_SECRET_NAME)?.to_string();
-    send_markdown(&webhook, NotifyEvent::PasswordHint, &ctx).await
+    let mut last_error = None;
+
+    if let Ok(webhook) = env.secret(WEBHOOK_SECRET_NAME) {
+        if let Err(e) = send_markdown(&webhook.to_string(), NotifyEvent::PasswordHint, &ctx).await {
+            log::warn!(target: targets::NOTIFY, "wework send_password_hint failed err={:?}", e);
+            last_error = Some(e);
+        } else {
+            return Ok(());
+        }
+    }
+
+    if let Some((bot_token, chat_id)) = get_telegram_config(env) {
+        return send_telegram(&bot_token, &chat_id, NotifyEvent::PasswordHint, &ctx).await;
+    }
+
+    Err(last_error.unwrap_or_else(|| worker::Error::RustError("no webhook configured".to_string())))
 }
 
 pub fn send_password_hint_background(context: &Context, env: Env, notify_ctx: NotifyContext) {
@@ -547,14 +689,6 @@ pub async fn send_email_token_webhook(
     token: &str,
     email_type: EmailType,
 ) -> Result<(), worker::Error> {
-    let webhook = match env.secret(WEBHOOK_SECRET_NAME) {
-        Ok(s) => s.to_string(),
-        Err(_) => {
-            log::warn!(target: targets::NOTIFY, "WEWORK_WEBHOOK_URL not configured");
-            return Err(worker::Error::RustError("WEWORK_WEBHOOK_URL not configured".to_string()));
-        }
-    };
-
     let (_title, emoji) = match email_type {
         EmailType::TwoFactorEmail => ("邮箱两步验证设置", "📧"),
         EmailType::TwoFactorLogin => ("登录两步验证", "🔐"),
@@ -565,39 +699,74 @@ pub async fn send_email_token_webhook(
         .format("%Y-%m-%d %H:%M:%S")
         .to_string();
 
-    let content = format!(
-        "# {} Warden Worker 验证码\n> <font color=\"comment\">🕒 时间：</font>{}\n> <font color=\"comment\">📧 邮箱：</font>{}\n\n您的验证码是：<font color=\"warning\">**{}**</font>\n\n验证码有效期为10分钟，请尽快完成验证。",
-        emoji, now, email, token
-    );
+    let wework_webhook = env.secret(WEBHOOK_SECRET_NAME).ok().map(|s| s.to_string());
+    let telegram_config = get_telegram_config(env);
 
-    let body = json!({
-        "msgtype": "markdown",
-        "markdown": { "content": content }
-    })
-    .to_string();
+    if wework_webhook.is_none() && telegram_config.is_none() {
+        log::warn!(target: targets::NOTIFY, "no webhook configured for email token");
+        return Err(worker::Error::RustError("no webhook configured".to_string()));
+    }
 
+    let mut last_error = None;
+
+    if let Some(webhook) = wework_webhook {
+        let content = format!(
+            "# {} Warden Worker 验证码\n> <font color=\"comment\">🕒 时间：</font>{}\n> <font color=\"comment\">📧 邮箱：</font>{}\n\n您的验证码是：<font color=\"warning\">**{}**</font>\n\n验证码有效期为10分钟，请尽快完成验证。",
+            emoji, now, email, token
+        );
+
+        let body = json!({
+            "msgtype": "markdown",
+            "markdown": { "content": content }
+        })
+        .to_string();
+
+        if let Err(e) = send_webhook_request(&webhook, &body, "wework email token").await {
+            log::warn!(target: targets::NOTIFY, "wework send_email_token failed err={:?}", e);
+            last_error = Some(e);
+        } else {
+            return Ok(());
+        }
+    }
+
+    if let Some((bot_token, chat_id)) = telegram_config {
+        let text = format!(
+            "<b>{} Warden Worker 验证码</b>\n🕒 时间：{}\n📧 邮箱：{}\n\n您的验证码是：<b>{}</b>\n\n验证码有效期为10分钟，请尽快完成验证。",
+            emoji, escape_html(&now), escape_html(email), escape_html(token)
+        );
+
+        let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
+        let body = json!({
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML"
+        })
+        .to_string();
+
+        return send_webhook_request(&url, &body, "telegram email token").await;
+    }
+
+    Err(last_error.unwrap_or_else(|| worker::Error::RustError("no webhook configured".to_string())))
+}
+
+async fn send_webhook_request(url: &str, body: &str, label: &str) -> Result<(), worker::Error> {
     let mut init = RequestInit::new();
     init.with_method(Method::Post);
-    init.with_body(Some(JsValue::from_str(&body)));
-    let mut request = Request::new_with_init(&webhook, &init)?;
+    init.with_body(Some(JsValue::from_str(body)));
+    let mut request = Request::new_with_init(url, &init)?;
 
     if let Ok(headers) = request.headers_mut() {
         let _ = headers.set("content-type", "application/json; charset=utf-8");
     }
 
-    log::info!(
-        target: targets::NOTIFY,
-        "sending email token email={} type={}",
-        email,
-        email_type.key()
-    );
+    log::info!(target: targets::NOTIFY, "sending {}", label);
 
     let r = Fetch::Request(request).send().await?;
     let status = r.status_code();
     if (200..300).contains(&status) {
         Ok(())
     } else {
-        Err(worker::Error::RustError(format!("email webhook failed status={}", status)))
+        Err(worker::Error::RustError(format!("{} failed status={}", label, status)))
     }
 }
 
@@ -631,5 +800,5 @@ pub fn send_email_token_background(
 }
 
 pub fn is_email_webhook_configured(env: &Env) -> bool {
-    env.secret(WEBHOOK_SECRET_NAME).is_ok()
+    env.secret(WEBHOOK_SECRET_NAME).is_ok() || get_telegram_config(env).is_some()
 }
