@@ -76,6 +76,16 @@ pub struct RegisterRequest {
     pub kdf_memory: Option<i32>,
     #[serde(default)]
     pub kdf_parallelism: Option<i32>,
+    #[serde(default)]
+    pub email_verification_token: Option<String>,
+}
+
+// Claims for email verification token
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegisterVerifyClaims {
+    pub sub: String,  // email
+    pub name: Option<String>,
+    pub exp: usize,
 }
 
 #[derive(Debug, Deserialize)]

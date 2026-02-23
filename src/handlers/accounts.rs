@@ -15,7 +15,7 @@ use crate::{
     crypto,
     db,
     error::AppError,
-    models::user::{KeyData, PreloginResponse, RegisterRequest, User},
+    models::user::{KeyData, PreloginResponse, RegisterRequest, RegisterVerifyClaims, User},
     notify::{self, NotifyContext, NotifyEvent},
     router::AppState,
     two_factor,
@@ -456,6 +456,9 @@ pub async fn register(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<Value>, AppError> {
+    // Debug log
+    log::info!("Register payload: name={:?}, email={}", payload.name, payload.email);
+    
     let db = db::get_db(&state.env)?;
     let user_count: Option<i64> = db
         .prepare("SELECT COUNT(1) AS user_count FROM users")
@@ -480,7 +483,23 @@ pub async fn register(
     }
     let now = Utc::now().to_rfc3339();
     let email = payload.email.to_lowercase();
-    let name = payload.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| email.clone());
+    
+    // Try to get name from email_verification_token first, then from payload.name
+    let name_from_token = payload.email_verification_token.as_ref().and_then(|token| {
+        use jsonwebtoken::{decode, DecodingKey, Validation};
+        let jwt_secret = state.env.secret("JWT_SECRET").ok()?.to_string();
+        let decoding_key = DecodingKey::from_secret(jwt_secret.as_ref());
+        let token_data = decode::<RegisterVerifyClaims>(token, &decoding_key, &Validation::default()).ok()?;
+        if token_data.claims.sub == email {
+            token_data.claims.name.filter(|n| !n.trim().is_empty())
+        } else {
+            None
+        }
+    });
+    
+    let name = name_from_token
+        .or_else(|| payload.name.filter(|n| !n.trim().is_empty()))
+        .unwrap_or_else(|| email.clone());
     let (kdf_memory, kdf_parallelism) = validate_kdf(
         payload.kdf,
         payload.kdf_iterations,
@@ -932,9 +951,45 @@ pub async fn password_hint(
     Ok((status, Json(json!({ "hint": detail }))))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendVerificationEmailRequest {
+    pub email: String,
+    pub name: Option<String>,
+    pub receive_marketing_emails: bool,
+}
+
 #[worker::send]
-pub async fn send_verification_email(State(_state): State<Arc<AppState>>) -> String {
-    "fixed-token-to-mock".to_string()
+pub async fn send_verification_email(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SendVerificationEmailRequest>,
+) -> Result<Json<Value>, AppError> {
+    use chrono::{Duration, Utc};
+    use jsonwebtoken::{encode, EncodingKey, Header};
+    use crate::models::user::RegisterVerifyClaims;
+
+    log::info!("Send verification email: name={:?}, email={}", payload.name, payload.email);
+
+    // Generate a token containing the name
+    let now = Utc::now();
+    let exp = (now + Duration::hours(24)).timestamp() as usize;
+
+    let claims = RegisterVerifyClaims {
+        sub: payload.email.to_lowercase(),
+        name: payload.name.filter(|n| !n.trim().is_empty()),
+        exp,
+    };
+
+    let jwt_secret = state.env.secret("JWT_SECRET")?.to_string();
+    let token = encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(jwt_secret.as_ref()),
+    ).map_err(|_| AppError::Internal)?;
+
+    // Return token as JSON to skip email verification
+    // This makes the client go directly to password entry instead of "check your email" screen
+    Ok(Json(json!(token)))
 }
 
 #[cfg(test)]

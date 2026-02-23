@@ -27,7 +27,7 @@ pub async fn config(
           "url": "https://github.com/dani-garcia/vaultwarden"
         },
         "settings": {
-            "disableUserRegistration": true,
+            "disableUserRegistration": false,
         },
         "environment": {
           "vault": domain,
