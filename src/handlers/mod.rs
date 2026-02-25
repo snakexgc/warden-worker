@@ -12,3 +12,4 @@ pub mod usage;
 pub mod icons;
 pub mod settings;
 pub mod compat;
+pub mod webauthn;

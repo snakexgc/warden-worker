@@ -8,7 +8,7 @@ use axum::extract::DefaultBodyLimit;
 use std::sync::Arc;
 use worker::{Context, Env};
 
-use crate::handlers::{accounts, ciphers, compat, config, identity, sync, folders, import, two_factor, devices, sends, usage, icons, settings};
+use crate::handlers::{accounts, ciphers, compat, config, identity, sync, folders, import, two_factor, devices, sends, usage, icons, settings, webauthn};
 
 pub struct AppState {
     pub env: Env,
@@ -59,6 +59,10 @@ pub fn api_router(env: Env, ctx: Context) -> Router<()> {
         .route(
             "/api/devices/identifier/{id}/token",
             put(devices::device_token).post(devices::device_token),
+        )
+        .route(
+            "/api/devices/identifier/{id}/clear-token",
+            put(devices::clear_device_token).post(devices::clear_device_token),
         )
         .route(
             "/api/auth-requests",
@@ -115,6 +119,20 @@ pub fn api_router(env: Env, ctx: Context) -> Router<()> {
         .route("/api/two-factor/authenticator/enable", post(two_factor::authenticator_enable))
         .route("/api/two-factor/authenticator/disable", post(two_factor::authenticator_disable))
         .route("/api/two-factor/get-email", post(two_factor::get_email))
+        .route(
+            "/api/two-factor/get-webauthn",
+            post(webauthn::two_factor_get_webauthn),
+        )
+        .route(
+            "/api/two-factor/get-webauthn-challenge",
+            post(webauthn::two_factor_get_webauthn_challenge),
+        )
+        .route(
+            "/api/two-factor/webauthn",
+            post(webauthn::two_factor_put_webauthn)
+                .put(webauthn::two_factor_put_webauthn)
+                .delete(webauthn::two_factor_delete_webauthn),
+        )
         .route("/api/two-factor/send-email", post(two_factor::send_email))
         .route(
             "/api/two-factor/email",
@@ -187,7 +205,30 @@ pub fn api_router(env: Env, ctx: Context) -> Router<()> {
         .route("/api/alive", get(config::alive))
         .route("/api/now", get(config::now))
         .route("/api/version", get(config::version))
-        .route("/api/webauthn", get(config::webauthn))
+        .route(
+            "/accounts/webauthn/assertion-options",
+            get(webauthn::identity_assertion_options),
+        )
+        .route(
+            "/api/webauthn",
+            get(webauthn::list_credentials).post(webauthn::create_credential),
+        )
+        .route(
+            "/api/webauthn/attestation-options",
+            post(webauthn::attestation_options),
+        )
+        .route(
+            "/api/webauthn/assertion-options",
+            post(webauthn::assertion_options),
+        )
+        .route(
+            "/api/webauthn/{credential_id}",
+            put(webauthn::update_credential),
+        )
+        .route(
+            "/api/webauthn/{credential_id}/delete",
+            post(webauthn::delete_credential),
+        )
         .route("/api/d1/usage", get(usage::d1_usage))
         .with_state(app_state)
 }

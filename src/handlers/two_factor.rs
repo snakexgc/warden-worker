@@ -159,6 +159,11 @@ pub async fn two_factor_status(
     if email_enabled {
         providers.push(two_factor::TWO_FACTOR_PROVIDER_EMAIL);
     }
+
+    let webauthn_enabled = two_factor::is_webauthn_enabled(&db, &claims.sub).await?;
+    if webauthn_enabled {
+        providers.push(two_factor::TWO_FACTOR_PROVIDER_WEBAUTHN);
+    }
     
     let enabled = !providers.is_empty();
     
@@ -959,6 +964,14 @@ pub async fn disable_twofactor(
                 claims.sub
             );
         }
+        two_factor::TWO_FACTOR_PROVIDER_WEBAUTHN => {
+            two_factor::delete_webauthn_credentials(&db, &claims.sub).await?;
+            log::info!(
+                target: targets::AUTH,
+                "disable_twofactor: webauthn disabled user_id={}",
+                claims.sub
+            );
+        }
         _ => {
             log::warn!(
                 target: targets::AUTH,
@@ -974,6 +987,7 @@ pub async fn disable_twofactor(
     let provider_name = match type_ {
         two_factor::TWO_FACTOR_PROVIDER_AUTHENTICATOR => "authenticator",
         two_factor::TWO_FACTOR_PROVIDER_EMAIL => "email",
+        two_factor::TWO_FACTOR_PROVIDER_WEBAUTHN => "webauthn",
         _ => "unknown",
     };
 
