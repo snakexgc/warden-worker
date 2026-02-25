@@ -1,8 +1,14 @@
 # 特别注意！
+
 ---
-注册账户后，请在**Web端**访问 设置 -> 安全 -> 密钥，将 算法 修改为Argon2id，其他参数可以保持默认即可。或者直接访问如下路径 https://<你的链接>/#/settings/security/security-keys 进行修改
-**如果不修改，大概率会导致Workers CPU Timeout错误，导致服务不可用！**
+注册账户后，请在**Web端**访问 设置 -> 安全 -> 密钥，将 算法 修改为Argon2id，其他参数可以保持默认即可。
+
+或者直接访问如下路径 https://<你的链接>/#/settings/security/security-keys 进行修改
+
 **修改之后登录/增删密码等需要加密的操作，将会很快完成，效果远优于使用PBKDF2算法！。**
+
+**如果不修改，大概率会导致Workers CPU Timeout错误，导致服务不可用！**
+
 ---
 
 # Warden Worker
@@ -21,6 +27,49 @@ Warden Worker 是一个运行在 Cloudflare Workers 上的轻量级 Bitwarden �
 - **消息通知**：支持企业微信 Webhook 推送，覆盖登录/失败、密码库变更等 10+ 种事件，支持 GeoIP 显示 IP 归属地
 - **邮箱二步验证**：通过 Webhook 发送验证码邮件，无需配置 SMTP 服务器
 - 性能优化：加密算法使用 CF 提供的函数，避免了 Rust 标准库的加密性能问题
+
+## 自动部署（GitHub Actions）（推荐）
+
+本项目已内置 GitHub Actions 工作流（`.github/workflows/push-cloudflare.yaml`），支持代码推送时自动构建并部署。
+
+### 1. Fork 本项目
+Fork 本仓库到你的 GitHub 账号。
+
+### 2. 配置 Repository Secrets
+在 GitHub 仓库的 **Settings** -> **Secrets and variables** -> **Actions** 中添加以下密钥：
+
+| Secret Name | 说明 | 获取方式 |
+| :--- | :--- | :--- |
+| `CLOUDFLARE_API_TOKEN` | API 令牌 | Cloudflare 用户设置 -> API Tokens -> Create Token (模板选 Edit Cloudflare Workers) |
+| `CLOUDFLARE_ACCOUNT_ID` | 账户 ID | Cloudflare Workers 首页右侧边栏 Account ID |
+| `D1_DATABASE_ID` | D1 数据库 ID | `wrangler d1 info vaultsql` 或 Cloudflare D1 控制台 |
+
+*** 在Cloudflare控制台创建D1数据库后，还需要执行 `sql/schema.sql`中的代码来初始化数据库。 ***
+
+### 3. 配置Cloudflare Workers运行环境密钥
+在 Cloudflare Dashboard -> Workers -> Settings -> Variables 中手动添加以下机密变量。
+```
+JWT_SECRET
+JWT_REFRESH_SECRET
+ALLOWED_EMAILS
+TWO_FACTOR_ENC_KEY
+WEWORK_WEBHOOK_URL
+TELEGRAM_BOT_TOKEN
+TELEGRAM_CHAT_ID
+```
+- **JWT_SECRET**：访问令牌签名密钥。用于签署短效 Access Token。**必须设置强随机字符串。**
+- **JWT_REFRESH_SECRET**：刷新令牌签名密钥。用于签署长效 Refresh Token。**必须设置强随机字符串，且不要与 JWT_SECRET 相同。**
+- **ALLOWED_EMAILS**：首个账号注册白名单（仅在"数据库还没有任何用户"时启用），多个邮箱用英文逗号分隔。
+- **TWO_FACTOR_ENC_KEY**：可选，Base64 的 32 字节密钥；用于加密存储 TOTP 秘钥
+- **WEWORK_WEBHOOK_URL**：可选，企业微信群机器人的 Webhook 地址。用于事件通知和邮箱二步验证验证码发送。
+- **TELEGRAM_BOT_TOKEN**：可选，Telegram Bot 的 Token。从 [@BotFather](https://t.me/BotFather) 获取。
+- **TELEGRAM_CHAT_ID**：可选，接收通知的 Chat ID。可以是个人用户 ID、群组 ID 或频道 ID。通过 [@userinfobot](https://t.me/userinfobot) 获取个人 ID。
+可以使用PowerShell生成 TWO_FACTOR_ENC_KEY ：
+```powershell
+[Convert]::ToBase64String((1..32 | ForEach-Object {Get-Random -Minimum 0 -Maximum 256}))
+```
+### 4. 部署
+在 GitHub 仓库的 **Actions** 中触发工作流，即可自动部署到 Cloudflare Workers。
 
 ## 手动部署（wrangler 命令行）
 
@@ -85,49 +134,6 @@ wrangler deploy
 
 ### 6. 升级
 > 如果你曾经部署过旧版本并准备升级，建议在客户端 **导出密码库**  → **重新部署本项目（全新初始化数据库）** → **再导入密码库（可显著降低迁移/兼容成本）**。
-
-## 自动部署（GitHub Actions）
-
-本项目已内置 GitHub Actions 工作流（`.github/workflows/push-cloudflare.yaml`），支持代码推送时自动构建并部署。
-
-### 1. Fork 本项目
-Fork 本仓库到你的 GitHub 账号。
-
-### 2. 配置 Repository Secrets
-在 GitHub 仓库的 **Settings** -> **Secrets and variables** -> **Actions** 中添加以下密钥：
-
-| Secret Name | 说明 | 获取方式 |
-| :--- | :--- | :--- |
-| `CLOUDFLARE_API_TOKEN` | API 令牌 | Cloudflare 用户设置 -> API Tokens -> Create Token (模板选 Edit Cloudflare Workers) |
-| `CLOUDFLARE_ACCOUNT_ID` | 账户 ID | Cloudflare Workers 首页右侧边栏 Account ID |
-| `D1_DATABASE_ID` | D1 数据库 ID | `wrangler d1 info vaultsql` 或 Cloudflare D1 控制台 |
-
-*** 控制台创建D1数据库后，还需要在执行 `sql/schema.sql`中的代码来初始化数据库。 ***
-
-### 3. 配置Cloudflare Workers运行环境密钥
-在 Cloudflare Dashboard -> Workers -> Settings -> Variables 中手动添加以下机密变量。
-```
-JWT_SECRET
-JWT_REFRESH_SECRET
-ALLOWED_EMAILS
-TWO_FACTOR_ENC_KEY
-WEWORK_WEBHOOK_URL
-TELEGRAM_BOT_TOKEN
-TELEGRAM_CHAT_ID
-```
-- **JWT_SECRET**：访问令牌签名密钥。用于签署短效 Access Token。**必须设置强随机字符串。**
-- **JWT_REFRESH_SECRET**：刷新令牌签名密钥。用于签署长效 Refresh Token。**必须设置强随机字符串，且不要与 JWT_SECRET 相同。**
-- **ALLOWED_EMAILS**：首个账号注册白名单（仅在"数据库还没有任何用户"时启用），多个邮箱用英文逗号分隔。
-- **TWO_FACTOR_ENC_KEY**：可选，Base64 的 32 字节密钥；用于加密存储 TOTP 秘钥
-- **WEWORK_WEBHOOK_URL**：可选，企业微信群机器人的 Webhook 地址。用于事件通知和邮箱二步验证验证码发送。
-- **TELEGRAM_BOT_TOKEN**：可选，Telegram Bot 的 Token。从 [@BotFather](https://t.me/BotFather) 获取。
-- **TELEGRAM_CHAT_ID**：可选，接收通知的 Chat ID。可以是个人用户 ID、群组 ID 或频道 ID。通过 [@userinfobot](https://t.me/userinfobot) 获取个人 ID。
-可以使用PowerShell生成 TWO_FACTOR_ENC_KEY ：
-```powershell
-[Convert]::ToBase64String((1..32 | ForEach-Object {Get-Random -Minimum 0 -Maximum 256}))
-```
-### 4. 部署
-在 GitHub 仓库的 **Actions** 中触发工作流，即可自动部署到 Cloudflare Workers。
 
 ## 客户端使用建议
 
