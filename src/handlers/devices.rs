@@ -1,4 +1,4 @@
-use axum::{extract::State, http::HeaderMap, Json};
+use axum::{extract::State, http::{HeaderMap, StatusCode}, response::{IntoResponse, Response}, Json};
 use axum::extract::{Path, Query};
 use base64::{engine::general_purpose, Engine as _};
 use chrono::{Duration, Utc};
@@ -890,13 +890,37 @@ pub struct AuthRequestResponseQuery {
     code: String,
 }
 
+fn auth_request_not_exist_response() -> Response {
+    let message = "AuthRequest doesn't exist";
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "message": message,
+            "validationErrors": {
+                "": [message]
+            },
+            "errorModel": {
+                "message": message,
+                "object": "error"
+            },
+            "error": "",
+            "error_description": "",
+            "exceptionMessage": Value::Null,
+            "exceptionStackTrace": Value::Null,
+            "innerExceptionMessage": Value::Null,
+            "object": "error"
+        })),
+    )
+        .into_response()
+}
+
 #[worker::send]
 pub async fn get_auth_request_response(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
     Path(auth_request_id): Path<String>,
     Query(query): Query<AuthRequestResponseQuery>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<Response, AppError> {
     let db = db::get_db(&state.env)?;
     ensure_auth_requests_table(&db).await?;
     purge_expired_auth_requests(&db).await?;
@@ -908,9 +932,7 @@ pub async fn get_auth_request_response(
         .await
         .map_err(|_| AppError::Database)?;
     let Some(row) = row else {
-        return Err(AppError::BadRequest(
-            "AuthRequest doesn't exist".to_string(),
-        ));
+        return Ok(auth_request_not_exist_response());
     };
 
     let row_code_hash = row
@@ -921,15 +943,14 @@ pub async fn get_auth_request_response(
     let query_code_hash = sha256_hex(&query.code);
 
     if !constant_time_eq(row_code_hash.as_bytes(), query_code_hash.as_bytes()) {
-        return Err(AppError::BadRequest(
-            "AuthRequest doesn't exist".to_string(),
-        ));
+        return Ok(auth_request_not_exist_response());
     }
 
     Ok(Json(auth_request_to_json(
         &row,
         &origin_from_headers(&headers),
-    )))
+    ))
+    .into_response())
 }
 
 #[worker::send]
