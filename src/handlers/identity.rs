@@ -180,6 +180,10 @@ pub struct TokenRequest {
     #[serde(rename = "twoFactorRemember")]
     #[serde(default, deserialize_with = "deserialize_truthy_i32_opt")]
     two_factor_remember: Option<i32>,
+    #[serde(rename = "authRequest")]
+    auth_request: Option<String>,
+    #[serde(rename = "code")] // Used for auth-request flow
+    access_code: Option<String>,
 }
 
 fn js_opt_string(v: Option<String>) -> JsValue {
@@ -234,6 +238,7 @@ fn normalize_kdf_for_response(
 fn generate_tokens_and_response(
     user: User,
     state: &Arc<AppState>,
+    device_identifier: Option<String>,
 ) -> Result<Value, AppError> {
     let now = Utc::now();
     let expires_in = Duration::hours(2);
@@ -249,6 +254,7 @@ fn generate_tokens_and_response(
         email_verified: true,
         amr: vec!["Application".into()],
         security_stamp: Some(user.security_stamp.clone()),
+        device: device_identifier.clone(),
     };
 
     let jwt_secret = state.env.secret("JWT_SECRET")?.to_string();
@@ -270,6 +276,7 @@ fn generate_tokens_and_response(
         email_verified: true,
         amr: vec!["Application".into()],
         security_stamp: Some(user.security_stamp.clone()),
+        device: device_identifier,
     };
     let jwt_refresh_secret = state.env.secret("JWT_REFRESH_SECRET")?.to_string();
     let refresh_token = encode(
@@ -498,9 +505,13 @@ pub async fn token(
             let username = payload
                 .username
                 .ok_or_else(|| AppError::BadRequest("Missing username".to_string()))?;
-            let password_hash = payload
-                .password
-                .ok_or_else(|| AppError::BadRequest("Missing password".to_string()))?;
+            let password_hash = if payload.auth_request.is_some() {
+                payload.password.unwrap_or_default()
+            } else {
+                payload
+                    .password
+                    .ok_or_else(|| AppError::BadRequest("Missing password".to_string()))?
+            };
 
             let user_val: Value = match db
                 .prepare("SELECT * FROM users WHERE email = ?1")
@@ -528,6 +539,75 @@ pub async fn token(
                 }
             };
             let user: User = serde_json::from_value(user_val).map_err(|_| AppError::Internal)?;
+
+            // If this is an auth-request login (trusted device), skip master password check
+            // and verify the auth-request access code instead.
+            if let Some(auth_request_id) = payload.auth_request.as_deref() {
+                use crate::handlers::devices as dev;
+                dev::ensure_auth_requests_table(&db).await?;
+                dev::purge_expired_auth_requests(&db).await?;
+
+                let ar_row: Option<Value> = db
+                    .prepare("SELECT * FROM auth_requests WHERE id = ?1 AND user_id = ?2 LIMIT 1")
+                    .bind(&[auth_request_id.into(), user.id.clone().into()])?
+                    .first(None)
+                    .await
+                    .map_err(|_| AppError::Database)?;
+                let ar_row = ar_row
+                    .ok_or_else(|| AppError::Unauthorized("Invalid credentials".to_string()))?;
+
+                // Must be approved
+                let approved = ar_row
+                    .get("approved")
+                    .and_then(|v| {
+                        if v.is_null() {
+                            None
+                        } else if let Some(b) = v.as_bool() {
+                            Some(b)
+                        } else {
+                            v.as_i64().map(|i| i != 0)
+                        }
+                    })
+                    .unwrap_or(false);
+                if !approved {
+                    return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+                }
+
+                // Verify access code
+                let stored_hash = ar_row
+                    .get("access_code_hash")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                
+                let access_code = payload.access_code.as_deref().unwrap_or(&password_hash);
+                let candidate_hash = sha256_hex(access_code);
+                if !constant_time_eq(stored_hash.as_bytes(), candidate_hash.as_bytes()) {
+                    return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+                }
+
+                // Auth-request login bypasses 2FA and remember-device flow
+                let user_id = user.id.clone();
+                let device_identifier = payload.device_identifier.clone();
+                let device_name = payload.device_name.clone();
+                let device_type = payload.device_type;
+
+                let response = generate_tokens_and_response(user, &state, device_identifier.clone())?;
+
+                if let Some(device_id) = device_identifier {
+                    update_device_background(
+                        &state.ctx,
+                        state.env.clone(),
+                        user_id,
+                        device_id,
+                        device_name,
+                        device_type,
+                        None,
+                    );
+                }
+
+                return Ok(Json(response).into_response());
+            }
+
             let password_valid = if let Some(salt) = &user.password_salt {
                 crypto::verify_password(&password_hash, salt, &user.master_password_hash).await
             } else {
@@ -856,7 +936,7 @@ pub async fn token(
                 payload.two_factor_remember
             );
 
-            let mut response = generate_tokens_and_response(user, &state)?;
+            let mut response = generate_tokens_and_response(user, &state, device_identifier.clone())?;
             let remember_token_to_set = remember_token_to_return.clone();
 
             // 后台异步更新设备信息，减少登录响应延迟
@@ -973,7 +1053,7 @@ pub async fn token(
                 return Err(AppError::Unauthorized("Invalid security stamp".to_string()));
             }
 
-            let response = generate_tokens_and_response(user.clone(), &state)?;
+            let response = generate_tokens_and_response(user.clone(), &state, payload.device_identifier.clone())?;
             let mut resp = Json(response.clone()).into_response();
             if let Some(v) = response.get("access_token").and_then(|v| v.as_str()) {
                 set_cookie(

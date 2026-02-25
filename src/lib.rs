@@ -11,6 +11,7 @@ mod handlers;
 mod logging;
 mod models;
 mod notify;
+mod notifications;
 mod router;
 mod two_factor;
 
@@ -23,6 +24,11 @@ pub async fn main(
     console_error_panic_hook::set_once();
     let log_level = logging::init_logging(&env);
     log::info!(target: logging::targets::API, "Logging initialized at level: {:?}", log_level);
+
+    if notifications::is_notifications_path(&req.path()) {
+        let worker_resp = notifications::proxy_notifications_request(&env, req).await?;
+        return Ok(worker_resp.into());
+    }
 
     let (city, region, country) = {
         if let Some(cf) = req.cf() {

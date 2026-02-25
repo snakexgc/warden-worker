@@ -22,6 +22,22 @@
 			"database_id": "02c3cba2-dec4-4aad-98d6-a443069eb9a8"
 		}
 	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "NOTIFICATIONS_HUB",
+				"class_name": "NotificationsHub"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1-notifications-hub",
+			"new_sqlite_classes": [
+				"NotificationsHub"
+			]
+		}
+	],
 	"observability": {
 		"logs": {
 			"enabled": true,
@@ -41,6 +57,7 @@
 			"/api/*",
 			"/identity/*",
 			"/sends/*",
+			"/notifications/*",
 			"/demo.html",
 			"/icons/*"
 		]

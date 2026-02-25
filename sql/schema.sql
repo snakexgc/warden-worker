@@ -4,6 +4,7 @@
 PRAGMA foreign_keys = ON;
 
 DROP TABLE IF EXISTS devices;
+DROP TABLE IF EXISTS auth_requests;
 DROP TABLE IF EXISTS two_factor_email;
 DROP TABLE IF EXISTS two_factor_authenticator;
 DROP TABLE IF EXISTS folders;
@@ -141,6 +142,24 @@ CREATE TABLE IF NOT EXISTS devices (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS auth_requests (
+    id TEXT PRIMARY KEY NOT NULL,
+    user_id TEXT NOT NULL,
+    request_device_identifier TEXT NOT NULL,
+    device_type INTEGER NOT NULL,
+    request_ip TEXT NOT NULL,
+    response_device_identifier TEXT,
+    access_code_hash TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    enc_key TEXT,
+    master_password_hash TEXT,
+    approved INTEGER,
+    creation_date TEXT NOT NULL,
+    response_date TEXT,
+    authentication_date TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_ciphers_user_id ON ciphers(user_id);
 CREATE INDEX IF NOT EXISTS idx_ciphers_folder_id ON ciphers(folder_id);
 CREATE INDEX IF NOT EXISTS idx_sends_user_id ON sends(user_id);
@@ -149,3 +168,4 @@ CREATE INDEX IF NOT EXISTS idx_send_files_send_id ON send_files(send_id);
 CREATE INDEX IF NOT EXISTS idx_send_file_chunks_send_file_id ON send_file_chunks(send_file_id);
 CREATE INDEX IF NOT EXISTS idx_folders_user_id ON folders(user_id);
 CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id);
+CREATE INDEX IF NOT EXISTS idx_auth_requests_user_id ON auth_requests(user_id);

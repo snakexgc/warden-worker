@@ -23,6 +23,7 @@ pub struct Claims {
     pub email_verified: bool,
     pub amr: Vec<String>,
     pub security_stamp: Option<String>,
+    pub device: Option<String>,
 }
 
 impl FromRequestParts<Arc<AppState>> for Claims

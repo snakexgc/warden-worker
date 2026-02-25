@@ -33,6 +33,8 @@ pub enum NotifyEvent {
     TwoFactorRecover,
     TokenRefresh,
     Sync,
+    AuthRequest,
+    AuthResponse,
 }
 
 impl NotifyEvent {
@@ -56,6 +58,8 @@ impl NotifyEvent {
             NotifyEvent::TwoFactorRecover => "2fa_recover",
             NotifyEvent::TokenRefresh => "token_refresh",
             NotifyEvent::Sync => "sync",
+            NotifyEvent::AuthRequest => "auth_request",
+            NotifyEvent::AuthResponse => "auth_response",
         }
     }
 
@@ -79,6 +83,8 @@ impl NotifyEvent {
             NotifyEvent::TwoFactorRecover => "恢复账户",
             NotifyEvent::TokenRefresh => "刷新令牌",
             NotifyEvent::Sync => "同步数据",
+            NotifyEvent::AuthRequest => "设备登录请求",
+            NotifyEvent::AuthResponse => "设备登录响应",
         }
     }
 
@@ -102,6 +108,8 @@ impl NotifyEvent {
             NotifyEvent::TwoFactorRecover => "🔓",
             NotifyEvent::TokenRefresh => "🔄",
             NotifyEvent::Sync => "🔄",
+            NotifyEvent::AuthRequest => "📱",
+            NotifyEvent::AuthResponse => "✅",
         }
     }
 
@@ -117,6 +125,8 @@ impl NotifyEvent {
             NotifyEvent::TwoFactorRecoveryCodeView => "warning",
             NotifyEvent::TwoFactorRecover => "warning",
             NotifyEvent::TokenRefresh => "info",
+            NotifyEvent::AuthRequest => "info",
+            NotifyEvent::AuthResponse => "info",
             _ => "comment",
         }
     }
@@ -783,6 +793,109 @@ impl EmailType {
             EmailType::TwoFactorLogin => "2fa_login",
         }
     }
+}
+
+pub async fn publish_auth_request(
+    env: &Env,
+    user_id: &str,
+    request_id: &str,
+) -> Result<(), worker::Error> {
+    let db = get_db(env).map_err(|e| worker::Error::RustError(e.to_string()))?;
+    let user: Option<serde_json::Value> = db
+        .prepare("SELECT email FROM users WHERE id = ?1")
+        .bind(&[user_id.into()])
+        .map_err(|e| worker::Error::RustError(e.to_string()))?
+        .first(None)
+        .await
+        .map_err(|e| worker::Error::RustError(e.to_string()))?;
+
+    let email = user
+        .and_then(|u| u.get("email").and_then(|v| v.as_str()).map(|s| s.to_string()));
+
+    let req: Option<serde_json::Value> = db
+        .prepare("SELECT request_device_identifier, device_type, request_ip FROM auth_requests WHERE id = ?1")
+        .bind(&[request_id.into()])
+        .map_err(|e| worker::Error::RustError(e.to_string()))?
+        .first(None)
+        .await
+        .map_err(|e| worker::Error::RustError(e.to_string()))?;
+
+    let (device_id, device_type, ip) = if let Some(r) = req {
+        (
+            r.get("request_device_identifier").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            r.get("device_type").and_then(|v| v.as_i64()).map(|i| i as i32),
+            r.get("request_ip").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        )
+    } else {
+        (None, None, None)
+    };
+
+    let mut meta = RequestMeta::default();
+    meta.ip = ip;
+
+    let ctx = NotifyContext {
+        user_id: Some(user_id.to_string()),
+        user_email: email,
+        device_identifier: device_id,
+        device_type,
+        meta,
+        ..Default::default()
+    };
+
+    notify_best_effort(env, NotifyEvent::AuthRequest, ctx).await;
+    Ok(())
+}
+
+pub async fn publish_auth_response(
+    env: &Env,
+    user_id: &str,
+    request_id: &str,
+) -> Result<(), worker::Error> {
+    let db = get_db(env).map_err(|e| worker::Error::RustError(e.to_string()))?;
+    let user: Option<serde_json::Value> = db
+        .prepare("SELECT email FROM users WHERE id = ?1")
+        .bind(&[user_id.into()])
+        .map_err(|e| worker::Error::RustError(e.to_string()))?
+        .first(None)
+        .await
+        .map_err(|e| worker::Error::RustError(e.to_string()))?;
+
+    let email = user
+        .and_then(|u| u.get("email").and_then(|v| v.as_str()).map(|s| s.to_string()));
+
+    let req: Option<serde_json::Value> = db
+        .prepare("SELECT response_device_identifier, approved FROM auth_requests WHERE id = ?1")
+        .bind(&[request_id.into()])
+        .map_err(|e| worker::Error::RustError(e.to_string()))?
+        .first(None)
+        .await
+        .map_err(|e| worker::Error::RustError(e.to_string()))?;
+
+    let (device_id, approved) = if let Some(r) = req {
+        (
+            r.get("response_device_identifier").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            r.get("approved").and_then(|v| v.as_i64()).map(|i| i == 1).unwrap_or(false),
+        )
+    } else {
+        (None, false)
+    };
+
+    let detail = if approved {
+        Some("已批准登录请求".to_string())
+    } else {
+        Some("已拒绝登录请求".to_string())
+    };
+
+    let ctx = NotifyContext {
+        user_id: Some(user_id.to_string()),
+        user_email: email,
+        device_identifier: device_id,
+        detail,
+        ..Default::default()
+    };
+
+    notify_best_effort(env, NotifyEvent::AuthResponse, ctx).await;
+    Ok(())
 }
 
 pub fn send_email_token_background(
