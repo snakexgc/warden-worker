@@ -494,6 +494,13 @@ pub async fn register(
     let name = name_from_token
         .or_else(|| payload.name.filter(|n| !n.trim().is_empty()))
         .unwrap_or_else(|| email.clone());
+
+    if payload.kdf != KDF_TYPE_ARGON2ID {
+        return Err(AppError::BadRequest(
+            "Registration requires Argon2id (kdfType=1)".to_string(),
+        ));
+    }
+
     let (kdf_memory, kdf_parallelism) = validate_kdf(
         payload.kdf,
         payload.kdf_iterations,

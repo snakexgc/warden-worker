@@ -48,7 +48,7 @@
 	},
 	// 构建配置（等价于 [build]）
 	"build": {
-		"command": "worker-build --release"
+		"command": "node ./scripts/patch-webvault-kdf.mjs && worker-build --release"
 	},
 	"assets": {
 		"directory": "./static/web-vault",

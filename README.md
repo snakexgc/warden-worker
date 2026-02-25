@@ -1,17 +1,3 @@
-# 特别注意！
-
-由于服务器端CPU时间严重超时，PBKDF2算法要求的>=60W次迭代简直是天荒夜谈，为了保证注册和登录时不报错，所以修改为了1w次（形同虚设），安全性没有保障，请务必修改！
-
-## 加密修改方法
-注册账户后，请在 **Web端** 访问 设置 -> 安全 -> 密钥，将 算法 修改为 **Argon2id**，其他参数可以保持默认即可（64Mb/3次迭代/4个线程）。
-
-或者直接访问如下路径 https://<你的链接>/#/settings/security/security-keys 进行修改
-
-**修改之后登录/增删密码等需要加密的操作，将会很快完成，效果远优于使用PBKDF2算法！。**
-
-**如果不修改，大概率会导致Workers CPU Timeout错误，导致服务不可用！**
-
----
 # Warden Worker
 
 Warden Worker 是一个运行在 Cloudflare Workers 上的轻量级 Bitwarden 兼容服务端实现，使用 Cloudflare D1（SQLite）作为数据存储，核心代码用 Rust 编写，目标是“个人可用、部署成本低、无需维护服务器”。
@@ -26,8 +12,9 @@ Warden Worker 是一个运行在 Cloudflare Workers 上的轻量级 Bitwarden �
 - 官方安卓兼容：支持 `/api/devices/knowndevice` 与 remember-device 流程
 - **安全增强**：支持"踢出所有已登录设备"，增强了 Token 刷新时的安全性
 - **消息通知**：支持企业微信 Webhook 推送，覆盖登录/失败、密码库变更等 10+ 种事件，支持 GeoIP 显示 IP 归属地
-- **邮箱二步验证**：通过 Webhook 发送验证码邮件，无需配置 SMTP 服务器
+- **邮箱二步验证**：通过 Webhook/Telegram 发送验证码邮件，无需配置 SMTP 服务器
 - 性能优化：加密算法使用 CF 提供的函数，避免了 Rust 标准库的加密性能问题
+- 强制使用Argon2id算法，避免CPU超时
 
 ## 自动部署（GitHub Actions）（推荐）
 
