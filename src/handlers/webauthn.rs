@@ -8,7 +8,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use crate::{auth::Claims, db, error::AppError, jwt, webauthn, router::AppState, notify};
+use crate::{auth::Claims, db, error::AppError, jwt, webauthn, router::AppState, notify, two_factor};
+use crate::logging::targets;
 use crate::notify::{NotifyContext, NotifyEvent, extract_request_meta};
 
 #[derive(Debug, Deserialize, Clone)]
@@ -55,9 +56,7 @@ impl SecretVerificationData {
                 }
                 Ok(())
             }
-            (None, Some(_)) => Err(AppError::BadRequest(
-                "OTP validation is not supported".to_string(),
-            )),
+            (None, Some(otp)) => two_factor::validate_protected_action_otp(db, user_id, otp, false).await,
             _ => Err(AppError::BadRequest("No validation provided".to_string())),
         }
     }
@@ -135,21 +134,37 @@ async fn webauthn_response(
     db: &worker::D1Database,
     user_id: &str,
 ) -> Result<serde_json::Value, AppError> {
+    webauthn_response_with_object(db, user_id, "twoFactorWebAuthn").await
+}
+
+async fn webauthn_response_u2f(
+    db: &worker::D1Database,
+    user_id: &str,
+) -> Result<serde_json::Value, AppError> {
+    webauthn_response_with_object(db, user_id, "twoFactorU2f").await
+}
+
+async fn webauthn_response_with_object(
+    db: &worker::D1Database,
+    user_id: &str,
+    object_name: &str,
+) -> Result<serde_json::Value, AppError> {
     let keys = webauthn::list_webauthn_2fa_keys(db, user_id).await?;
     let enabled = webauthn::is_webauthn_enabled(db, user_id).await?;
     let key_items: Vec<Value> = keys
         .into_iter()
         .map(|k| {
             json!({
-                "Name": k.name,
-                "Id": k.id,
-                "Migrated": k.migrated
+                "id": k.id,
+                "name": k.name,
+                "migrated": k.migrated
             })
         })
         .collect();
     Ok(json!({
-        "Enabled": enabled,
-        "Keys": key_items
+        "enabled": enabled,
+        "keys": key_items,
+        "object": object_name
     }))
 }
 
@@ -347,6 +362,32 @@ pub async fn webauthn_save_credential(
     let slot_id = next_available_webauthn_slot_id(&db, &claims.sub).await?;
     let name = payload.name.clone().unwrap_or_default();
 
+    log::info!(
+        target: targets::AUTH,
+        "webauthn_save_credential start user_id={} slot_id={} supports_prf={:?} has_enc_pub={} has_enc_user={} has_enc_priv={}",
+        claims.sub,
+        slot_id,
+        payload.supports_prf,
+        payload
+            .encrypted_public_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .is_some(),
+        payload
+            .encrypted_user_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .is_some(),
+        payload
+            .encrypted_private_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .is_some()
+    );
+
     webauthn::register_webauthn_credential(
         &db,
         &claims.sub,
@@ -393,6 +434,16 @@ pub async fn webauthn_save_credential(
     )
     .await?;
 
+    log::info!(
+        target: targets::AUTH,
+        "webauthn_save_credential stored user_id={} slot_id={} prf_status={} has_enc_user={} has_enc_priv={}",
+        claims.sub,
+        slot_id,
+        prf_status,
+        encrypted_user_key.is_some(),
+        encrypted_private_key.is_some()
+    );
+
     // Send notification
     let user_email: Option<String> = db
         .prepare("SELECT email FROM users WHERE id = ?1")
@@ -430,6 +481,30 @@ pub async fn webauthn_update_credential(
     let db = db::get_db(&state.env)?;
     let assertion_token_json = serde_json::to_string(&payload.device_response)
         .map_err(|_| AppError::BadRequest("Invalid WebAuthn assertion".to_string()))?;
+
+    log::info!(
+        target: targets::AUTH,
+        "webauthn_update_credential start user_id={} has_enc_pub={} has_enc_user={} has_enc_priv={}",
+        claims.sub,
+        payload
+            .encrypted_public_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .is_some(),
+        payload
+            .encrypted_user_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .is_some(),
+        payload
+            .encrypted_private_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .is_some()
+    );
 
     webauthn::verify_login_assertion(
         &db,
@@ -478,6 +553,15 @@ pub async fn webauthn_update_credential(
         encrypted_private_key,
     )
     .await?;
+
+    log::info!(
+        target: targets::AUTH,
+        "webauthn_update_credential updated user_id={} credential_id={} has_enc_user={} has_enc_priv={}",
+        claims.sub,
+        credential_id_b64url,
+        encrypted_user_key.is_some(),
+        encrypted_private_key.is_some()
+    );
 
     // Send notification
     let user_email: Option<String> = db
@@ -643,7 +727,7 @@ pub async fn put_webauthn(
     .await?;
     webauthn::set_webauthn_two_factor_enabled(&db, &claims.sub, true).await?;
 
-    Ok(Json(webauthn_response(&db, &claims.sub).await?))
+    Ok(Json(webauthn_response_u2f(&db, &claims.sub).await?))
 }
 
 #[worker::send]
@@ -664,7 +748,7 @@ pub async fn delete_webauthn(
     if !webauthn::has_webauthn_credentials(&db, &claims.sub).await? {
         webauthn::set_webauthn_two_factor_enabled(&db, &claims.sub, false).await?;
     }
-    Ok(Json(webauthn_response(&db, &claims.sub).await?))
+    Ok(Json(webauthn_response_u2f(&db, &claims.sub).await?))
 }
 
 #[worker::send]

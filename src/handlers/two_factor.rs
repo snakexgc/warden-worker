@@ -92,9 +92,9 @@ impl PasswordOrOtpData {
                 }
                 Ok(())
             }
-            (None, Some(_)) => Err(AppError::BadRequest(
-                "OTP validation is not supported".to_string(),
-            )),
+            (None, Some(otp)) => {
+                two_factor::validate_protected_action_otp(db, user_id, otp, false).await
+            }
             _ => {
                 log::warn!(
                     target: targets::AUTH,

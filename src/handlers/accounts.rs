@@ -25,6 +25,8 @@ const KDF_TYPE_PBKDF2: i32 = 0;
 const KDF_TYPE_ARGON2ID: i32 = 1;
 const ARGON2ID_MEMORY_DEFAULT_MB: i32 = 64;
 const ARGON2ID_PARALLELISM_DEFAULT: i32 = 4;
+const PROTECTED_ACTION_OTP_SIZE: u8 = 6;
+const PROTECTED_ACTION_OTP_REQUEST_COOLDOWN_SECONDS: i64 = 30;
 
 fn clean_password_hint(password_hint: Option<String>) -> Option<String> {
     match password_hint {
@@ -958,6 +960,127 @@ pub struct SendVerificationEmailRequest {
     pub email: String,
     pub name: Option<String>,
     pub receive_marketing_emails: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyOtpRequest {
+    #[serde(rename = "OTP", alias = "otp")]
+    pub otp: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretVerificationRequest {
+    pub master_password_hash: String,
+}
+
+#[worker::send]
+pub async fn request_otp(
+    claims: Claims,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, AppError> {
+    if !notify::is_email_webhook_configured(&state.env) {
+        return Err(AppError::BadRequest(
+            "Email verification is not configured on server".to_string(),
+        ));
+    }
+
+    let db = db::get_db(&state.env)?;
+    claims.verify_security_stamp(&db).await?;
+
+    if let Some(existing) = two_factor::get_protected_action_otp(&db, &claims.sub).await? {
+        let elapsed = Utc::now().timestamp().saturating_sub(existing.token_sent);
+        if elapsed < PROTECTED_ACTION_OTP_REQUEST_COOLDOWN_SECONDS {
+            return Err(AppError::BadRequest(format!(
+                "Please wait {} seconds before requesting another code.",
+                PROTECTED_ACTION_OTP_REQUEST_COOLDOWN_SECONDS - elapsed
+            )));
+        }
+    }
+
+    let user_row: Option<Value> = db
+        .prepare("SELECT email FROM users WHERE id = ?1")
+        .bind(&[claims.sub.clone().into()])?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?;
+    let email = user_row
+        .and_then(|r| r.get("email").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+
+    let token = two_factor::generate_email_token(PROTECTED_ACTION_OTP_SIZE);
+    let otp_data = two_factor::ProtectedActionOtpData::new(token.clone());
+    let now = Utc::now().to_rfc3339();
+    two_factor::upsert_protected_action_otp(&db, &claims.sub, &otp_data, &now).await?;
+
+    notify::send_email_token_background(
+        &state.ctx,
+        state.env.clone(),
+        email,
+        token,
+        notify::EmailType::TwoFactorLogin,
+    );
+
+    Ok(Json(json!({})))
+}
+
+#[worker::send]
+pub async fn verify_otp(
+    claims: Claims,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<VerifyOtpRequest>,
+) -> Result<Json<Value>, AppError> {
+    if !notify::is_email_webhook_configured(&state.env) {
+        return Err(AppError::BadRequest(
+            "Email verification is not configured on server".to_string(),
+        ));
+    }
+
+    let db = db::get_db(&state.env)?;
+    claims.verify_security_stamp(&db).await?;
+    two_factor::validate_protected_action_otp(&db, &claims.sub, &payload.otp, true).await?;
+
+    Ok(Json(json!({})))
+}
+
+#[worker::send]
+pub async fn verify_password(
+    claims: Claims,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SecretVerificationRequest>,
+) -> Result<Json<Value>, AppError> {
+    let db = db::get_db(&state.env)?;
+    claims.verify_security_stamp(&db).await?;
+
+    let user_row: Option<Value> = db
+        .prepare("SELECT master_password_hash, password_salt FROM users WHERE id = ?1")
+        .bind(&[claims.sub.clone().into()])?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?;
+
+    let Some(row) = user_row else {
+        return Err(AppError::NotFound("User not found".to_string()));
+    };
+
+    let stored_hash = row
+        .get("master_password_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let password_salt = row.get("password_salt").and_then(|v| v.as_str());
+
+    let valid = if let Some(salt) = password_salt {
+        crypto::verify_password(&payload.master_password_hash, salt, stored_hash).await
+    } else {
+        constant_time_eq(stored_hash.as_bytes(), payload.master_password_hash.as_bytes())
+    };
+
+    if !valid {
+        return Err(AppError::Unauthorized("Invalid password".to_string()));
+    }
+
+    Ok(Json(json!({})))
 }
 
 #[worker::send]

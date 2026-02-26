@@ -5,6 +5,7 @@ PRAGMA foreign_keys = ON;
 
 DROP TABLE IF EXISTS devices;
 DROP TABLE IF EXISTS auth_requests;
+DROP TABLE IF EXISTS protected_action_otp;
 DROP TABLE IF EXISTS two_factor_email;
 DROP TABLE IF EXISTS two_factor_authenticator;
 DROP TABLE IF EXISTS webauthn_challenges;
@@ -202,6 +203,14 @@ CREATE TABLE IF NOT EXISTS auth_requests (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS protected_action_otp (
+    user_id TEXT PRIMARY KEY NOT NULL,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_ciphers_user_id ON ciphers(user_id);
 CREATE INDEX IF NOT EXISTS idx_ciphers_folder_id ON ciphers(folder_id);
 CREATE INDEX IF NOT EXISTS idx_sends_user_id ON sends(user_id);
@@ -211,5 +220,6 @@ CREATE INDEX IF NOT EXISTS idx_send_file_chunks_send_file_id ON send_file_chunks
 CREATE INDEX IF NOT EXISTS idx_folders_user_id ON folders(user_id);
 CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id);
 CREATE INDEX IF NOT EXISTS idx_auth_requests_user_id ON auth_requests(user_id);
+CREATE INDEX IF NOT EXISTS idx_protected_action_otp_user_id ON protected_action_otp(user_id);
 CREATE INDEX IF NOT EXISTS idx_two_factor_webauthn_user_id ON two_factor_webauthn(user_id);
 CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_user ON webauthn_challenges(user_id);

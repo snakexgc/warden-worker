@@ -1224,6 +1224,13 @@ pub async fn token(
             let device_response = payload
                 .device_response
                 .ok_or_else(|| AppError::BadRequest("Missing deviceResponse".to_string()))?;
+            log::info!(
+                target: targets::AUTH,
+                "identity token webauthn start device_identifier={:?} device_name={:?} device_type={:?}",
+                payload.device_identifier,
+                payload.device_name,
+                payload.device_type
+            );
             let jwt_secret = state.env.secret("JWT_SECRET")?.to_string();
             let login_result = webauthn::verify_passwordless_login_assertion(
                 &db,
@@ -1239,6 +1246,23 @@ pub async fn token(
                 other => other,
             })?;
             let user_id = login_result.user_id.clone();
+            log::info!(
+                target: targets::AUTH,
+                "identity token webauthn verified user_id={} has_enc_user={} has_enc_priv={}",
+                user_id,
+                login_result
+                    .encrypted_user_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .is_some(),
+                login_result
+                    .encrypted_private_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .is_some()
+            );
 
             let user: Value = db
                 .prepare("SELECT * FROM users WHERE id = ?1")
@@ -1270,6 +1294,13 @@ pub async fn token(
                 }
                 _ => None,
             };
+
+            log::info!(
+                target: targets::AUTH,
+                "identity token webauthn response user_id={} include_prf_option={}",
+                user_id,
+                webauthn_prf_option.is_some()
+            );
 
             let user_email = user.email.clone();
             let response = generate_tokens_and_response(user, &state, device_identifier.clone(), webauthn_prf_option.as_ref())?;

@@ -2,8 +2,10 @@ use axum::http::HeaderMap;
 use base64::{engine::general_purpose, Engine as _};
 use chrono::{Duration, Utc};
 use ciborium::value::Value as CborValue;
-use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+use p256::ecdsa::{signature::Verifier as _, Signature as P256Signature, VerifyingKey as P256VerifyingKey};
 use rand::RngCore;
+use rsa::{RsaPublicKey, BigUint};
+use rsa::pkcs1v15::{Signature as RsaSignature, VerifyingKey as RsaVerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -12,7 +14,7 @@ use uuid::Uuid;
 use worker::wasm_bindgen::JsValue;
 use worker::D1Database;
 
-use crate::{error::AppError, jwt};
+use crate::{error::AppError, jwt, logging::targets};
 
 pub const TWO_FACTOR_PROVIDER_WEBAUTHN: i32 = 7;
 pub const WEBAUTHN_PRF_STATUS_ENABLED: i32 = 0;
@@ -706,6 +708,16 @@ pub async fn issue_registration_challenge(
         })
         .collect::<Vec<_>>();
 
+    log::info!(
+        target: targets::AUTH,
+        "issue_registration_challenge user_id={} use={} exclude_credentials={} origin={} rp_id={}",
+        user_id,
+        credential_use,
+        exclude_credentials.len(),
+        origin,
+        rp_id
+    );
+
     let mut user_id_bytes = Uuid::parse_str(user_id)
         .map(|u| u.as_bytes().to_vec())
         .unwrap_or_else(|_| user_id.as_bytes().to_vec());
@@ -719,13 +731,17 @@ pub async fn issue_registration_challenge(
     Ok(json!({
         "attestation": "none",
         "authenticatorSelection": {
-            "userVerification": "preferred"
+            "userVerification": "preferred",
+            "residentKey": "preferred"
         },
         "challenge": challenge,
         "excludeCredentials": exclude_credentials,
-        "extensions": {},
+        "extensions": {
+            "prf": {}
+        },
         "pubKeyCredParams": [
-            { "type": "public-key", "alg": -7 }
+            { "type": "public-key", "alg": -7 },   // ES256 (ECDSA w/ SHA-256)
+            { "type": "public-key", "alg": -257 } // RS256 (RSASSA-PKCS1-v1_5 w/ SHA-256)
         ],
         "rp": {
             "name": "Warden Worker",
@@ -858,7 +874,7 @@ pub async fn register_webauthn_credential(
         parse_attestation_object(&attestation_object)?;
 
     verify_rp_id_hash(&pending.rp_id, &rp_id_hash)?;
-    parse_p256_verifying_key(&credential_public_key_cose)?;
+    parse_webauthn_public_key(&credential_public_key_cose)?;
 
     let cg = CredentialGroup {
         db,
@@ -934,19 +950,16 @@ pub async fn verify_login_assertion(
         .ok_or_else(|| AppError::Unauthorized("Invalid two factor token".to_string()))?;
 
     let public_key_cose = decode_b64_any(&stored.public_key_cose_b64)?;
-    let verifying_key = parse_p256_verifying_key(&public_key_cose)
+    let (verifying_key, _alg) = parse_webauthn_public_key(&public_key_cose)
         .map_err(|_| AppError::Unauthorized("Invalid two factor token".to_string()))?;
 
     let signature = decode_b64_any(&assertion.response.signature)?;
-    let signature = Signature::from_der(&signature)
-        .map_err(|_| AppError::Unauthorized("Invalid two factor token".to_string()))?;
 
     let mut signed_data = Vec::with_capacity(authenticator_data.len() + 32);
     signed_data.extend_from_slice(&authenticator_data);
     signed_data.extend_from_slice(&Sha256::digest(&client_data_json));
     verifying_key
-        .verify(&signed_data, &signature)
-        .map_err(|_| AppError::Unauthorized("Invalid two factor token".to_string()))?;
+        .verify(&signed_data, &signature)?;
 
     let new_sign_count = parsed.sign_count as i64;
     let old_sign_count = stored.sign_count;
@@ -999,6 +1012,12 @@ pub async fn verify_passwordless_login_assertion(
 
     let assertion: WebAuthnAssertionToken = serde_json::from_str(assertion_token_json)
         .map_err(|_| AppError::Unauthorized("Invalid WebAuthn assertion payload".to_string()))?;
+    log::info!(
+        target: targets::AUTH,
+        "verify_passwordless_login_assertion received raw_id_present={} id_present={}",
+        assertion.raw_id.is_some(),
+        assertion.id.is_some()
+    );
     let client_data_json = decode_b64_any(&assertion.response.client_data_json)?;
     let client_data: ClientDataJson = serde_json::from_slice(&client_data_json)
         .map_err(|_| AppError::Unauthorized("Invalid WebAuthn clientDataJson".to_string()))?;
@@ -1043,32 +1062,54 @@ pub async fn verify_passwordless_login_assertion(
         }
     };
     let credential_id_b64url = encode_b64url(&credential_id_raw);
+    log::info!(
+        target: targets::AUTH,
+        "verify_passwordless_login_assertion lookup credential_id={}",
+        credential_id_b64url
+    );
     let stored = get_stored_credential_by_credential_id(db, &credential_id_b64url)
         .await?
         .ok_or_else(|| {
+            log::warn!(
+                target: targets::AUTH,
+                "verify_passwordless_login_assertion credential not found credential_id={}",
+                credential_id_b64url
+            );
             AppError::Unauthorized(
                 "WebAuthn credential id is not registered on this server".to_string(),
             )
         })?;
+    log::info!(
+        target: targets::AUTH,
+        "verify_passwordless_login_assertion credential matched user_id={} slot_id={} has_enc_user={} has_enc_priv={}",
+        stored.user_id,
+        stored.slot_id,
+        stored
+            .encrypted_user_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .is_some(),
+        stored
+            .encrypted_private_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .is_some()
+    );
 
     let public_key_cose = decode_b64_any(&stored.public_key_cose_b64)?;
-    let verifying_key = parse_p256_verifying_key(&public_key_cose).map_err(|_| {
+    let (verifying_key, _alg) = parse_webauthn_public_key(&public_key_cose).map_err(|_| {
         AppError::Unauthorized("Invalid WebAuthn credential public key".to_string())
     })?;
 
     let signature = decode_b64_any(&assertion.response.signature)?;
-    let signature = Signature::from_der(&signature).map_err(|_| {
-        AppError::Unauthorized("Invalid WebAuthn assertion signature format".to_string())
-    })?;
 
     let mut signed_data = Vec::with_capacity(authenticator_data.len() + 32);
     signed_data.extend_from_slice(&authenticator_data);
     signed_data.extend_from_slice(&Sha256::digest(&client_data_json));
     verifying_key
-        .verify(&signed_data, &signature)
-        .map_err(|_| {
-            AppError::Unauthorized("WebAuthn signature verification failed".to_string())
-        })?;
+        .verify(&signed_data, &signature)?;
 
     let new_sign_count = parsed.sign_count as i64;
     let old_sign_count = stored.sign_count;
@@ -1330,7 +1371,34 @@ fn parse_auth_data(data: &[u8], expect_attested_data: bool) -> Result<ParsedAuth
     })
 }
 
-fn parse_p256_verifying_key(cose_key_bytes: &[u8]) -> Result<VerifyingKey, AppError> {
+#[derive(Debug, Clone)]
+pub enum WebAuthnVerifyingKey {
+    P256(P256VerifyingKey),
+    Rsa(RsaPublicKey),
+}
+
+impl WebAuthnVerifyingKey {
+    fn verify(&self, signed_data: &[u8], signature: &[u8]) -> Result<(), AppError> {
+        match self {
+            WebAuthnVerifyingKey::P256(vk) => {
+                let sig = P256Signature::from_der(signature)
+                    .map_err(|_| AppError::Unauthorized("Invalid signature format".to_string()))?;
+                vk.verify(signed_data, &sig)
+                    .map_err(|_| AppError::Unauthorized("Signature verification failed".to_string()))
+            }
+            WebAuthnVerifyingKey::Rsa(rsa_key) => {
+                // RS256: RSASSA-PKCS1-v1_5 with SHA-256
+                let verifying_key = RsaVerifyingKey::<Sha256>::new(rsa_key.clone());
+                let sig = RsaSignature::try_from(signature)
+                    .map_err(|_| AppError::Unauthorized("Invalid signature format".to_string()))?;
+                verifying_key.verify(signed_data, &sig)
+                    .map_err(|_| AppError::Unauthorized("Signature verification failed".to_string()))
+            }
+        }
+    }
+}
+
+fn parse_webauthn_public_key(cose_key_bytes: &[u8]) -> Result<(WebAuthnVerifyingKey, i64), AppError> {
     let value: CborValue = ciborium::de::from_reader(Cursor::new(cose_key_bytes))
         .map_err(|_| AppError::BadRequest("Invalid WebAuthn public key".to_string()))?;
     let map = value
@@ -1341,31 +1409,56 @@ fn parse_p256_verifying_key(cose_key_bytes: &[u8]) -> Result<VerifyingKey, AppEr
         .ok_or_else(|| AppError::BadRequest("Invalid WebAuthn public key".to_string()))?;
     let alg = map_get_i128(map, 3)
         .ok_or_else(|| AppError::BadRequest("Invalid WebAuthn public key".to_string()))?;
-    let crv = map_get_i128(map, -1)
-        .ok_or_else(|| AppError::BadRequest("Invalid WebAuthn public key".to_string()))?;
-    if kty != 2 || alg != -7 || crv != 1 {
-        return Err(AppError::BadRequest(
-            "Unsupported WebAuthn public key type".to_string(),
-        ));
+
+    match (kty, alg) {
+        // EC2 key type (kty=2) with ES256 (alg=-7)
+        (2, -7) => {
+            let crv = map_get_i128(map, -1)
+                .ok_or_else(|| AppError::BadRequest("Invalid WebAuthn public key".to_string()))?;
+            if crv != 1 {
+                return Err(AppError::BadRequest(
+                    "Unsupported WebAuthn curve".to_string(),
+                ));
+            }
+
+            let x = map_get_bytes(map, -2)
+                .ok_or_else(|| AppError::BadRequest("Invalid WebAuthn public key".to_string()))?;
+            let y = map_get_bytes(map, -3)
+                .ok_or_else(|| AppError::BadRequest("Invalid WebAuthn public key".to_string()))?;
+            if x.len() != 32 || y.len() != 32 {
+                return Err(AppError::BadRequest(
+                    "Invalid WebAuthn public key length".to_string(),
+                ));
+            }
+
+            let mut encoded = Vec::with_capacity(65);
+            encoded.push(0x04);
+            encoded.extend_from_slice(x);
+            encoded.extend_from_slice(y);
+
+            let vk = P256VerifyingKey::from_sec1_bytes(&encoded)
+                .map_err(|_| AppError::BadRequest("Invalid WebAuthn public key".to_string()))?;
+            Ok((WebAuthnVerifyingKey::P256(vk), alg as i64))
+        }
+        // RSA key type (kty=3) with RS256 (alg=-257)
+        (3, -257) => {
+            // RSA public key: n (-1) and e (-2)
+            let n = map_get_bytes(map, -1)
+                .ok_or_else(|| AppError::BadRequest("Invalid RSA public key".to_string()))?;
+            let e = map_get_bytes(map, -2)
+                .ok_or_else(|| AppError::BadRequest("Invalid RSA public key".to_string()))?;
+
+            let n_biguint = BigUint::from_bytes_be(n);
+            let e_biguint = BigUint::from_bytes_be(e);
+
+            let rsa_key = RsaPublicKey::new(n_biguint, e_biguint)
+                .map_err(|_| AppError::BadRequest("Invalid RSA public key".to_string()))?;
+            Ok((WebAuthnVerifyingKey::Rsa(rsa_key), alg as i64))
+        }
+        _ => Err(AppError::BadRequest(
+            format!("Unsupported WebAuthn public key type: kty={}, alg={}", kty, alg),
+        )),
     }
-
-    let x = map_get_bytes(map, -2)
-        .ok_or_else(|| AppError::BadRequest("Invalid WebAuthn public key".to_string()))?;
-    let y = map_get_bytes(map, -3)
-        .ok_or_else(|| AppError::BadRequest("Invalid WebAuthn public key".to_string()))?;
-    if x.len() != 32 || y.len() != 32 {
-        return Err(AppError::BadRequest(
-            "Invalid WebAuthn public key length".to_string(),
-        ));
-    }
-
-    let mut encoded = Vec::with_capacity(65);
-    encoded.push(0x04);
-    encoded.extend_from_slice(x);
-    encoded.extend_from_slice(y);
-
-    VerifyingKey::from_sec1_bytes(&encoded)
-        .map_err(|_| AppError::BadRequest("Invalid WebAuthn public key".to_string()))
 }
 
 fn map_get_text<'a>(map: &'a [(CborValue, CborValue)], key: &str) -> Option<&'a CborValue> {

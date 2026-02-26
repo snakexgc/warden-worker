@@ -7,7 +7,6 @@ use js_sys::Date;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use totp_rs::{Algorithm, Secret, TOTP};
 use worker::D1Database;
 
@@ -19,6 +18,33 @@ pub const TWO_FACTOR_PROVIDER_EMAIL: i32 = 1;
 pub const TWO_FACTOR_PROVIDER_WEBAUTHN: i32 = 7;
 pub const TWO_FACTOR_PROVIDER_RECOVERY_CODE: i32 = 8;
 pub const TWO_FACTOR_TYPE_EMAIL_VERIFICATION_CHALLENGE: i32 = 1002;
+pub const PROTECTED_ACTION_OTP_EXPIRATION_TIME: i64 = 600;
+pub const PROTECTED_ACTION_OTP_ATTEMPTS_LIMIT: u64 = 3;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtectedActionOtpData {
+    pub token: String,
+    pub token_sent: i64,
+    pub attempts: u64,
+}
+
+impl ProtectedActionOtpData {
+    pub fn new(token: String) -> Self {
+        Self {
+            token,
+            token_sent: Utc::now().timestamp(),
+            attempts: 0,
+        }
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    pub fn from_json(json_str: &str) -> Result<Self, AppError> {
+        serde_json::from_str(json_str).map_err(|_| AppError::Internal)
+    }
+}
 
 pub fn generate_totp_secret_base32_20() -> String {
     let mut bytes = [0u8; 20];
@@ -282,6 +308,114 @@ pub async fn ensure_two_factor_email_table(db: &D1Database) -> Result<(), AppErr
     .run()
     .await
     .map_err(|_| AppError::Database)?;
+    Ok(())
+}
+
+pub async fn ensure_protected_action_otp_table(db: &D1Database) -> Result<(), AppError> {
+    db.prepare(
+        "CREATE TABLE IF NOT EXISTS protected_action_otp (
+            user_id TEXT PRIMARY KEY NOT NULL,
+            data TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )",
+    )
+    .run()
+    .await
+    .map_err(|_| AppError::Database)?;
+    Ok(())
+}
+
+pub async fn get_protected_action_otp(
+    db: &D1Database,
+    user_id: &str,
+) -> Result<Option<ProtectedActionOtpData>, AppError> {
+    ensure_protected_action_otp_table(db).await?;
+    let data: Option<String> = db
+        .prepare("SELECT data FROM protected_action_otp WHERE user_id = ?1")
+        .bind(&[user_id.into()])?
+        .first(Some("data"))
+        .await
+        .map_err(|_| AppError::Database)?;
+
+    match data {
+        Some(json_data) => Ok(Some(ProtectedActionOtpData::from_json(&json_data)?)),
+        None => Ok(None),
+    }
+}
+
+pub async fn upsert_protected_action_otp(
+    db: &D1Database,
+    user_id: &str,
+    data: &ProtectedActionOtpData,
+    now: &str,
+) -> Result<(), AppError> {
+    ensure_protected_action_otp_table(db).await?;
+    db.prepare(
+        "INSERT INTO protected_action_otp (user_id, data, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(user_id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at",
+    )
+    .bind(&[
+        user_id.into(),
+        data.to_json().into(),
+        now.into(),
+        now.into(),
+    ])?
+    .run()
+    .await
+    .map_err(|_| AppError::Database)?;
+    Ok(())
+}
+
+pub async fn delete_protected_action_otp(db: &D1Database, user_id: &str) -> Result<(), AppError> {
+    ensure_protected_action_otp_table(db).await?;
+    db.prepare("DELETE FROM protected_action_otp WHERE user_id = ?1")
+        .bind(&[user_id.into()])?
+        .run()
+        .await
+        .map_err(|_| AppError::Database)?;
+    Ok(())
+}
+
+pub async fn validate_protected_action_otp(
+    db: &D1Database,
+    user_id: &str,
+    otp: &str,
+    delete_if_valid: bool,
+) -> Result<(), AppError> {
+    let mut data = get_protected_action_otp(db, user_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::BadRequest(
+                "Protected action token not found, try sending the code again or restart the process"
+                    .to_string(),
+            )
+        })?;
+
+    data.attempts = data.attempts.saturating_add(1);
+
+    if data.attempts >= PROTECTED_ACTION_OTP_ATTEMPTS_LIMIT {
+        let _ = delete_protected_action_otp(db, user_id).await;
+        return Err(AppError::BadRequest("Token has expired".to_string()));
+    }
+
+    if is_token_expired(data.token_sent, PROTECTED_ACTION_OTP_EXPIRATION_TIME) {
+        let _ = delete_protected_action_otp(db, user_id).await;
+        return Err(AppError::BadRequest("Token has expired".to_string()));
+    }
+
+    if !constant_time_eq::constant_time_eq(data.token.as_bytes(), otp.as_bytes()) {
+        let now = Utc::now().to_rfc3339();
+        upsert_protected_action_otp(db, user_id, &data, &now).await?;
+        return Err(AppError::BadRequest("Token is invalid".to_string()));
+    }
+
+    if delete_if_valid {
+        delete_protected_action_otp(db, user_id).await?;
+    }
+
     Ok(())
 }
 
