@@ -228,6 +228,10 @@ pub fn api_router(env: Env, ctx: Context) -> Router<()> {
             post(webauthn::attestation_options),
         )
         .route(
+            "/api/webauthn/prf-probe",
+            post(webauthn::webauthn_prf_probe),
+        )
+        .route(
             "/api/webauthn/assertion-options",
             post(webauthn::assertion_options),
         )

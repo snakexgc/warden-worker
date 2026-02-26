@@ -130,6 +130,13 @@ pub struct UpdateWebAuthnCredentialRequest {
     encrypted_private_key: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebAuthnPrfProbeRequest {
+    #[serde(rename = "supportsPrf")]
+    supports_prf: Option<bool>,
+}
+
 async fn webauthn_response(
     db: &worker::D1Database,
     user_id: &str,
@@ -314,7 +321,30 @@ pub async fn webauthn_attestation_options(
         .to_string();
     Ok(Json(json!({
         "options": options,
-        "token": token
+        "token": token,
+        "prfProbe": {
+            "requiredForUnlock": true,
+            "fallback": "master_password",
+            "endpoint": "/api/webauthn/prf-probe"
+        }
+    })))
+}
+
+#[worker::send]
+pub async fn webauthn_prf_probe(
+    _claims: Claims,
+    Json(payload): Json<WebAuthnPrfProbeRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let supports_prf = payload.supports_prf.unwrap_or(false);
+    Ok(Json(json!({
+        "supportsPrf": supports_prf,
+        "canUsePasskeyUnlock": supports_prf,
+        "requiresPasswordLogin": !supports_prf,
+        "message": if supports_prf {
+            "PRF is available. You can continue passkey unlock setup."
+        } else {
+            "PRF is unavailable on this authenticator/browser. Passkey can be saved for authentication, but vault unlock will fall back to master password."
+        }
     })))
 }
 
@@ -434,6 +464,18 @@ pub async fn webauthn_save_credential(
     )
     .await?;
 
+    let requires_password_login = prf_status != webauthn::WEBAUTHN_PRF_STATUS_ENABLED;
+    if requires_password_login {
+        log::warn!(
+            target: targets::AUTH,
+            "webauthn_save_credential downgraded_to_password user_id={} slot_id={} supports_prf={:?} prf_status={}",
+            claims.sub,
+            slot_id,
+            payload.supports_prf,
+            prf_status
+        );
+    }
+
     log::info!(
         target: targets::AUTH,
         "webauthn_save_credential stored user_id={} slot_id={} prf_status={} has_enc_user={} has_enc_priv={}",
@@ -468,7 +510,17 @@ pub async fn webauthn_save_credential(
     };
     notify::notify_best_effort(&state.env, NotifyEvent::WebAuthnCredentialCreate, notify_ctx).await;
 
-    Ok(Json(json!({ "success": true })))
+    Ok(Json(json!({
+        "success": true,
+        "prfStatus": prf_status,
+        "canUsePasskeyUnlock": !requires_password_login,
+        "requiresPasswordLogin": requires_password_login,
+        "message": if requires_password_login {
+            "Passkey saved. PRF key material is unavailable on this authenticator/browser, so vault unlock will fall back to master password."
+        } else {
+            "Passkey saved with PRF unlock enabled."
+        }
+    })))
 }
 
 #[worker::send]
