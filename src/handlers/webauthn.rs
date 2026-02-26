@@ -297,11 +297,12 @@ pub async fn two_factor_put_webauthn(
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::BadRequest("Can't recover challenge".to_string()))?;
 
+    // Try "id" first, then "rawId" - "id" is usually base64url encoded, "rawId" might be double-encoded
     let credential_id = payload
         .device_response
-        .get("rawId")
+        .get("id")
         .and_then(|v| v.as_str())
-        .or_else(|| payload.device_response.get("id").and_then(|v| v.as_str()))
+        .or_else(|| payload.device_response.get("rawId").and_then(|v| v.as_str()))
         .ok_or_else(|| AppError::BadRequest("WebAuthn credential id missing".to_string()))?
         .to_string();
 
@@ -332,19 +333,31 @@ pub async fn two_factor_put_webauthn(
         .get("type")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    if challenge != expected_challenge || typ != "webauthn.create" {
-        return Err(AppError::BadRequest("WebAuthn credential validation failed".to_string()));
+    if challenge != expected_challenge {
+        return Err(AppError::BadRequest(format!(
+            "WebAuthn challenge mismatch: expected={}, got={}",
+            expected_challenge, challenge
+        )));
+    }
+    if typ != "webauthn.create" {
+        return Err(AppError::BadRequest(format!(
+            "WebAuthn type mismatch: expected=webauthn.create, got={}",
+            typ
+        )));
     }
 
-    let (parsed_credential_id, public_key_sec1, sign_count) =
+    let (parsed_credential_id, public_key, sign_count, key_type) =
         two_factor::parse_webauthn_registration_attestation(attestation_object_b64)?;
 
     let raw_id_bytes = decode_base64_mixed(&credential_id)
-        .ok_or_else(|| AppError::BadRequest("WebAuthn credential id invalid".to_string()))?;
+        .ok_or_else(|| AppError::BadRequest(format!("WebAuthn credential id invalid: raw_id={}", credential_id)))?;
     let parsed_id_bytes = decode_base64_mixed(&parsed_credential_id)
-        .ok_or_else(|| AppError::BadRequest("WebAuthn credential id invalid".to_string()))?;
+        .ok_or_else(|| AppError::BadRequest(format!("WebAuthn parsed credential id invalid: parsed_id={}", parsed_credential_id)))?;
     if !constant_time_eq::constant_time_eq(&raw_id_bytes, &parsed_id_bytes) {
-        return Err(AppError::BadRequest("WebAuthn credential validation failed".to_string()));
+        return Err(AppError::BadRequest(format!(
+            "WebAuthn credential id mismatch: raw_id_len={}, parsed_id_len={}",
+            raw_id_bytes.len(), parsed_id_bytes.len()
+        )));
     }
 
     let mut registrations = two_factor::get_webauthn_credentials(&db, &claims.sub).await?.1;
@@ -353,8 +366,9 @@ pub async fn two_factor_put_webauthn(
         name: payload.name,
         migrated: false,
         credential_id: parsed_credential_id,
-        public_key_sec1: Some(public_key_sec1),
+        public_key_sec1: Some(public_key),
         sign_count: Some(sign_count),
+        key_type: Some(key_type),
     });
 
     let now = Utc::now().to_rfc3339();

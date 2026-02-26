@@ -12,11 +12,6 @@
   display: none !important;
 }
 
-/* 隐藏 "Log in with passkey" 按钮 */
-.vw-passkey-login {
-  display: none !important;
-}
-
 /* 隐藏 "Other" 登录方式按钮 */
 .vw-other-login {
   display: none !important;
@@ -72,17 +67,9 @@ app-login form button[type="submit"][buttontype="primary"] {
   display: inline-flex !important;
 }
 
-/* 确保注册链接显示 - 支持多种选择器 */
+/* 确保注册链接显示 */
 app-login form a[routerlink="/signup"],
-app-login form a[href*="/signup"],
-app-root a[routerlink="/signup"],
-a[routerlink="/signup"] {
-  display: inline-flex !important;
-}
-
-/* 确保创建账户按钮显示 */
-app-login form button[buttontype="secondary"]:not([type="submit"]),
-app-login form a[buttontype="secondary"] {
+app-login form a[href*="/signup"] {
   display: inline-flex !important;
 }
 
@@ -101,4 +88,22 @@ app-login form {
 app-login form .form-group,
 app-login form bit-form-field {
   display: block !important;
+}
+
+/* ============================================
+   侧边栏自定义
+   ============================================ */
+
+/* --------------------------------------------
+   5. 隐藏侧边栏菜单项
+   -------------------------------------------- */
+
+/* 隐藏"域名规则"侧边栏菜单项 */
+[route="settings/domain-rules"] {
+  display: none !important;
+}
+
+/* 隐藏"紧急访问"侧边栏菜单项 */
+[route="settings/emergency-access"] {
+  display: none !important;
 }

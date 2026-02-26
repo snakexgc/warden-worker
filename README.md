@@ -40,6 +40,7 @@ Fork 本仓库到你的 GitHub 账号。
 JWT_SECRET
 JWT_REFRESH_SECRET
 ALLOWED_EMAILS
+DOMAIN
 TWO_FACTOR_ENC_KEY
 WEWORK_WEBHOOK_URL
 TELEGRAM_BOT_TOKEN
@@ -48,6 +49,7 @@ TELEGRAM_CHAT_ID
 - **JWT_SECRET**：访问令牌签名密钥。用于签署短效 Access Token。**必须设置强随机字符串。**
 - **JWT_REFRESH_SECRET**：刷新令牌签名密钥。用于签署长效 Refresh Token。**必须设置强随机字符串，且不要与 JWT_SECRET 相同。**
 - **ALLOWED_EMAILS**：首个账号注册白名单（仅在"数据库还没有任何用户"时启用），多个邮箱用英文逗号分隔。
+- **DOMAIN**：**必选**，你的服务域名，格式如 `https://vault.example.com`。用于 WebAuthn 安全密钥注册等功能。
 - **TWO_FACTOR_ENC_KEY**：可选，Base64 的 32 字节密钥；用于加密存储 TOTP 秘钥
 - **WEWORK_WEBHOOK_URL**：可选，企业微信群机器人的 Webhook 地址。用于事件通知和邮箱二步验证验证码发送。
 - **TELEGRAM_BOT_TOKEN**：可选，Telegram Bot 的 Token。从 [@BotFather](https://t.me/BotFather) 获取。
@@ -94,6 +96,7 @@ wrangler d1 execute vaultsql --remote --file=sql/schema.sql
 wrangler secret put JWT_SECRET
 wrangler secret put JWT_REFRESH_SECRET
 wrangler secret put ALLOWED_EMAILS
+wrangler secret put DOMAIN
 wrangler secret put TWO_FACTOR_ENC_KEY
 wrangler secret put WEWORK_WEBHOOK_URL
 wrangler secret put TELEGRAM_BOT_TOKEN
@@ -103,6 +106,7 @@ wrangler secret put TELEGRAM_CHAT_ID
 - **JWT_SECRET**：访问令牌签名密钥。用于签署短效 Access Token。**必须设置强随机字符串。**
 - **JWT_REFRESH_SECRET**：刷新令牌签名密钥。用于签署长效 Refresh Token。**必须设置强随机字符串，且不要与 JWT_SECRET 相同。**
 - **ALLOWED_EMAILS**：首个账号注册白名单（仅在"数据库还没有任何用户"时启用），多个邮箱用英文逗号分隔。
+- **DOMAIN**：**必选**，你的服务域名，格式如 `https://vault.example.com`。用于 WebAuthn 安全密钥注册等功能。
 - **TWO_FACTOR_ENC_KEY**：可选，Base64 的 32 字节密钥；用于加密存储 TOTP 秘钥（不设置则以 `plain:` 形式存储）。
 - **WEWORK_WEBHOOK_URL**：可选，企业微信群机器人的 Webhook 地址（形如 `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...`）。用于事件通知和邮箱二步验证验证码发送。
 - **TELEGRAM_BOT_TOKEN**：可选，Telegram Bot 的 Token。从 [@BotFather](https://t.me/BotFather) 获取。

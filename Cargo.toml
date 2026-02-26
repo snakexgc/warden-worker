@@ -50,6 +50,7 @@ aes-gcm = "0.10"
 totp-rs = { version = "5.7.0", default-features = false, features = ["otpauth", "gen_secret", "qr"] }
 sha2 = "0.10"
 p256 = { version = "0.13", features = ["ecdsa"] }
+rsa = { version = "0.9", features = ["sha2"] }
 serde_cbor_2 = "0.13"
 
 # Utilities

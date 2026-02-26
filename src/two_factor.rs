@@ -13,6 +13,8 @@ use totp_rs::{Algorithm, Secret, TOTP};
 use worker::D1Database;
 use p256::ecdsa::signature::Verifier;
 use p256::ecdsa::{Signature, VerifyingKey};
+use rsa::{RsaPublicKey, BigUint, pkcs1::{DecodeRsaPublicKey, EncodeRsaPublicKey}};
+use rsa::pkcs1v15::Pkcs1v15Sign;
 use serde_cbor_2::Value as CborValue;
 
 use crate::error::AppError;
@@ -36,6 +38,8 @@ pub struct WebauthnCredentialRecord {
     pub public_key_sec1: Option<String>,
     #[serde(default)]
     pub sign_count: Option<u32>,
+    #[serde(default)]
+    pub key_type: Option<String>, // "ec" or "rsa"
 }
 
 fn decode_b64_mixed(input: &str) -> Result<Vec<u8>, AppError> {
@@ -72,7 +76,7 @@ fn cbor_map_get<'a>(map: &'a std::collections::BTreeMap<CborValue, CborValue>, k
 
 pub fn parse_webauthn_registration_attestation(
     attestation_object_b64: &str,
-) -> Result<(String, String, u32), AppError> {
+) -> Result<(String, String, u32, String), AppError> {
     let attestation_bytes = decode_b64_mixed(attestation_object_b64)?;
     let attestation_value: CborValue =
         serde_cbor_2::from_slice(&attestation_bytes).map_err(|_| AppError::BadRequest("Invalid WebAuthn attestation".to_string()))?;
@@ -121,7 +125,7 @@ pub fn parse_webauthn_registration_attestation(
     let cose_value = CborValue::deserialize(&mut deserializer)
         .map_err(|_| AppError::BadRequest("Invalid WebAuthn credential public key".to_string()))?;
 
-    let sec1_bytes = match cose_value {
+    match cose_value {
         CborValue::Map(map) => {
             let kty = cbor_map_get(&map, 1)
                 .and_then(|v| match v {
@@ -136,51 +140,85 @@ pub fn parse_webauthn_registration_attestation(
                 })
                 .unwrap_or_default();
 
-            if kty != 2 || alg != -7 {
-                return Err(AppError::BadRequest("Unsupported WebAuthn algorithm".to_string()));
+            // EC2 key type (elliptic curve)
+            if kty == 2 && alg == -7 {
+                let crv = cbor_map_get(&map, -1)
+                    .and_then(|v| match v {
+                        CborValue::Integer(i) => Some(*i),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                if crv != 1 {
+                    return Err(AppError::BadRequest("Unsupported WebAuthn curve".to_string()));
+                }
+
+                let x = cbor_map_get(&map, -2)
+                    .and_then(|v| match v {
+                        CborValue::Bytes(b) => Some(b.clone()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| AppError::BadRequest("Invalid WebAuthn public key".to_string()))?;
+                let y = cbor_map_get(&map, -3)
+                    .and_then(|v| match v {
+                        CborValue::Bytes(b) => Some(b.clone()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| AppError::BadRequest("Invalid WebAuthn public key".to_string()))?;
+
+                if x.len() != 32 || y.len() != 32 {
+                    return Err(AppError::BadRequest("Invalid WebAuthn public key".to_string()));
+                }
+
+                let mut sec1 = Vec::with_capacity(65);
+                sec1.push(0x04);
+                sec1.extend_from_slice(&x);
+                sec1.extend_from_slice(&y);
+
+                return Ok((
+                    general_purpose::URL_SAFE_NO_PAD.encode(credential_id),
+                    general_purpose::URL_SAFE_NO_PAD.encode(sec1),
+                    sign_count,
+                    "ec".to_string(),
+                ));
             }
 
-            let crv = cbor_map_get(&map, -1)
-                .and_then(|v| match v {
-                    CborValue::Integer(i) => Some(*i),
-                    _ => None,
-                })
-                .unwrap_or_default();
-            if crv != 1 {
-                return Err(AppError::BadRequest("Unsupported WebAuthn curve".to_string()));
+            // RSA key type
+            if kty == 3 && alg == -257 {
+                let n = cbor_map_get(&map, -1)
+                    .and_then(|v| match v {
+                        CborValue::Bytes(b) => Some(b.clone()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| AppError::BadRequest("Invalid WebAuthn RSA public key".to_string()))?;
+                let e = cbor_map_get(&map, -2)
+                    .and_then(|v| match v {
+                        CborValue::Bytes(b) => Some(b.clone()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| AppError::BadRequest("Invalid WebAuthn RSA public key".to_string()))?;
+
+                // Build RSA public key and convert to PKCS#1 format
+                let n_biguint = BigUint::from_bytes_be(&n);
+                let e_biguint = BigUint::from_bytes_be(&e);
+                let rsa_key = RsaPublicKey::new(n_biguint, e_biguint)
+                    .map_err(|_| AppError::BadRequest("Invalid WebAuthn RSA public key".to_string()))?;
+
+                // Export to PKCS#1 format
+                let pkcs1_bytes = rsa_key.to_pkcs1_der()
+                    .map_err(|_| AppError::BadRequest("Invalid WebAuthn RSA public key".to_string()))?;
+
+                return Ok((
+                    general_purpose::URL_SAFE_NO_PAD.encode(credential_id),
+                    general_purpose::URL_SAFE_NO_PAD.encode(pkcs1_bytes.as_bytes()),
+                    sign_count,
+                    "rsa".to_string(),
+                ));
             }
 
-            let x = cbor_map_get(&map, -2)
-                .and_then(|v| match v {
-                    CborValue::Bytes(b) => Some(b.clone()),
-                    _ => None,
-                })
-                .ok_or_else(|| AppError::BadRequest("Invalid WebAuthn public key".to_string()))?;
-            let y = cbor_map_get(&map, -3)
-                .and_then(|v| match v {
-                    CborValue::Bytes(b) => Some(b.clone()),
-                    _ => None,
-                })
-                .ok_or_else(|| AppError::BadRequest("Invalid WebAuthn public key".to_string()))?;
-
-            if x.len() != 32 || y.len() != 32 {
-                return Err(AppError::BadRequest("Invalid WebAuthn public key".to_string()));
-            }
-
-            let mut sec1 = Vec::with_capacity(65);
-            sec1.push(0x04);
-            sec1.extend_from_slice(&x);
-            sec1.extend_from_slice(&y);
-            sec1
+            Err(AppError::BadRequest("Unsupported WebAuthn algorithm".to_string()))
         }
-        _ => return Err(AppError::BadRequest("Invalid WebAuthn credential public key".to_string())),
-    };
-
-    Ok((
-        general_purpose::URL_SAFE_NO_PAD.encode(credential_id),
-        general_purpose::URL_SAFE_NO_PAD.encode(sec1_bytes),
-        sign_count,
-    ))
+        _ => Err(AppError::BadRequest("Invalid WebAuthn credential public key".to_string())),
+    }
 }
 
 pub async fn ensure_two_factor_webauthn_table(db: &D1Database) -> Result<(), AppError> {
@@ -385,7 +423,9 @@ pub async fn generate_webauthn_login(
     )
     .await?;
 
-    Ok(json!({
+    // Build the WebAuthn authentication challenge response
+    // This format matches what Bitwarden clients expect
+    let mut response = json!({
         "challenge": state_value["challenge"],
         "timeout": 60000,
         "userVerification": "discouraged",
@@ -395,12 +435,19 @@ pub async fn generate_webauthn_login(
             .map(|c| json!({
                 "type": "public-key",
                 "id": c.credential_id,
+                "transports": ["usb", "nfc", "ble", "internal"],
             }))
             .collect::<Vec<_>>(),
-        "extensions": {
+    });
+
+    // Add extensions only if app_id is not empty
+    if !app_id.is_empty() {
+        response["extensions"] = json!({
             "appid": app_id,
-        }
-    }))
+        });
+    }
+
+    Ok(response)
 }
 
 pub async fn validate_webauthn_login(
@@ -499,9 +546,6 @@ pub async fn validate_webauthn_login(
 
     let signature = decode_b64_mixed(signature_b64)
         .map_err(|_| AppError::Unauthorized("Invalid two factor token.".to_string()))?;
-    let signature = Signature::from_der(&signature)
-        .or_else(|_| Signature::from_slice(&signature))
-        .map_err(|_| AppError::Unauthorized("Invalid two factor token.".to_string()))?;
 
     let mut registrations = get_webauthn_credentials(db, user_id).await?.1;
     if let Some(reg) = registrations.iter_mut().find(|r| r.credential_id == credential_id) {
@@ -510,11 +554,27 @@ pub async fn validate_webauthn_login(
         };
         let public_key = decode_b64_mixed(pk_b64)
             .map_err(|_| AppError::Unauthorized("Invalid two factor token.".to_string()))?;
-        let verifying_key = VerifyingKey::from_sec1_bytes(&public_key)
-            .map_err(|_| AppError::Unauthorized("Invalid two factor token.".to_string()))?;
-        verifying_key
-            .verify(&signed_data, &signature)
-            .map_err(|_| AppError::Unauthorized("Invalid two factor token.".to_string()))?;
+
+        // Determine key type and verify accordingly
+        let key_type = reg.key_type.as_deref().unwrap_or("ec");
+        if key_type == "rsa" {
+            // RSA signature verification
+            let rsa_key = RsaPublicKey::from_pkcs1_der(&public_key)
+                .map_err(|_| AppError::Unauthorized("Invalid two factor token.".to_string()))?;
+            rsa_key
+                .verify(Pkcs1v15Sign::new::<sha2::Sha256>(), &signed_data, &signature)
+                .map_err(|_| AppError::Unauthorized("Invalid two factor token.".to_string()))?;
+        } else {
+            // EC signature verification
+            let ecdsa_sig = Signature::from_der(&signature)
+                .or_else(|_| Signature::from_slice(&signature))
+                .map_err(|_| AppError::Unauthorized("Invalid two factor token.".to_string()))?;
+            let verifying_key = VerifyingKey::from_sec1_bytes(&public_key)
+                .map_err(|_| AppError::Unauthorized("Invalid two factor token.".to_string()))?;
+            verifying_key
+                .verify(&signed_data, &ecdsa_sig)
+                .map_err(|_| AppError::Unauthorized("Invalid two factor token.".to_string()))?;
+        }
 
         if let Some(prev) = reg.sign_count {
             if prev > 0 && sign_count > 0 && sign_count <= prev {
