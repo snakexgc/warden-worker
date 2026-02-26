@@ -207,7 +207,11 @@ pub fn api_router(env: Env, ctx: Context) -> Router<()> {
         .route("/api/version", get(config::version))
         .route(
             "/accounts/webauthn/assertion-options",
-            get(webauthn::identity_assertion_options),
+            get(webauthn::identity_assertion_options).post(webauthn::identity_assertion_options),
+        )
+        .route(
+            "/identity/accounts/webauthn/assertion-options",
+            get(webauthn::identity_assertion_options).post(webauthn::identity_assertion_options),
         )
         .route(
             "/api/webauthn",

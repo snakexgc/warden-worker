@@ -35,6 +35,10 @@ pub enum NotifyEvent {
     Sync,
     AuthRequest,
     AuthResponse,
+    WebAuthnCredentialCreate,
+    WebAuthnCredentialDelete,
+    WebAuthnCredentialUpdate,
+    WebAuthnLogin,
 }
 
 impl NotifyEvent {
@@ -60,6 +64,10 @@ impl NotifyEvent {
             NotifyEvent::Sync => "sync",
             NotifyEvent::AuthRequest => "auth_request",
             NotifyEvent::AuthResponse => "auth_response",
+            NotifyEvent::WebAuthnCredentialCreate => "webauthn_credential_create",
+            NotifyEvent::WebAuthnCredentialDelete => "webauthn_credential_delete",
+            NotifyEvent::WebAuthnCredentialUpdate => "webauthn_credential_update",
+            NotifyEvent::WebAuthnLogin => "webauthn_login",
         }
     }
 
@@ -85,6 +93,10 @@ impl NotifyEvent {
             NotifyEvent::Sync => "同步数据",
             NotifyEvent::AuthRequest => "设备登录请求",
             NotifyEvent::AuthResponse => "设备登录响应",
+            NotifyEvent::WebAuthnCredentialCreate => "创建 Passkey 凭证",
+            NotifyEvent::WebAuthnCredentialDelete => "删除 Passkey 凭证",
+            NotifyEvent::WebAuthnCredentialUpdate => "更新 Passkey 凭证",
+            NotifyEvent::WebAuthnLogin => "Passkey 登录",
         }
     }
 
@@ -110,6 +122,10 @@ impl NotifyEvent {
             NotifyEvent::Sync => "🔄",
             NotifyEvent::AuthRequest => "📱",
             NotifyEvent::AuthResponse => "✅",
+            NotifyEvent::WebAuthnCredentialCreate => "🔑",
+            NotifyEvent::WebAuthnCredentialDelete => "🗑️",
+            NotifyEvent::WebAuthnCredentialUpdate => "📝",
+            NotifyEvent::WebAuthnLogin => "🔐",
         }
     }
 
@@ -127,6 +143,10 @@ impl NotifyEvent {
             NotifyEvent::TokenRefresh => "info",
             NotifyEvent::AuthRequest => "info",
             NotifyEvent::AuthResponse => "info",
+            NotifyEvent::WebAuthnCredentialCreate => "comment",
+            NotifyEvent::WebAuthnCredentialDelete => "warning",
+            NotifyEvent::WebAuthnCredentialUpdate => "comment",
+            NotifyEvent::WebAuthnLogin => "info",
             _ => "comment",
         }
     }
@@ -519,6 +539,16 @@ fn parse_enabled_events(env: &Env) -> Vec<NotifyEvent> {
             "2fa_recover" | "two_factor_recover" | "twofactor_recover" => out.push(NotifyEvent::TwoFactorRecover),
             "token_refresh" | "unlock" => out.push(NotifyEvent::TokenRefresh),
             "sync" => out.push(NotifyEvent::Sync),
+            "webauthn_credential_create" | "webauthn_create" | "passkey_create" => {
+                out.push(NotifyEvent::WebAuthnCredentialCreate)
+            }
+            "webauthn_credential_delete" | "webauthn_delete" | "passkey_delete" => {
+                out.push(NotifyEvent::WebAuthnCredentialDelete)
+            }
+            "webauthn_credential_update" | "webauthn_update" | "passkey_update" => {
+                out.push(NotifyEvent::WebAuthnCredentialUpdate)
+            }
+            "webauthn_login" | "passkey_login" => out.push(NotifyEvent::WebAuthnLogin),
             _ => {}
         }
     }

@@ -14,7 +14,7 @@ use uuid::Uuid;
 use worker::wasm_bindgen::JsValue;
 use sha2::{Digest, Sha256};
 
-use crate::{auth::Claims, crypto, db, error::AppError, logging::targets, models::user::User, two_factor};
+use crate::{auth::Claims, crypto, db, error::AppError, logging::targets, models::user::User, two_factor, webauthn};
 use crate::notify::{self, NotifyContext, NotifyEvent};
 use crate::router::AppState;
 
@@ -161,6 +161,9 @@ pub struct TokenRequest {
     username: Option<String>,
     password: Option<String>, // This is the masterPasswordHash
     refresh_token: Option<String>,
+    token: Option<String>,
+    #[serde(rename = "deviceResponse")]
+    device_response: Option<String>,
     #[allow(dead_code)]
     scope: Option<String>,
     #[allow(dead_code)]
@@ -235,10 +238,17 @@ fn normalize_kdf_for_response(
     }
 }
 
+#[derive(Debug, Clone)]
+struct WebAuthnPrfOptionPayload {
+    encrypted_private_key: String,
+    encrypted_user_key: String,
+}
+
 fn generate_tokens_and_response(
     user: User,
     state: &Arc<AppState>,
     device_identifier: Option<String>,
+    webauthn_prf_option: Option<&WebAuthnPrfOptionPayload>,
 ) -> Result<Value, AppError> {
     let now = Utc::now();
     let expires_in = Duration::hours(2);
@@ -292,6 +302,34 @@ fn generate_tokens_and_response(
         user.kdf_parallelism,
     );
 
+    let mut user_decryption_options = json!({
+        "HasMasterPassword": true,
+        "MasterPasswordUnlock": {
+            "Kdf": {
+                "KdfType": user.kdf_type,
+                "Iterations": user.kdf_iterations,
+                "Memory": kdf_memory,
+                "Parallelism": kdf_parallelism
+            },
+            "MasterKeyEncryptedUserKey": user.key,
+            "MasterKeyWrappedUserKey": user.key,
+            "Salt": user.email
+        },
+        "Object": "userDecryptionOptions"
+    });
+
+    if let Some(option) = webauthn_prf_option {
+        if let Some(obj) = user_decryption_options.as_object_mut() {
+            obj.insert(
+                "WebAuthnPrfOption".to_string(),
+                json!({
+                    "EncryptedPrivateKey": option.encrypted_private_key,
+                    "EncryptedUserKey": option.encrypted_user_key
+                }),
+            );
+        }
+    }
+
     Ok(json!({
         "ForcePasswordReset": false,
         "Kdf": user.kdf_type,
@@ -302,21 +340,7 @@ fn generate_tokens_and_response(
         "MasterPasswordPolicy": { "Object": "masterPasswordPolicy" },
         "PrivateKey": user.private_key,
         "ResetMasterPassword": false,
-        "UserDecryptionOptions": {
-            "HasMasterPassword": true,
-            "MasterPasswordUnlock": {
-                "Kdf": {
-                    "KdfType": user.kdf_type,
-                    "Iterations": user.kdf_iterations,
-                    "Memory": kdf_memory,
-                    "Parallelism": kdf_parallelism
-                },
-                "MasterKeyEncryptedUserKey": user.key,
-                "MasterKeyWrappedUserKey": user.key,
-                "Salt": user.email
-            },
-            "Object": "userDecryptionOptions"
-        },
+        "UserDecryptionOptions": user_decryption_options,
         "AccountKeys": {
             "publicKeyEncryptionKeyPair": {
                 "wrappedPrivateKey": user.private_key,
@@ -446,6 +470,27 @@ fn obscure_email(email: &str) -> String {
     format!("{}@{}", obscured_name, domain)
 }
 
+fn rp_id_from_env(env: &worker::Env) -> String {
+    env.var("DOMAIN")
+        .ok()
+        .map(|v| v.to_string())
+        .unwrap_or_default()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn origin_from_env(env: &worker::Env) -> String {
+    env.var("WEBAUTHN_ORIGIN")
+        .ok()
+        .map(|v| v.to_string())
+        .or_else(|| env.var("DOMAIN").ok().map(|v| v.to_string()))
+        .unwrap_or_default()
+}
+
 async fn two_factor_required_response(
     providers: &[i32],
     user_id: &str,
@@ -470,8 +515,11 @@ async fn two_factor_required_response(
                 providers2.insert(p.to_string(), Value::Null);
             }
         } else if p == two_factor::TWO_FACTOR_PROVIDER_WEBAUTHN && domain_set {
-            let challenge = two_factor::generate_webauthn_login(db, &state.env, user_id)
+            let rp_id = rp_id_from_env(&state.env);
+            let origin = origin_from_env(&state.env);
+            let challenge = webauthn::issue_login_challenge(db, user_id, &rp_id, &origin, webauthn::WEBAUTHN_USE_2FA)
                 .await
+                .unwrap_or(None)
                 .unwrap_or(Value::Null);
             providers2.insert(p.to_string(), challenge);
         } else {
@@ -516,8 +564,11 @@ async fn invalid_two_factor_response(
                 providers2.insert(p.to_string(), Value::Null);
             }
         } else if p == two_factor::TWO_FACTOR_PROVIDER_WEBAUTHN && domain_set {
-            let challenge = two_factor::generate_webauthn_login(db, &state.env, user_id)
+            let rp_id = rp_id_from_env(&state.env);
+            let origin = origin_from_env(&state.env);
+            let challenge = webauthn::issue_login_challenge(db, user_id, &rp_id, &origin, webauthn::WEBAUTHN_USE_2FA)
                 .await
+                .unwrap_or(None)
                 .unwrap_or(Value::Null);
             providers2.insert(p.to_string(), challenge);
         } else {
@@ -636,7 +687,7 @@ pub async fn token(
                 let device_name = payload.device_name.clone();
                 let device_type = payload.device_type;
 
-                let response = generate_tokens_and_response(user, &state, device_identifier.clone())?;
+                let response = generate_tokens_and_response(user, &state, device_identifier.clone(), None)?;
 
                 if let Some(device_id) = device_identifier {
                     update_device_background(
@@ -682,7 +733,7 @@ pub async fn token(
 
             let authenticator_enabled = two_factor::is_authenticator_enabled(&db, &user.id).await?;
             let email_2fa_enabled = two_factor::is_email_2fa_enabled(&db, &user.id).await?;
-            let webauthn_enabled = two_factor::is_webauthn_enabled(&db, &user.id).await?;
+            let webauthn_enabled = webauthn::is_webauthn_enabled(&db, &user.id).await?;
             let two_factor_enabled = authenticator_enabled || email_2fa_enabled || webauthn_enabled;
 
             let mut providers: Vec<i32> = Vec::new();
@@ -970,7 +1021,7 @@ pub async fn token(
                         return Ok(two_factor_required_response(&providers, &user.id, email_data, &state, &db).await);
                     };
 
-                    if let Err(_e) = two_factor::validate_webauthn_login(&db, &state.env, &user.id, token).await {
+                    if webauthn::verify_login_assertion(&db, &user.id, token, webauthn::WEBAUTHN_USE_2FA).await.is_err() {
                         notify::notify_background(
                             &state.ctx,
                             state.env.clone(),
@@ -1013,7 +1064,7 @@ pub async fn token(
                 payload.two_factor_remember
             );
 
-            let mut response = generate_tokens_and_response(user, &state, device_identifier.clone())?;
+            let mut response = generate_tokens_and_response(user, &state, device_identifier.clone(), None)?;
             let remember_token_to_set = remember_token_to_return.clone();
 
             // 后台异步更新设备信息，减少登录响应延迟
@@ -1130,7 +1181,7 @@ pub async fn token(
                 return Err(AppError::Unauthorized("Invalid security stamp".to_string()));
             }
 
-            let response = generate_tokens_and_response(user.clone(), &state, payload.device_identifier.clone())?;
+            let response = generate_tokens_and_response(user.clone(), &state, payload.device_identifier.clone(), None)?;
             let mut resp = Json(response.clone()).into_response();
             if let Some(v) = response.get("access_token").and_then(|v| v.as_str()) {
                 set_cookie(
@@ -1156,6 +1207,137 @@ pub async fn token(
                 NotifyContext {
                     user_id: Some(user.id.clone()),
                     user_email: Some(user.email.clone()),
+                    device_identifier: payload.device_identifier.clone(),
+                    device_name: payload.device_name.clone(),
+                    device_type: payload.device_type,
+                    meta: notify::extract_request_meta(&headers),
+                    ..Default::default()
+                },
+            );
+
+            Ok(resp)
+        }
+        "webauthn" => {
+            let challenge_token = payload
+                .token
+                .ok_or_else(|| AppError::BadRequest("Missing token".to_string()))?;
+            let device_response = payload
+                .device_response
+                .ok_or_else(|| AppError::BadRequest("Missing deviceResponse".to_string()))?;
+            let jwt_secret = state.env.secret("JWT_SECRET")?.to_string();
+            let login_result = webauthn::verify_passwordless_login_assertion(
+                &db,
+                &challenge_token,
+                &device_response,
+                &jwt_secret,
+            )
+            .await
+            .map_err(|e| match e {
+                AppError::BadRequest(msg) | AppError::Unauthorized(msg) => {
+                    AppError::Unauthorized(msg)
+                }
+                other => other,
+            })?;
+            let user_id = login_result.user_id.clone();
+
+            let user: Value = db
+                .prepare("SELECT * FROM users WHERE id = ?1")
+                .bind(&[user_id.clone().into()])?
+                .first(None)
+                .await
+                .map_err(|_| AppError::Unauthorized("Invalid WebAuthn credentials".to_string()))?
+                .ok_or_else(|| {
+                    AppError::Unauthorized("Invalid WebAuthn credentials".to_string())
+                })?;
+            let user: User = serde_json::from_value(user).map_err(|_| AppError::Internal)?;
+
+            let device_identifier = payload.device_identifier.clone();
+            let device_name = payload.device_name.clone();
+            let device_type = payload.device_type;
+
+            let webauthn_prf_option = match (
+                login_result.encrypted_private_key.as_deref(),
+                login_result.encrypted_user_key.as_deref(),
+            ) {
+                (Some(encrypted_private_key), Some(encrypted_user_key))
+                    if !encrypted_private_key.trim().is_empty()
+                        && !encrypted_user_key.trim().is_empty() =>
+                {
+                    Some(WebAuthnPrfOptionPayload {
+                        encrypted_private_key: encrypted_private_key.to_string(),
+                        encrypted_user_key: encrypted_user_key.to_string(),
+                    })
+                }
+                _ => None,
+            };
+
+            let user_email = user.email.clone();
+            let response = generate_tokens_and_response(user, &state, device_identifier.clone(), webauthn_prf_option.as_ref())?;
+
+            if let Some(device_identifier) = device_identifier.as_deref() {
+                ensure_devices_table(&db).await?;
+
+                let now = chrono::Utc::now().to_rfc3339();
+                if let Ok(stmt) = db
+                    .prepare(
+                        "INSERT INTO devices (id, user_id, device_identifier, device_name, device_type, remember_token_hash, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                         ON CONFLICT(user_id, device_identifier) DO UPDATE SET
+                           updated_at = excluded.updated_at,
+                           device_name = excluded.device_name,
+                           device_type = excluded.device_type,
+                           remember_token_hash = COALESCE(excluded.remember_token_hash, devices.remember_token_hash)",
+                    )
+                    .bind(&[
+                        Uuid::new_v4().to_string().into(),
+                        user_id.clone().into(),
+                        device_identifier.into(),
+                        device_name.clone().into(),
+                        device_type.map(f64::from).into(),
+                        Option::<String>::None.into(),
+                        now.clone().into(),
+                        now.clone().into(),
+                    ])
+                {
+                    let _ = stmt.run().await;
+                }
+            }
+
+            let access_token_to_set = response
+                .get("access_token")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let refresh_token_to_set = response
+                .get("refresh_token")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let mut resp = Json(response).into_response();
+            if let Some(v) = access_token_to_set.as_deref() {
+                set_cookie(
+                    resp.headers_mut(),
+                    "bw_access_token",
+                    v,
+                    Duration::hours(2).num_seconds(),
+                )?;
+            }
+            if let Some(v) = refresh_token_to_set.as_deref() {
+                set_cookie(
+                    resp.headers_mut(),
+                    "bw_refresh_token",
+                    v,
+                    Duration::days(30).num_seconds(),
+                )?;
+            }
+
+            // Send WebAuthn login notification
+            notify::notify_background(
+                &state.ctx,
+                state.env.clone(),
+                notify::NotifyEvent::WebAuthnLogin,
+                notify::NotifyContext {
+                    user_id: Some(user_id.clone()),
+                    user_email: Some(user_email),
                     device_identifier: payload.device_identifier.clone(),
                     device_name: payload.device_name.clone(),
                     device_type: payload.device_type,

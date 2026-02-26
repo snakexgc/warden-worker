@@ -1,126 +1,235 @@
 use axum::{
     extract::{Path, State},
-    http::HeaderMap,
-    http::StatusCode,
-    response::{IntoResponse, Response},
+    http::{header, HeaderMap},
     Json,
 };
-use base64::{engine::general_purpose, Engine as _};
-use chrono::Utc;
-use rand::RngCore;
+use constant_time_eq::constant_time_eq;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use crate::auth::Claims;
-use crate::db;
-use crate::error::AppError;
-use crate::handlers::two_factor::{NumberOrString, PasswordOrOtpData};
-use crate::notify::{self, NotifyContext, NotifyEvent};
-use crate::router::AppState;
-use crate::two_factor;
+use crate::{auth::Claims, db, error::AppError, jwt, webauthn, router::AppState, notify};
+use crate::notify::{NotifyContext, NotifyEvent, extract_request_meta};
 
-fn not_supported_response(message: &str) -> Response {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({
-            "message": message,
-            "validationErrors": {
-                "": [message]
-            },
-            "errorModel": {
-                "message": message,
-                "object": "error"
-            },
-            "error": "",
-            "error_description": "",
-            "exceptionMessage": Value::Null,
-            "exceptionStackTrace": Value::Null,
-            "innerExceptionMessage": Value::Null,
-            "object": "error"
-        })),
-    )
-        .into_response()
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretVerificationData {
+    #[serde(alias = "MasterPasswordHash")]
+    master_password_hash: Option<String>,
+    otp: Option<String>,
 }
 
-fn decode_base64_mixed(input: &str) -> Option<Vec<u8>> {
-    general_purpose::URL_SAFE_NO_PAD
-        .decode(input)
-        .ok()
-        .or_else(|| general_purpose::STANDARD.decode(input).ok())
-}
-
-fn parse_number_or_string_i32(input: NumberOrString) -> Result<i32, AppError> {
-    match input {
-        NumberOrString::Number(n) => Ok(n as i32),
-        NumberOrString::String(s) => s
-            .parse::<i32>()
-            .map_err(|_| AppError::BadRequest("Invalid WebAuthn key id".to_string())),
+impl SecretVerificationData {
+    async fn validate(&self, db: &worker::D1Database, user_id: &str) -> Result<(), AppError> {
+        match (&self.master_password_hash, &self.otp) {
+            (Some(master_password_hash), None) => {
+                let stored_hash: Option<String> = db
+                    .prepare("SELECT master_password_hash FROM users WHERE id = ?1")
+                    .bind(&[user_id.into()])?
+                    .first(Some("master_password_hash"))
+                    .await
+                    .map_err(|_| AppError::Database)?;
+                let Some(stored_hash) = stored_hash else {
+                    return Err(AppError::NotFound("User not found".to_string()));
+                };
+                if !constant_time_eq(stored_hash.as_bytes(), master_password_hash.as_bytes()) {
+                    return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+                }
+                Ok(())
+            }
+            (None, Some(_)) => Err(AppError::BadRequest(
+                "OTP validation is not supported".to_string(),
+            )),
+            _ => Err(AppError::BadRequest("No validation provided".to_string())),
+        }
     }
 }
 
-async fn validate_password_or_otp(
-    payload: &PasswordOrOtpData,
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateTwoFactorWebAuthnRequest {
+    #[serde(alias = "MasterPasswordHash")]
+    master_password_hash: Option<String>,
+    otp: Option<String>,
+    id: i32,
+    name: Option<String>,
+    #[serde(rename = "deviceResponse")]
+    device_response: WebAuthnDeviceResponse,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateTwoFactorWebAuthnDeleteRequest {
+    #[serde(alias = "MasterPasswordHash")]
+    master_password_hash: Option<String>,
+    otp: Option<String>,
+    id: i32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WebAuthnDeviceResponse {
+    response: WebAuthnDeviceResponseInner,
+}
+
+#[derive(Debug, Deserialize)]
+struct WebAuthnDeviceResponseInner {
+    #[serde(rename = "AttestationObject", alias = "attestationObject")]
+    attestation_object: String,
+    #[serde(rename = "clientDataJson", alias = "clientDataJSON")]
+    client_data_json: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveWebAuthnCredentialRequest {
+    #[serde(rename = "token")]
+    _token: Option<String>,
+    name: Option<String>,
+    #[serde(rename = "deviceResponse")]
+    device_response: WebAuthnDeviceResponse,
+    #[serde(rename = "supportsPrf")]
+    supports_prf: Option<bool>,
+    #[serde(rename = "encryptedUserKey")]
+    encrypted_user_key: Option<String>,
+    #[serde(rename = "encryptedPublicKey")]
+    encrypted_public_key: Option<String>,
+    #[serde(rename = "encryptedPrivateKey")]
+    encrypted_private_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateWebAuthnCredentialRequest {
+    #[serde(rename = "token")]
+    _token: Option<String>,
+    #[serde(rename = "deviceResponse")]
+    device_response: Value,
+    #[serde(rename = "encryptedUserKey")]
+    encrypted_user_key: Option<String>,
+    #[serde(rename = "encryptedPublicKey")]
+    encrypted_public_key: Option<String>,
+    #[serde(rename = "encryptedPrivateKey")]
+    encrypted_private_key: Option<String>,
+}
+
+async fn webauthn_response(
     db: &worker::D1Database,
     user_id: &str,
-) -> Result<(), AppError> {
-    match (&payload.master_password_hash, &payload.otp) {
-        (Some(master_password_hash), None) => {
-            let row: Option<Value> = db
-                .prepare("SELECT master_password_hash, password_salt FROM users WHERE id = ?1")
-                .bind(&[user_id.into()])?
-                .first(None)
-                .await
-                .map_err(|_| AppError::Database)?;
-            let row = row.ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
-            let stored_hash = row
-                .get("master_password_hash")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let password_salt = row.get("password_salt").and_then(|v| v.as_str());
+) -> Result<serde_json::Value, AppError> {
+    let keys = webauthn::list_webauthn_2fa_keys(db, user_id).await?;
+    let enabled = webauthn::is_webauthn_enabled(db, user_id).await?;
+    let key_items: Vec<Value> = keys
+        .into_iter()
+        .map(|k| {
+            json!({
+                "Name": k.name,
+                "Id": k.id,
+                "Migrated": k.migrated
+            })
+        })
+        .collect();
+    Ok(json!({
+        "Enabled": enabled,
+        "Keys": key_items
+    }))
+}
 
-            let valid = if let Some(salt) = password_salt {
-                crate::crypto::verify_password(master_password_hash, salt, stored_hash).await
-            } else {
-                constant_time_eq::constant_time_eq(
-                    master_password_hash.as_bytes(),
-                    stored_hash.as_bytes(),
-                )
-            };
-
-            if valid {
-                Ok(())
-            } else {
-                Err(AppError::Unauthorized("Invalid credentials".to_string()))
-            }
+async fn webauthn_credentials_response(
+    db: &worker::D1Database,
+    user_id: &str,
+) -> Result<serde_json::Value, AppError> {
+    fn enc_obj(v: &Option<String>) -> Value {
+        match v {
+            Some(s) => json!({ "encryptedString": s }),
+            None => Value::Null,
         }
-        (None, Some(_)) => Err(AppError::BadRequest(
-            "OTP validation is not supported".to_string(),
-        )),
-        _ => Err(AppError::BadRequest("No validation provided".to_string())),
     }
+
+    let keys = webauthn::list_webauthn_api_items(db, user_id).await?;
+    let data: Vec<Value> = keys
+        .into_iter()
+        .map(|k| {
+            json!({
+                "Id": k.id,
+                "id": k.id,
+                "Name": k.name,
+                "name": k.name,
+                "PrfStatus": k.prf_status,
+                "prfStatus": k.prf_status,
+                "EncryptedPublicKey": k.encrypted_public_key,
+                "EncryptedPublicKeyObj": enc_obj(&k.encrypted_public_key),
+                "encryptedPublicKey": k.encrypted_public_key,
+                "encryptedPublicKeyObject": enc_obj(&k.encrypted_public_key),
+                "EncryptedUserKey": k.encrypted_user_key,
+                "EncryptedUserKeyObj": enc_obj(&k.encrypted_user_key),
+                "encryptedUserKey": k.encrypted_user_key,
+                "encryptedUserKeyObject": enc_obj(&k.encrypted_user_key),
+                "EncryptedPrivateKey": k.encrypted_private_key,
+                "EncryptedPrivateKeyObj": enc_obj(&k.encrypted_private_key),
+                "encryptedPrivateKey": k.encrypted_private_key,
+                "encryptedPrivateKeyObject": enc_obj(&k.encrypted_private_key)
+            })
+        })
+        .collect();
+    let data_lower = data.clone();
+
+    Ok(json!({
+        "Object": "list",
+        "object": "list",
+        "Data": data,
+        "data": data_lower,
+        "ContinuationToken": Value::Null,
+        "continuationToken": Value::Null
+    }))
+}
+
+async fn next_available_webauthn_slot_id(
+    db: &worker::D1Database,
+    user_id: &str,
+) -> Result<i32, AppError> {
+    let keys = webauthn::list_webauthn_keys(db, user_id).await?;
+    for slot_id in 1..=5 {
+        if !keys.iter().any(|k| k.id == slot_id) {
+            return Ok(slot_id);
+        }
+    }
+    Err(AppError::BadRequest(
+        "WebAuthn key slots are full".to_string(),
+    ))
+}
+
+fn bearer_token_from_headers(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+}
+
+async fn claims_from_bearer(
+    headers: &HeaderMap,
+    env: &worker::Env,
+) -> Result<Option<Claims>, AppError> {
+    let Some(token) = bearer_token_from_headers(headers) else {
+        return Ok(None);
+    };
+    let jwt_secret = env.secret("JWT_SECRET")?.to_string();
+    let claims = jwt::decode_hs256(&token, &jwt_secret)?;
+    Ok(Some(claims))
 }
 
 #[worker::send]
-pub async fn identity_assertion_options(State(_state): State<Arc<AppState>>) -> Response {
-    not_supported_response("WebAuthn assertion is not supported in this deployment")
-}
-
-#[worker::send]
-pub async fn attestation_options(_claims: Claims, State(_state): State<Arc<AppState>>) -> Response {
-    not_supported_response("WebAuthn attestation is not supported in this deployment")
-}
-
-#[worker::send]
-pub async fn assertion_options(_claims: Claims, State(_state): State<Arc<AppState>>) -> Response {
-    not_supported_response("WebAuthn assertion is not supported in this deployment")
-}
-
-#[worker::send]
-pub async fn list_credentials(
-    _claims: Claims,
-    State(_state): State<Arc<AppState>>,
-) -> Result<Json<Value>, AppError> {
+pub async fn api_webauthn_get(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = db::get_db(&state.env)?;
+    if let Some(claims) = claims_from_bearer(&headers, &state.env).await? {
+        return Ok(Json(webauthn_credentials_response(&db, &claims.sub).await?));
+    }
     Ok(Json(json!({
         "object": "list",
         "data": [],
@@ -129,341 +238,524 @@ pub async fn list_credentials(
 }
 
 #[worker::send]
-pub async fn create_credential(_claims: Claims, State(_state): State<Arc<AppState>>) -> Response {
-    not_supported_response("WebAuthn credential registration is not supported in this deployment")
+pub async fn webauthn_attestation_options(
+    claims: Claims,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SecretVerificationData>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = db::get_db(&state.env)?;
+    payload.validate(&db, &claims.sub).await?;
+
+    let user_row: Value = db
+        .prepare("SELECT name, email FROM users WHERE id = ?1")
+        .bind(&[claims.sub.clone().into()])?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+
+    let user_name = user_row.get("name").and_then(|v| v.as_str());
+    let user_email = user_row
+        .get("email")
+        .and_then(|v| v.as_str())
+        .ok_or(AppError::Database)?;
+
+    let rp_id = webauthn::rp_id_from_headers(&headers);
+    let origin = webauthn::origin_from_headers(&headers);
+    let options = webauthn::issue_registration_challenge(
+        &db,
+        &claims.sub,
+        user_name,
+        user_email,
+        &rp_id,
+        &origin,
+        webauthn::WEBAUTHN_USE_LOGIN,
+    )
+    .await?;
+
+    let token = options
+        .get("challenge")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Ok(Json(json!({
+        "options": options,
+        "token": token
+    })))
+}
+
+#[worker::send]
+pub async fn webauthn_assertion_options(
+    claims: Claims,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SecretVerificationData>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = db::get_db(&state.env)?;
+    payload.validate(&db, &claims.sub).await?;
+
+    let rp_id = webauthn::rp_id_from_headers(&headers);
+    let origin = webauthn::origin_from_headers(&headers);
+    let options = webauthn::issue_login_challenge(
+        &db,
+        &claims.sub,
+        &rp_id,
+        &origin,
+        webauthn::WEBAUTHN_USE_LOGIN,
+    )
+    .await?
+    .ok_or_else(|| AppError::BadRequest("No WebAuthn credentials registered".to_string()))?;
+
+    let token = options
+        .get("challenge")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Ok(Json(json!({
+        "options": options,
+        "token": token
+    })))
+}
+
+#[worker::send]
+pub async fn webauthn_save_credential(
+    claims: Claims,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SaveWebAuthnCredentialRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = db::get_db(&state.env)?;
+    let slot_id = next_available_webauthn_slot_id(&db, &claims.sub).await?;
+    let name = payload.name.clone().unwrap_or_default();
+
+    webauthn::register_webauthn_credential(
+        &db,
+        &claims.sub,
+        slot_id,
+        &name,
+        &payload.device_response.response.attestation_object,
+        &payload.device_response.response.client_data_json,
+        webauthn::WEBAUTHN_USE_LOGIN,
+    )
+    .await?;
+
+    let encrypted_public_key = payload
+        .encrypted_public_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let encrypted_user_key = payload
+        .encrypted_user_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let encrypted_private_key = payload
+        .encrypted_private_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let prf_status = if payload.supports_prf.unwrap_or(false) {
+        if encrypted_user_key.is_some() && encrypted_private_key.is_some() {
+            webauthn::WEBAUTHN_PRF_STATUS_ENABLED
+        } else {
+            webauthn::WEBAUTHN_PRF_STATUS_SUPPORTED
+        }
+    } else {
+        webauthn::WEBAUTHN_PRF_STATUS_UNSUPPORTED
+    };
+    webauthn::update_webauthn_prf_by_slot(
+        &db,
+        &claims.sub,
+        slot_id,
+        prf_status,
+        encrypted_public_key,
+        encrypted_user_key,
+        encrypted_private_key,
+    )
+    .await?;
+
+    // Send notification
+    let user_email: Option<String> = db
+        .prepare("SELECT email FROM users WHERE id = ?1")
+        .bind(&[claims.sub.clone().into()])?
+        .first(Some("email"))
+        .await
+        .ok()
+        .flatten();
+
+    let meta = extract_request_meta(&headers);
+    let notify_ctx = NotifyContext {
+        user_id: Some(claims.sub.clone()),
+        user_email,
+        device_identifier: None,
+        device_name: Some(name.clone()),
+        device_type: None,
+        cipher_id: None,
+        send_id: None,
+        detail: Some(format!("创建 Passkey 凭证: {}", name)),
+        meta,
+        is_new_ua: false,
+    };
+    notify::notify_best_effort(&state.env, NotifyEvent::WebAuthnCredentialCreate, notify_ctx).await;
+
+    Ok(Json(json!({ "success": true })))
+}
+
+#[worker::send]
+pub async fn webauthn_update_credential(
+    claims: Claims,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<UpdateWebAuthnCredentialRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = db::get_db(&state.env)?;
+    let assertion_token_json = serde_json::to_string(&payload.device_response)
+        .map_err(|_| AppError::BadRequest("Invalid WebAuthn assertion".to_string()))?;
+
+    webauthn::verify_login_assertion(
+        &db,
+        &claims.sub,
+        &assertion_token_json,
+        webauthn::WEBAUTHN_USE_LOGIN,
+    )
+    .await?;
+    let credential_id_b64url =
+        webauthn::extract_assertion_credential_id_b64url(&assertion_token_json)?;
+    let encrypted_public_key = payload
+        .encrypted_public_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let encrypted_user_key = payload
+        .encrypted_user_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let encrypted_private_key = payload
+        .encrypted_private_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    if encrypted_user_key.is_none() || encrypted_private_key.is_none() {
+        let mut missing = Vec::new();
+        if encrypted_user_key.is_none() {
+            missing.push("encryptedUserKey");
+        }
+        if encrypted_private_key.is_none() {
+            missing.push("encryptedPrivateKey");
+        }
+        return Err(AppError::BadRequest(format!(
+            "Missing encrypted keyset fields: {}. Passkey PRF key generation likely failed or is unsupported on this authenticator/browser. Re-create the passkey with PRF support, then retry enable encryption.",
+            missing.join(", ")
+        )));
+    }
+    webauthn::update_webauthn_prf_by_credential_id(
+        &db,
+        &claims.sub,
+        &credential_id_b64url,
+        webauthn::WEBAUTHN_PRF_STATUS_ENABLED,
+        encrypted_public_key,
+        encrypted_user_key,
+        encrypted_private_key,
+    )
+    .await?;
+
+    // Send notification
+    let user_email: Option<String> = db
+        .prepare("SELECT email FROM users WHERE id = ?1")
+        .bind(&[claims.sub.clone().into()])?
+        .first(Some("email"))
+        .await
+        .ok()
+        .flatten();
+
+    let meta = extract_request_meta(&headers);
+    let notify_ctx = NotifyContext {
+        user_id: Some(claims.sub.clone()),
+        user_email,
+        device_identifier: None,
+        device_name: Some(credential_id_b64url.clone()),
+        device_type: None,
+        cipher_id: None,
+        send_id: None,
+        detail: Some("启用 Passkey PRF 加密".to_string()),
+        meta,
+        is_new_ua: false,
+    };
+    notify::notify_best_effort(&state.env, NotifyEvent::WebAuthnCredentialUpdate, notify_ctx).await;
+
+    Ok(Json(json!({ "success": true })))
+}
+
+#[worker::send]
+pub async fn webauthn_delete_credential(
+    claims: Claims,
+    Path(id): Path<i32>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SecretVerificationData>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = db::get_db(&state.env)?;
+    payload.validate(&db, &claims.sub).await?;
+
+    // Get credential name before deletion for notification
+    let credential_name: Option<String> = db
+        .prepare("SELECT name FROM two_factor_webauthn WHERE user_id = ?1 AND slot_id = ?2")
+        .bind(&[claims.sub.clone().into(), (id as f64).into()])?
+        .first(Some("name"))
+        .await
+        .ok()
+        .flatten();
+
+    webauthn::delete_webauthn_key(&db, &claims.sub, id).await?;
+
+    // Send notification
+    let user_email: Option<String> = db
+        .prepare("SELECT email FROM users WHERE id = ?1")
+        .bind(&[claims.sub.clone().into()])?
+        .first(Some("email"))
+        .await
+        .ok()
+        .flatten();
+
+    let meta = extract_request_meta(&headers);
+    let notify_ctx = NotifyContext {
+        user_id: Some(claims.sub.clone()),
+        user_email,
+        device_identifier: None,
+        device_name: credential_name.clone(),
+        device_type: None,
+        cipher_id: None,
+        send_id: None,
+        detail: Some(format!("删除 Passkey 凭证: {}", credential_name.unwrap_or_else(|| format!("ID {}", id)))),
+        meta,
+        is_new_ua: false,
+    };
+    notify::notify_best_effort(&state.env, NotifyEvent::WebAuthnCredentialDelete, notify_ctx).await;
+
+    Ok(Json(json!({ "success": true })))
+}
+
+#[worker::send]
+pub async fn get_webauthn(
+    claims: Claims,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SecretVerificationData>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = db::get_db(&state.env)?;
+    payload.validate(&db, &claims.sub).await?;
+    Ok(Json(webauthn_response(&db, &claims.sub).await?))
+}
+
+#[worker::send]
+pub async fn get_webauthn_challenge(
+    claims: Claims,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SecretVerificationData>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = db::get_db(&state.env)?;
+    payload.validate(&db, &claims.sub).await?;
+
+    let user_row: Value = db
+        .prepare("SELECT name, email FROM users WHERE id = ?1")
+        .bind(&[claims.sub.clone().into()])?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+
+    let user_name = user_row.get("name").and_then(|v| v.as_str());
+    let user_email = user_row
+        .get("email")
+        .and_then(|v| v.as_str())
+        .ok_or(AppError::Database)?;
+
+    let rp_id = webauthn::rp_id_from_headers(&headers);
+    let origin = webauthn::origin_from_headers(&headers);
+    let challenge = webauthn::issue_registration_challenge(
+        &db,
+        &claims.sub,
+        user_name,
+        user_email,
+        &rp_id,
+        &origin,
+        webauthn::WEBAUTHN_USE_2FA,
+    )
+    .await?;
+
+    Ok(Json(challenge))
+}
+
+#[worker::send]
+pub async fn put_webauthn(
+    claims: Claims,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<UpdateTwoFactorWebAuthnRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = db::get_db(&state.env)?;
+    SecretVerificationData {
+        master_password_hash: payload.master_password_hash.clone(),
+        otp: payload.otp.clone(),
+    }
+    .validate(&db, &claims.sub)
+    .await?;
+
+    let desired_slot_id = payload.id;
+    let all_keys = webauthn::list_webauthn_keys(&db, &claims.sub).await?;
+    let occupied: std::collections::HashSet<i32> = all_keys.into_iter().map(|k| k.id).collect();
+    let slot_id = if occupied.contains(&desired_slot_id) {
+        (1..=5)
+            .find(|id| !occupied.contains(id))
+            .ok_or_else(|| AppError::BadRequest("WebAuthn key slots are full".to_string()))?
+    } else {
+        desired_slot_id
+    };
+
+    webauthn::register_webauthn_credential(
+        &db,
+        &claims.sub,
+        slot_id,
+        payload.name.as_deref().unwrap_or(""),
+        &payload.device_response.response.attestation_object,
+        &payload.device_response.response.client_data_json,
+        webauthn::WEBAUTHN_USE_2FA,
+    )
+    .await?;
+    webauthn::set_webauthn_two_factor_enabled(&db, &claims.sub, true).await?;
+
+    Ok(Json(webauthn_response(&db, &claims.sub).await?))
+}
+
+#[worker::send]
+pub async fn delete_webauthn(
+    claims: Claims,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<UpdateTwoFactorWebAuthnDeleteRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = db::get_db(&state.env)?;
+    SecretVerificationData {
+        master_password_hash: payload.master_password_hash.clone(),
+        otp: payload.otp.clone(),
+    }
+    .validate(&db, &claims.sub)
+    .await?;
+
+    webauthn::delete_webauthn_key(&db, &claims.sub, payload.id).await?;
+    if !webauthn::has_webauthn_credentials(&db, &claims.sub).await? {
+        webauthn::set_webauthn_two_factor_enabled(&db, &claims.sub, false).await?;
+    }
+    Ok(Json(webauthn_response(&db, &claims.sub).await?))
+}
+
+#[worker::send]
+pub async fn identity_assertion_options(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = db::get_db(&state.env)?;
+    let rp_id = webauthn::rp_id_from_headers(&headers);
+    let origin = webauthn::origin_from_headers(&headers);
+    let jwt_secret = state.env.secret("JWT_SECRET")?.to_string();
+    let payload =
+        webauthn::issue_passwordless_assertion_options(&db, &rp_id, &origin, &jwt_secret).await?;
+    Ok(Json(payload))
+}
+
+#[worker::send]
+pub async fn create_credential(
+    claims: Claims,
+    headers: HeaderMap,
+    state: State<Arc<AppState>>,
+    Json(payload): Json<SaveWebAuthnCredentialRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    webauthn_save_credential(claims, headers, state, Json(payload)).await
 }
 
 #[worker::send]
 pub async fn update_credential(
-    _claims: Claims,
-    State(_state): State<Arc<AppState>>,
-    Path(_credential_id): Path<String>,
-) -> Response {
-    not_supported_response("WebAuthn credential update is not supported in this deployment")
+    claims: Claims,
+    headers: HeaderMap,
+    state: State<Arc<AppState>>,
+    Json(payload): Json<UpdateWebAuthnCredentialRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    webauthn_update_credential(claims, headers, state, Json(payload)).await
 }
 
 #[worker::send]
 pub async fn delete_credential(
-    _claims: Claims,
-    State(_state): State<Arc<AppState>>,
-    Path(_credential_id): Path<String>,
-) -> Response {
-    not_supported_response("WebAuthn credential deletion is not supported in this deployment")
+    claims: Claims,
+    Path(id): Path<i32>,
+    headers: HeaderMap,
+    state: State<Arc<AppState>>,
+    Json(payload): Json<SecretVerificationData>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    webauthn_delete_credential(claims, Path(id), headers, state, Json(payload)).await
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EnableWebauthnData {
-    id: NumberOrString,
-    name: String,
-    device_response: Value,
-    master_password_hash: Option<String>,
-    otp: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeleteWebauthnData {
-    id: NumberOrString,
-    master_password_hash: String,
+#[worker::send]
+pub async fn list_credentials(
+    headers: HeaderMap,
+    state: State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    api_webauthn_get(headers, state).await
 }
 
 #[worker::send]
 pub async fn two_factor_get_webauthn(
     claims: Claims,
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<PasswordOrOtpData>,
-) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&state.env)?;
-    claims.verify_security_stamp(&db).await?;
-    validate_password_or_otp(&payload, &db, &claims.sub).await?;
-
-    let (enabled, registrations) = two_factor::get_webauthn_credentials(&db, &claims.sub).await?;
-    let keys = registrations
-        .iter()
-        .map(|r| json!({ "id": r.id, "name": r.name, "migrated": r.migrated }))
-        .collect::<Vec<_>>();
-
-    Ok(Json(json!({
-        "enabled": enabled,
-        "keys": keys,
-        "object": "twoFactorWebAuthn"
-    })))
+    state: State<Arc<AppState>>,
+    Json(payload): Json<SecretVerificationData>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    get_webauthn(claims, state, Json(payload)).await
 }
 
 #[worker::send]
 pub async fn two_factor_get_webauthn_challenge(
     claims: Claims,
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<PasswordOrOtpData>,
-) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&state.env)?;
-    claims.verify_security_stamp(&db).await?;
-    validate_password_or_otp(&payload, &db, &claims.sub).await?;
-
-    let creds = two_factor::get_webauthn_credentials(&db, &claims.sub)
-        .await?
-        .1
-        .into_iter()
-        .map(|r| r.credential_id)
-        .collect::<Vec<_>>();
-
-    let mut challenge_bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut challenge_bytes);
-    let challenge = general_purpose::URL_SAFE_NO_PAD.encode(challenge_bytes);
-    let state_value = json!({
-        "challenge": challenge,
-        "kind": "webauthn.create"
-    });
-
-    let now = Utc::now().to_rfc3339();
-    two_factor::upsert_webauthn_challenge(
-        &db,
-        &claims.sub,
-        two_factor::TWO_FACTOR_TYPE_WEBAUTHN_REGISTER_CHALLENGE,
-        &serde_json::to_string(&state_value).map_err(|_| AppError::Internal)?,
-        &now,
-    )
-    .await?;
-
-    let rp_id = state
-        .env
-        .var("DOMAIN")
-        .ok()
-        .map(|v| v.to_string())
-        .unwrap_or_default()
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .split('/')
-        .next()
-        .unwrap_or_default()
-        .to_string();
-
-    let mut challenge_value = json!({
-        "challenge": state_value["challenge"],
-        "rp": { "name": rp_id, "id": rp_id },
-        "user": {
-            "id": general_purpose::URL_SAFE_NO_PAD.encode(claims.sub.as_bytes()),
-            "name": claims.email,
-            "displayName": claims.name
-        },
-        "pubKeyCredParams": [
-            { "type": "public-key", "alg": -7 },
-            { "type": "public-key", "alg": -257 }
-        ],
-        "timeout": 60000,
-        "attestation": "none",
-        "excludeCredentials": creds.iter().map(|id| json!({
-            "type": "public-key",
-            "id": id
-        })).collect::<Vec<_>>(),
-        "authenticatorSelection": {
-            "userVerification": "discouraged"
-        }
-    });
-    challenge_value["status"] = Value::String("ok".to_string());
-    challenge_value["errorMessage"] = Value::String(String::new());
-
-    Ok(Json(challenge_value))
+    headers: HeaderMap,
+    state: State<Arc<AppState>>,
+    Json(payload): Json<SecretVerificationData>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    get_webauthn_challenge(claims, headers, state, Json(payload)).await
 }
 
 #[worker::send]
 pub async fn two_factor_put_webauthn(
     claims: Claims,
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(payload): Json<EnableWebauthnData>,
-) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&state.env)?;
-    claims.verify_security_stamp(&db).await?;
-
-    let auth_payload = PasswordOrOtpData {
-        master_password_hash: payload.master_password_hash,
-        otp: payload.otp,
-    };
-    validate_password_or_otp(&auth_payload, &db, &claims.sub).await?;
-
-    let register_state_raw = two_factor::take_webauthn_challenge(
-        &db,
-        &claims.sub,
-        two_factor::TWO_FACTOR_TYPE_WEBAUTHN_REGISTER_CHALLENGE,
-    )
-    .await?
-    .ok_or_else(|| AppError::BadRequest("Can't recover challenge".to_string()))?;
-
-    let register_state: Value = serde_json::from_str(&register_state_raw).map_err(|_| AppError::Internal)?;
-    let expected_challenge = register_state
-        .get("challenge")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| AppError::BadRequest("Can't recover challenge".to_string()))?;
-
-    // Try "id" first, then "rawId" - "id" is usually base64url encoded, "rawId" might be double-encoded
-    let credential_id = payload
-        .device_response
-        .get("id")
-        .and_then(|v| v.as_str())
-        .or_else(|| payload.device_response.get("rawId").and_then(|v| v.as_str()))
-        .ok_or_else(|| AppError::BadRequest("WebAuthn credential id missing".to_string()))?
-        .to_string();
-
-    let attestation_object_b64 = payload
-        .device_response
-        .get("response")
-        .and_then(|v| v.get("AttestationObject").or_else(|| v.get("attestationObject")))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| AppError::BadRequest("WebAuthn attestation object missing".to_string()))?;
-
-    let client_data_b64 = payload
-        .device_response
-        .get("response")
-        .and_then(|v| v.get("clientDataJson").or_else(|| v.get("clientDataJSON")))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| AppError::BadRequest("WebAuthn client data missing".to_string()))?;
-
-    let client_data_raw = decode_base64_mixed(client_data_b64)
-        .ok_or_else(|| AppError::BadRequest("WebAuthn client data invalid".to_string()))?;
-    let client_data: Value = serde_json::from_slice(&client_data_raw)
-        .map_err(|_| AppError::BadRequest("WebAuthn client data invalid".to_string()))?;
-
-    let challenge = client_data
-        .get("challenge")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| AppError::BadRequest("WebAuthn challenge missing".to_string()))?;
-    let typ = client_data
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    if challenge != expected_challenge {
-        return Err(AppError::BadRequest(format!(
-            "WebAuthn challenge mismatch: expected={}, got={}",
-            expected_challenge, challenge
-        )));
-    }
-    if typ != "webauthn.create" {
-        return Err(AppError::BadRequest(format!(
-            "WebAuthn type mismatch: expected=webauthn.create, got={}",
-            typ
-        )));
-    }
-
-    let (parsed_credential_id, public_key, sign_count, key_type) =
-        two_factor::parse_webauthn_registration_attestation(attestation_object_b64)?;
-
-    let raw_id_bytes = decode_base64_mixed(&credential_id)
-        .ok_or_else(|| AppError::BadRequest(format!("WebAuthn credential id invalid: raw_id={}", credential_id)))?;
-    let parsed_id_bytes = decode_base64_mixed(&parsed_credential_id)
-        .ok_or_else(|| AppError::BadRequest(format!("WebAuthn parsed credential id invalid: parsed_id={}", parsed_credential_id)))?;
-    if !constant_time_eq::constant_time_eq(&raw_id_bytes, &parsed_id_bytes) {
-        return Err(AppError::BadRequest(format!(
-            "WebAuthn credential id mismatch: raw_id_len={}, parsed_id_len={}",
-            raw_id_bytes.len(), parsed_id_bytes.len()
-        )));
-    }
-
-    let mut registrations = two_factor::get_webauthn_credentials(&db, &claims.sub).await?.1;
-    registrations.push(two_factor::WebauthnCredentialRecord {
-        id: parse_number_or_string_i32(payload.id)?,
-        name: payload.name,
-        migrated: false,
-        credential_id: parsed_credential_id,
-        public_key_sec1: Some(public_key),
-        sign_count: Some(sign_count),
-        key_type: Some(key_type),
-    });
-
-    let now = Utc::now().to_rfc3339();
-    two_factor::upsert_webauthn_credentials(&db, &claims.sub, true, &registrations, &now).await?;
-    let _ = two_factor::get_or_create_recovery_code(&db, &claims.sub).await?;
-
-    notify::notify_background(
-        &state.ctx,
-        state.env.clone(),
-        NotifyEvent::TwoFactorEnable,
-        NotifyContext {
-            user_id: Some(claims.sub.clone()),
-            user_email: Some(claims.email.clone()),
-            detail: Some("provider=webauthn".to_string()),
-            meta: notify::extract_request_meta(&headers),
-            ..Default::default()
-        },
-    );
-
-    let keys = registrations
-        .iter()
-        .map(|r| json!({ "id": r.id, "name": r.name, "migrated": r.migrated }))
-        .collect::<Vec<_>>();
-
-    Ok(Json(json!({
-        "enabled": true,
-        "keys": keys,
-        "object": "twoFactorU2f"
-    })))
+    state: State<Arc<AppState>>,
+    Json(payload): Json<UpdateTwoFactorWebAuthnRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    put_webauthn(claims, state, Json(payload)).await
 }
 
 #[worker::send]
 pub async fn two_factor_delete_webauthn(
     claims: Claims,
-    State(state): State<Arc<AppState>>,
+    state: State<Arc<AppState>>,
+    Json(payload): Json<UpdateTwoFactorWebAuthnDeleteRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    delete_webauthn(claims, state, Json(payload)).await
+}
+
+// Aliases for router compatibility
+#[worker::send]
+pub async fn attestation_options(
+    claims: Claims,
     headers: HeaderMap,
-    Json(payload): Json<DeleteWebauthnData>,
-) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&state.env)?;
-    claims.verify_security_stamp(&db).await?;
+    state: State<Arc<AppState>>,
+    Json(payload): Json<SecretVerificationData>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    webauthn_attestation_options(claims, headers, state, Json(payload)).await
+}
 
-    let row: Option<Value> = db
-        .prepare("SELECT master_password_hash, password_salt FROM users WHERE id = ?1")
-        .bind(&[claims.sub.clone().into()])?
-        .first(None)
-        .await
-        .map_err(|_| AppError::Database)?;
-    let row = row.ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
-    let stored_hash = row.get("master_password_hash").and_then(|v| v.as_str()).unwrap_or("");
-    let password_salt = row.get("password_salt").and_then(|v| v.as_str());
-
-    let password_valid = if let Some(salt) = password_salt {
-        crate::crypto::verify_password(&payload.master_password_hash, salt, stored_hash).await
-    } else {
-        constant_time_eq::constant_time_eq(
-            payload.master_password_hash.as_bytes(),
-            stored_hash.as_bytes(),
-        )
-    };
-    if !password_valid {
-        return Err(AppError::Unauthorized("Invalid credentials".to_string()));
-    }
-
-    let id = parse_number_or_string_i32(payload.id)?;
-    let mut regs = two_factor::get_webauthn_credentials(&db, &claims.sub).await?.1;
-    let idx = regs
-        .iter()
-        .position(|r| r.id == id)
-        .ok_or_else(|| AppError::NotFound("WebAuthn entry not found".to_string()))?;
-    regs.remove(idx);
-
-    let now = Utc::now().to_rfc3339();
-    two_factor::upsert_webauthn_credentials(&db, &claims.sub, true, &regs, &now).await?;
-
-    notify::notify_background(
-        &state.ctx,
-        state.env.clone(),
-        NotifyEvent::TwoFactorDisable,
-        NotifyContext {
-            user_id: Some(claims.sub.clone()),
-            user_email: Some(claims.email.clone()),
-            detail: Some("provider=webauthn".to_string()),
-            meta: notify::extract_request_meta(&headers),
-            ..Default::default()
-        },
-    );
-
-    let keys = regs
-        .iter()
-        .map(|r| json!({ "id": r.id, "name": r.name, "migrated": r.migrated }))
-        .collect::<Vec<_>>();
-
-    Ok(Json(json!({
-        "enabled": true,
-        "keys": keys,
-        "object": "twoFactorU2f"
-    })))
+#[worker::send]
+pub async fn assertion_options(
+    claims: Claims,
+    headers: HeaderMap,
+    state: State<Arc<AppState>>,
+    Json(payload): Json<SecretVerificationData>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    webauthn_assertion_options(claims, headers, state, Json(payload)).await
 }

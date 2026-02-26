@@ -8,12 +8,14 @@ mod db;
 mod domains;
 mod error;
 mod handlers;
+mod jwt;
 mod logging;
 mod models;
 mod notify;
 mod notifications;
 mod router;
 mod two_factor;
+mod webauthn;
 
 #[event(fetch)]
 pub async fn main(

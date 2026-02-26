@@ -11,7 +11,7 @@
 		// 可用模块: auth, db, external, notify
 		"LOG_LEVEL": "info",
 		// 通知事件开关: none | all | 逗号分隔列表
-		// 可选项: login,login_failed,password_hint,password,email,kdf,cipher_create,cipher_update,cipher_delete,import,send_create,send_delete,2fa_enable,2fa_disable,2fa_recovery_code_view,2fa_recover,token_refresh,sync
+		// 可选项: login,login_failed,password_hint,password,email,kdf,cipher_create,cipher_update,cipher_delete,import,send_create,send_delete,2fa_enable,2fa_disable,2fa_recovery_code_view,2fa_recover,token_refresh,sync,webauthn_credential_create,webauthn_credential_delete,webauthn_credential_update,webauthn_login
 		"NOTIFY_EVENTS": "all"
 	},
 	// D1 数据库绑定（必须完整，否则会被认为是新建/覆盖）
