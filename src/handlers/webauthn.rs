@@ -23,16 +23,34 @@ impl SecretVerificationData {
     async fn validate(&self, db: &worker::D1Database, user_id: &str) -> Result<(), AppError> {
         match (&self.master_password_hash, &self.otp) {
             (Some(master_password_hash), None) => {
-                let stored_hash: Option<String> = db
-                    .prepare("SELECT master_password_hash FROM users WHERE id = ?1")
+                // 查询用户的密码哈希和salt
+                let result: Option<serde_json::Value> = db
+                    .prepare("SELECT master_password_hash, password_salt FROM users WHERE id = ?1")
                     .bind(&[user_id.into()])?
-                    .first(Some("master_password_hash"))
+                    .first(None)
                     .await
                     .map_err(|_| AppError::Database)?;
-                let Some(stored_hash) = stored_hash else {
+
+                let Some(row) = result else {
                     return Err(AppError::NotFound("User not found".to_string()));
                 };
-                if !constant_time_eq(stored_hash.as_bytes(), master_password_hash.as_bytes()) {
+
+                let stored_hash = row.get("master_password_hash")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let password_salt = row.get("password_salt")
+                    .and_then(|v| v.as_str());
+
+                // 根据是否有salt选择验证方式
+                let password_valid = if let Some(salt) = password_salt {
+                    // 使用PBKDF2验证
+                    crate::crypto::verify_password(master_password_hash, salt, stored_hash).await
+                } else {
+                    // 直接比较哈希值
+                    constant_time_eq(stored_hash.as_bytes(), master_password_hash.as_bytes())
+                };
+
+                if !password_valid {
                     return Err(AppError::Unauthorized("Invalid credentials".to_string()));
                 }
                 Ok(())
