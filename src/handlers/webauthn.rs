@@ -69,6 +69,7 @@ pub struct UpdateTwoFactorWebAuthnRequest {
     master_password_hash: Option<String>,
     otp: Option<String>,
     id: i32,
+    #[serde(alias = "Name", alias = "keyName", alias = "KeyName", alias = "deviceName", alias = "DeviceName")]
     name: Option<String>,
     #[serde(rename = "deviceResponse")]
     device_response: WebAuthnDeviceResponse,
@@ -102,6 +103,7 @@ struct WebAuthnDeviceResponseInner {
 pub struct SaveWebAuthnCredentialRequest {
     #[serde(rename = "token")]
     _token: Option<String>,
+    #[serde(alias = "Name", alias = "keyName", alias = "KeyName", alias = "deviceName", alias = "DeviceName")]
     name: Option<String>,
     #[serde(rename = "deviceResponse")]
     device_response: WebAuthnDeviceResponse,
@@ -390,7 +392,11 @@ pub async fn webauthn_save_credential(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = db::get_db(&state.env)?;
     let slot_id = next_available_webauthn_slot_id(&db, &claims.sub).await?;
-    let name = payload.name.clone().unwrap_or_default();
+    let name = payload
+        .name
+        .clone()
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
 
     log::info!(
         target: targets::AUTH,
@@ -771,7 +777,11 @@ pub async fn put_webauthn(
         &db,
         &claims.sub,
         slot_id,
-        payload.name.as_deref().unwrap_or(""),
+        payload
+            .name
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or(""),
         &payload.device_response.response.attestation_object,
         &payload.device_response.response.client_data_json,
         webauthn::WEBAUTHN_USE_2FA,

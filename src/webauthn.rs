@@ -74,6 +74,7 @@ struct StoredCredentialRow {
 struct StoredCredentialLookupRow {
     user_id: String,
     slot_id: i32,
+    credential_use: String,
     public_key_cose_b64: String,
     sign_count: i64,
     encrypted_user_key: Option<String>,
@@ -1081,9 +1082,10 @@ pub async fn verify_passwordless_login_assertion(
         })?;
     log::info!(
         target: targets::AUTH,
-        "verify_passwordless_login_assertion credential matched user_id={} slot_id={} has_enc_user={} has_enc_priv={}",
+        "verify_passwordless_login_assertion credential matched user_id={} slot_id={} credential_use={} has_enc_user={} has_enc_priv={}",
         stored.user_id,
         stored.slot_id,
+        stored.credential_use,
         stored
             .encrypted_user_key
             .as_deref()
@@ -1097,6 +1099,14 @@ pub async fn verify_passwordless_login_assertion(
             .filter(|v| !v.is_empty())
             .is_some()
     );
+    if stored.credential_use == WEBAUTHN_USE_2FA {
+        log::warn!(
+            target: targets::AUTH,
+            "verify_passwordless_login_assertion fallback_to_2fa user_id={} slot_id={} reason=no_login_webauthn_credential",
+            stored.user_id,
+            stored.slot_id
+        );
+    }
 
     let public_key_cose = decode_b64_any(&stored.public_key_cose_b64)?;
     let (verifying_key, _alg) = parse_webauthn_public_key(&public_key_cose).map_err(|_| {
@@ -1607,9 +1617,22 @@ async fn get_stored_credential_by_credential_id(
 ) -> Result<Option<StoredCredentialLookupRow>, AppError> {
     let row: Option<Value> = db
         .prepare(
-            "SELECT user_id, slot_id, public_key_cose_b64, sign_count, encrypted_user_key, encrypted_private_key
-             FROM two_factor_webauthn
-             WHERE credential_id_b64url = ?1 AND credential_use IN ('login', 'both')
+            "SELECT c.user_id, c.slot_id, c.credential_use, c.public_key_cose_b64, c.sign_count, c.encrypted_user_key, c.encrypted_private_key
+             FROM two_factor_webauthn c
+             WHERE c.credential_id_b64url = ?1
+               AND (
+                   c.credential_use IN ('login', 'both')
+                   OR (
+                       c.credential_use = '2fa'
+                       AND NOT EXISTS (
+                           SELECT 1
+                           FROM two_factor_webauthn l
+                           WHERE l.user_id = c.user_id
+                             AND l.credential_use IN ('login', 'both')
+                       )
+                   )
+               )
+             ORDER BY CASE WHEN c.credential_use IN ('login', 'both') THEN 0 ELSE 1 END, c.slot_id ASC
              LIMIT 1",
         )
         .bind(&[credential_id_b64url.into()])?
@@ -1630,6 +1653,11 @@ async fn get_stored_credential_by_credential_id(
         .get("slot_id")
         .and_then(|v| v.as_i64())
         .ok_or(AppError::Database)? as i32;
+    let credential_use = row
+        .get("credential_use")
+        .and_then(|v| v.as_str())
+        .ok_or(AppError::Database)?
+        .to_string();
     let public_key_cose_b64 = row
         .get("public_key_cose_b64")
         .and_then(|v| v.as_str())
@@ -1648,6 +1676,7 @@ async fn get_stored_credential_by_credential_id(
     Ok(Some(StoredCredentialLookupRow {
         user_id,
         slot_id,
+        credential_use,
         public_key_cose_b64,
         sign_count,
         encrypted_user_key,
