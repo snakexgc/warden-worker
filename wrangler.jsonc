@@ -12,7 +12,44 @@
 		"LOG_LEVEL": "info",
 		// 通知事件开关: none | all | 逗号分隔列表
 		// 可选项: login,login_failed,password_hint,password,email,kdf,cipher_create,cipher_update,cipher_delete,import,send_create,send_delete,2fa_enable,2fa_disable,2fa_recovery_code_view,2fa_recover,token_refresh,sync,webauthn_credential_create,webauthn_credential_delete,webauthn_credential_update,webauthn_login
-		"NOTIFY_EVENTS": "all"
+		"NOTIFY_EVENTS": "all",
+
+		// ===============================
+		// 动态 vaultwarden.css 配置（参考 Vaultwarden 设计）
+		// 说明：
+		// 1) 客户端会请求 /css/vaultwarden.css
+		// 2) 这些开关由 Worker 在运行时生成最终 CSS
+		// 3) 布尔值支持: true/false、1/0、yes/no、on/off
+		// ===============================
+
+		// 是否隐藏注册入口（true=隐藏，false=显示）
+		"VW_CSS_SIGNUP_DISABLED": "false",
+		// 是否允许显示 Sends 入口（false=隐藏）
+		"VW_CSS_SENDS_ALLOWED": "true",
+		// 是否允许显示密码提示相关入口（false=隐藏）
+		"VW_CSS_PASSWORD_HINTS_ALLOWED": "true",
+		// 是否启用 SSO 登录样式（true 时隐藏默认邮箱继续流程）
+		"VW_CSS_SSO_ENABLED": "false",
+		// 是否仅保留 SSO 登录（true 时隐藏 Other / or 等入口）
+		"VW_CSS_SSO_ONLY": "false",
+		// 是否显示 Passkey 2FA 相关入口（false=隐藏）
+		"VW_CSS_PASSKEY_2FA_SUPPORTED": "false",
+		// 是否隐藏“记住 2FA 30 天”复选框（true=隐藏）
+		"VW_CSS_REMEMBER_2FA_DISABLED": "false",
+		// 是否启用 Email 2FA（false=隐藏 Email 2FA 入口）
+		"VW_CSS_MAIL_2FA_ENABLED": "true",
+		// 是否启用邮件能力（与 Email 2FA 联动，false=隐藏 Email 2FA 入口）
+		"VW_CSS_MAIL_ENABLED": "true",
+		// 是否启用 YubiKey OTP 2FA（false=隐藏 YubiKey 2FA 入口）
+		"VW_CSS_YUBICO_ENABLED": "false",
+		// 是否显示 Emergency Access 入口（false=隐藏）
+		"VW_CSS_EMERGENCY_ACCESS_ALLOWED": "true",
+		// 是否加载用户自定义 CSS（配合 VW_CSS_USER 使用）
+		"VW_CSS_LOAD_USER_CSS": "true"
+
+		// 用户自定义 CSS 建议通过 Secret 注入，不建议明文写入 vars：
+		// wrangler secret put VW_CSS_USER
+		// 读取优先级：Secret(VW_CSS_USER) > vars(VW_CSS_USER)
 	},
 	// D1 数据库绑定（必须完整，否则会被认为是新建/覆盖）
 	"d1_databases": [
@@ -64,6 +101,7 @@
 		"directory": "./static/web-vault",
 		"not_found_handling": "single-page-application",
 		"run_worker_first": [
+			"/css/*",
 			"/api/*",
 			"/identity/*",
 			"/sends/*",

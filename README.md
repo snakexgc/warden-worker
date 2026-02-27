@@ -54,6 +54,32 @@ TELEGRAM_CHAT_ID
 - **WEWORK_WEBHOOK_URL**：可选，企业微信群机器人的 Webhook 地址。用于事件通知和邮箱二步验证验证码发送。
 - **TELEGRAM_BOT_TOKEN**：可选，Telegram Bot 的 Token。从 [@BotFather](https://t.me/BotFather) 获取。
 - **TELEGRAM_CHAT_ID**：可选，接收通知的 Chat ID。可以是个人用户 ID、群组 ID 或频道 ID。通过 [@userinfobot](https://t.me/userinfobot) 获取个人 ID。
+
+### 可选：动态 vaultwarden.css（参考 Vaultwarden 方案）
+
+Worker 已支持动态生成 `GET /css/vaultwarden.css`，可通过环境变量按需隐藏入口并附加自定义 CSS。
+
+- `VW_CSS_SIGNUP_DISABLED`：是否隐藏注册入口（默认 `false`）
+- `VW_CSS_SENDS_ALLOWED`：是否显示 Sends（默认 `true`）
+- `VW_CSS_PASSWORD_HINTS_ALLOWED`：是否显示密码提示相关入口（默认 `true`）
+- `VW_CSS_SSO_ENABLED`：是否启用 SSO 样式切换（默认 `false`）
+- `VW_CSS_SSO_ONLY`：是否仅保留 SSO 登录流（默认 `false`）
+- `VW_CSS_PASSKEY_2FA_SUPPORTED`：是否显示 Passkey 2FA 入口（默认 `false`）
+- `VW_CSS_REMEMBER_2FA_DISABLED`：是否隐藏“记住 2FA 30 天”复选框（默认 `false`）
+- `VW_CSS_MAIL_2FA_ENABLED`：是否启用 Email 2FA 入口（默认 `true`）
+- `VW_CSS_MAIL_ENABLED`：是否启用邮件能力（默认 `true`，关闭时也会隐藏 Email 2FA）
+- `VW_CSS_YUBICO_ENABLED`：是否显示 YubiKey OTP 2FA 入口（默认 `false`）
+- `VW_CSS_EMERGENCY_ACCESS_ALLOWED`：是否显示紧急访问入口（默认 `true`）
+- `VW_CSS_LOAD_USER_CSS`：是否加载自定义 CSS（默认 `true`）
+- `VW_CSS_USER`：自定义 CSS 文本（可放到 Worker Secret，优先读取 Secret）
+
+示例：
+
+```bash
+wrangler secret put VW_CSS_USER
+# 粘贴你的自定义 CSS，保存即可
+```
+
 可以使用PowerShell生成 TWO_FACTOR_ENC_KEY ：
 ```powershell
 [Convert]::ToBase64String((1..32 | ForEach-Object {Get-Random -Minimum 0 -Maximum 256}))

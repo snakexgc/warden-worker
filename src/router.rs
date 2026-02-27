@@ -9,7 +9,7 @@ use std::sync::Arc;
 use worker::{Context, Env};
 
 use crate::background::BackgroundExecutor;
-use crate::handlers::{accounts, ciphers, compat, config, identity, sync, folders, import, two_factor, devices, sends, usage, icons, settings, webauthn};
+use crate::handlers::{accounts, ciphers, compat, config, css, identity, sync, folders, import, two_factor, devices, sends, usage, icons, settings, webauthn};
 
 pub struct AppState {
     pub env: Env,
@@ -31,6 +31,7 @@ pub fn api_router(env: Env, ctx: Option<Context>) -> Router<()> {
 
     Router::new()
         .route("/demo.html", get(demo_html))
+        .route("/css/vaultwarden.css", get(css::vaultwarden_css))
         .route("/icons/{*path}", get(icons::get_icon))
         // Identity/Auth routes
         .route("/identity/accounts/prelogin", post(accounts::prelogin))
