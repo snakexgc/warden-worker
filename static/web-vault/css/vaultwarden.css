@@ -98,11 +98,6 @@ app-login form bit-form-field {
    5. 隐藏侧边栏菜单项
    -------------------------------------------- */
 
-/* 隐藏"域名规则"侧边栏菜单项 */
-[route="settings/domain-rules"] {
-  display: none !important;
-}
-
 /* 隐藏"紧急访问"侧边栏菜单项 */
 [route="settings/emergency-access"] {
   display: none !important;

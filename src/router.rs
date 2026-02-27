@@ -8,19 +8,26 @@ use axum::extract::DefaultBodyLimit;
 use std::sync::Arc;
 use worker::{Context, Env};
 
+use crate::background::BackgroundExecutor;
 use crate::handlers::{accounts, ciphers, compat, config, identity, sync, folders, import, two_factor, devices, sends, usage, icons, settings, webauthn};
 
 pub struct AppState {
     pub env: Env,
-    pub ctx: Context,
+    pub ctx: BackgroundExecutor,
 }
 
 async fn demo_html(AxumState(_state): AxumState<Arc<AppState>>) -> Html<&'static str> {
     Html(include_str!("../static/demo.html"))
 }
 
-pub fn api_router(env: Env, ctx: Context) -> Router<()> {
-    let app_state = Arc::new(AppState { env, ctx });
+pub fn api_router(env: Env, ctx: Option<Context>) -> Router<()> {
+    let app_state = Arc::new(AppState {
+        env,
+        ctx: match ctx {
+            Some(context) => BackgroundExecutor::from_context(context),
+            None => BackgroundExecutor::detached(),
+        },
+    });
 
     Router::new()
         .route("/demo.html", get(demo_html))

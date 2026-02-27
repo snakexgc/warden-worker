@@ -14,6 +14,7 @@ use uuid::Uuid;
 use worker::wasm_bindgen::JsValue;
 use sha2::{Digest, Sha256};
 
+use crate::background::BackgroundExecutor;
 use crate::{auth::Claims, crypto, db, error::AppError, logging::targets, models::user::User, two_factor, webauthn};
 use crate::notify::{self, NotifyContext, NotifyEvent};
 use crate::router::AppState;
@@ -21,7 +22,7 @@ use crate::router::AppState;
 /// 后台更新设备信息
 /// 将设备表的创建和更新操作放入后台执行，减少登录响应延迟
 fn update_device_background(
-    ctx: &worker::Context,
+    ctx: &BackgroundExecutor,
     env: worker::Env,
     user_id: String,
     device_identifier: String,

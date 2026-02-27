@@ -3,11 +3,13 @@ use tower_service::Service;
 use worker::*;
 
 mod auth;
+mod background;
 mod crypto;
 mod db;
 mod domains;
 mod error;
 mod handlers;
+mod heavy_do;
 mod jwt;
 mod logging;
 mod models;
@@ -16,6 +18,8 @@ mod notifications;
 mod router;
 mod two_factor;
 mod webauthn;
+
+pub use heavy_do::HeavyDo;
 
 #[event(fetch)]
 pub async fn main(
@@ -58,7 +62,7 @@ pub async fn main(
         .allow_headers(Any)
         .allow_origin(Any);
 
-    let mut app = router::api_router(env, ctx).layer(cors);
+    let mut app = router::api_router(env, Some(ctx)).layer(cors);
 
     Ok(Service::call(&mut app, http_req).await?)
 }

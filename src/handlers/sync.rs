@@ -177,7 +177,7 @@ pub async fn sync(
     let domains = if q.exclude_domains.unwrap_or(false) {
         Value::Null
     } else {
-        domains::build_domains_object(&db, &user_id, false).await?
+        domains::build_domains_object(&db, &user_id, true).await?
     };
 
     let response = SyncResponse {

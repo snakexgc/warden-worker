@@ -1,7 +1,7 @@
 {
 	// Worker 基本信息
 	"name": "warden-worker",
-	"main": "build/index.js",
+	"main": "src/entry.js",
 	"compatibility_date": "2026-02-18",
 	// 环境变量配置
 	"vars": {
@@ -27,6 +27,10 @@
 			{
 				"name": "NOTIFICATIONS_HUB",
 				"class_name": "NotificationsHub"
+			},
+			{
+				"name": "HEAVY_DO",
+				"class_name": "HeavyDo"
 			}
 		]
 	},
@@ -35,6 +39,12 @@
 			"tag": "v1-notifications-hub",
 			"new_sqlite_classes": [
 				"NotificationsHub"
+			]
+		},
+		{
+			"tag": "v2-heavy-do",
+			"new_sqlite_classes": [
+				"HeavyDo"
 			]
 		}
 	],

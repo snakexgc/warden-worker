@@ -1,6 +1,7 @@
-use once_cell::sync::OnceCell;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::sync::RwLock;
 use worker::{D1Database, Fetch, Method, Request};
 
 use crate::error::AppError;
@@ -9,7 +10,7 @@ use crate::logging::targets;
 const GLOBAL_DOMAINS_URL: &str =
     "https://raw.githubusercontent.com/dani-garcia/vaultwarden/main/src/static/global_domains.json";
 
-static GLOBAL_DOMAINS_CACHE: OnceCell<Vec<GlobalDomain>> = OnceCell::new();
+static GLOBAL_DOMAINS_CACHE: Lazy<RwLock<Vec<GlobalDomain>>> = Lazy::new(|| RwLock::new(Vec::new()));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlobalDomain {
@@ -83,15 +84,11 @@ pub async fn update_domains_settings(
 }
 
 async fn get_global_domains() -> Vec<GlobalDomain> {
-    if let Some(v) = GLOBAL_DOMAINS_CACHE.get() {
-        return v.clone();
-    }
-
     let request = match Request::new(GLOBAL_DOMAINS_URL, Method::Get) {
         Ok(r) => r,
         Err(e) => {
             log::error!(target: targets::EXTERNAL, "Failed to create request for global domains: {:?}", e);
-            return Vec::new();
+            return cached_global_domains();
         }
     };
 
@@ -99,21 +96,21 @@ async fn get_global_domains() -> Vec<GlobalDomain> {
         Ok(r) => r,
         Err(e) => {
             log::error!(target: targets::EXTERNAL, "Failed to fetch global domains: {:?}", e);
-            return Vec::new();
+            return cached_global_domains();
         }
     };
 
     let status = response.status_code();
     if !(200..300).contains(&status) {
         log::warn!(target: targets::EXTERNAL, "Global domains fetch returned non-2xx status: {}", status);
-        return Vec::new();
+        return cached_global_domains();
     }
 
     let bytes = match response.bytes().await {
         Ok(b) => b,
         Err(e) => {
             log::error!(target: targets::EXTERNAL, "Failed to read global domains response: {:?}", e);
-            return Vec::new();
+            return cached_global_domains();
         }
     };
 
@@ -121,7 +118,7 @@ async fn get_global_domains() -> Vec<GlobalDomain> {
         Ok(s) => s,
         Err(e) => {
             log::error!(target: targets::EXTERNAL, "Global domains response was not valid UTF-8: {:?}", e);
-            return Vec::new();
+            return cached_global_domains();
         }
     };
 
@@ -129,10 +126,19 @@ async fn get_global_domains() -> Vec<GlobalDomain> {
         Ok(v) => v,
         Err(e) => {
             log::error!(target: targets::EXTERNAL, "Failed to parse global domains JSON: {:?}", e);
-            return Vec::new();
+            return cached_global_domains();
         }
     };
 
-    let _ = GLOBAL_DOMAINS_CACHE.set(parsed.clone());
+    if let Ok(mut cache) = GLOBAL_DOMAINS_CACHE.write() {
+        *cache = parsed.clone();
+    }
     parsed
+}
+
+fn cached_global_domains() -> Vec<GlobalDomain> {
+    GLOBAL_DOMAINS_CACHE
+        .read()
+        .map(|cache| cache.clone())
+        .unwrap_or_default()
 }

@@ -2,8 +2,9 @@ use axum::http::HeaderMap;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use worker::{wasm_bindgen::JsValue, Context, Env, Fetch, Method, Request, RequestInit};
+use worker::{wasm_bindgen::JsValue, Env, Fetch, Method, Request, RequestInit};
 
+use crate::background::BackgroundExecutor;
 use crate::db::get_db;
 use crate::logging::targets;
 
@@ -652,7 +653,12 @@ async fn send_telegram(
     }
 }
 
-pub fn notify_background(context: &Context, env: Env, event: NotifyEvent, notify_ctx: NotifyContext) {
+pub fn notify_background(
+    context: &BackgroundExecutor,
+    env: Env,
+    event: NotifyEvent,
+    notify_ctx: NotifyContext,
+) {
     context.wait_until(async move {
         notify_best_effort(&env, event, notify_ctx).await;
     });
@@ -681,7 +687,11 @@ pub async fn send_password_hint(env: &Env, ctx: NotifyContext) -> Result<(), wor
     Err(last_error.unwrap_or_else(|| worker::Error::RustError("no webhook configured".to_string())))
 }
 
-pub fn send_password_hint_background(context: &Context, env: Env, notify_ctx: NotifyContext) {
+pub fn send_password_hint_background(
+    context: &BackgroundExecutor,
+    env: Env,
+    notify_ctx: NotifyContext,
+) {
     context.wait_until(async move {
         if let Err(e) = send_password_hint(&env, notify_ctx).await {
             log::warn!(target: targets::NOTIFY, "send_password_hint failed err={:?}", e);
@@ -929,7 +939,7 @@ pub async fn publish_auth_response(
 }
 
 pub fn send_email_token_background(
-    context: &Context,
+    context: &BackgroundExecutor,
     env: Env,
     email: String,
     token: String,
