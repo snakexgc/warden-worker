@@ -2,7 +2,7 @@ use axum::{
     extract::{Multipart, Path, Query, State},
     http::HeaderMap,
     http::StatusCode,
-    response::Response,
+    response::{Html, Response},
     Json,
 };
 use base64::{engine::general_purpose, Engine as _};
@@ -31,6 +31,15 @@ use crate::{
 
 const SEND_FILES_BUCKET_BINDING: &str = "SEND_FILES_BUCKET";
 const SEND_ACCESS_RATE_LIMITER_BINDING: &str = "SEND_ACCESS_LIMITER";
+
+/// Cookie name for Turnstile send-access pass (HttpOnly, signed JWT for backend)
+const SEND_ACCESS_COOKIE: &str = "cf_send_pass";
+/// Cookie name for frontend JS detection (non-HttpOnly, simple flag)
+const SEND_ACCESS_FLAG_COOKIE: &str = "cf_send_pass_ok";
+/// Cookie / token validity in minutes
+const SEND_ACCESS_COOKIE_TTL_MINUTES: i64 = 30;
+/// Cloudflare Turnstile siteverify endpoint
+const TURNSTILE_VERIFY_URL: &str = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 
 /// D1 free tier: 500 MB
 const D1_MAX_BYTES: i64 = 500 * 1024 * 1024;
@@ -65,14 +74,238 @@ fn request_client_ip(headers: &HeaderMap) -> Option<String> {
         })
 }
 
-async fn verify_turnstile(
-    _state: &Arc<AppState>,
-    _token: Option<&str>,
-    _client_ip: Option<&str>,
+/// Check whether Turnstile is configured. Returns `true` when both the site key
+/// (public) and secret key are present.
+fn turnstile_enabled(state: &Arc<AppState>) -> bool {
+    let has_site = state
+        .env
+        .var("TURNSTILE_SITE_KEY")
+        .ok()
+        .map(|v| !v.to_string().is_empty())
+        .unwrap_or(false);
+    let has_secret = state
+        .env
+        .secret("TURNSTILE_SECRET_KEY")
+        .ok()
+        .map(|v| !v.to_string().is_empty())
+        .unwrap_or(false);
+    has_site && has_secret
+}
+
+/// Call Cloudflare Turnstile siteverify API to validate a challenge token.
+async fn verify_turnstile_token(
+    state: &Arc<AppState>,
+    token: &str,
+    client_ip: Option<&str>,
 ) -> Result<(), AppError> {
-    // Currently disabled: Turnstile verification is not compatible with Bitwarden Web Vault
-    // TODO: Implement a custom web page for send access with Turnstile challenge
+    let secret = state
+        .env
+        .secret("TURNSTILE_SECRET_KEY")
+        .map_err(|_| AppError::Internal)?
+        .to_string();
+
+    let mut body = json!({
+        "secret": secret,
+        "response": token
+    });
+    if let Some(ip) = client_ip {
+        body.as_object_mut().unwrap().insert("remoteip".to_string(), Value::String(ip.to_string()));
+    }
+
+    let mut headers = worker::Headers::new();
+    headers.set("Content-Type", "application/json").map_err(|_| AppError::Internal)?;
+    let mut init = worker::RequestInit::new();
+    init.with_method(worker::Method::Post)
+        .with_headers(headers)
+        .with_body(Some(worker::wasm_bindgen::JsValue::from_str(
+            &serde_json::to_string(&body).map_err(|_| AppError::Internal)?,
+        )));
+    let request = worker::Request::new_with_init(TURNSTILE_VERIFY_URL, &init)
+        .map_err(|_| AppError::Internal)?;
+    let mut response = worker::Fetch::Request(request)
+        .send()
+        .await
+        .map_err(|_| AppError::Internal)?;
+    let result: Value = response.json().await.map_err(|_| AppError::Internal)?;
+
+    if result.get("success").and_then(|v| v.as_bool()) == Some(true) {
+        log::info!(target: targets::AUTH, "turnstile.verify.success");
+        Ok(())
+    } else {
+        let codes = result.get("error-codes").cloned().unwrap_or(json!([]));
+        log::warn!(target: targets::AUTH, "turnstile.verify.fail codes={}", codes);
+        Err(AppError::Unauthorized("Turnstile verification failed".to_string()))
+    }
+}
+
+// ─── Signed cookie helpers for Turnstile send-access pass ───
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SendAccessPassClaims {
+    /// "send_access" – fixed audience
+    aud: String,
+    exp: usize,
+    iat: usize,
+}
+
+/// Create a signed JWT cookie value valid for `SEND_ACCESS_COOKIE_TTL_MINUTES`.
+fn generate_send_access_cookie(state: &Arc<AppState>) -> Result<String, AppError> {
+    let secret = state.env.secret("JWT_SECRET")?.to_string();
+    let now = Utc::now();
+    let claims = SendAccessPassClaims {
+        aud: "send_access".to_string(),
+        iat: now.timestamp() as usize,
+        exp: (now + chrono::Duration::minutes(SEND_ACCESS_COOKIE_TTL_MINUTES)).timestamp() as usize,
+    };
+    let token = jsonwebtoken::encode(
+        &jsonwebtoken::Header::default(),
+        &claims,
+        &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
+    )?;
+    Ok(token)
+}
+
+/// Validate the signed cookie; returns `Ok(())` if valid.
+fn validate_send_access_cookie(state: &Arc<AppState>, token: &str) -> Result<(), AppError> {
+    let secret = state.env.secret("JWT_SECRET")?.to_string();
+    let mut validation = jsonwebtoken::Validation::default();
+    validation.set_audience(&["send_access"]);
+    validation.set_required_spec_claims(&["exp", "aud"]);
+    jsonwebtoken::decode::<SendAccessPassClaims>(
+        token,
+        &jsonwebtoken::DecodingKey::from_secret(secret.as_bytes()),
+        &validation,
+    )
+    .map_err(|_| AppError::Unauthorized("Invalid or expired send access pass".to_string()))?;
     Ok(())
+}
+
+/// Extract the `cf_send_pass` cookie from request headers.
+fn extract_send_access_cookie(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| {
+            cookies
+                .split(';')
+                .filter_map(|c| {
+                    let mut parts = c.splitn(2, '=');
+                    let name = parts.next()?.trim();
+                    let value = parts.next()?.trim();
+                    if name == SEND_ACCESS_COOKIE {
+                        Some(value.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .next()
+        })
+}
+
+/// Enforce Turnstile cookie on send-access endpoints.
+/// Returns `Ok(())` if Turnstile is disabled or the cookie is valid.
+fn require_send_access_pass(state: &Arc<AppState>, headers: &HeaderMap) -> Result<(), AppError> {
+    if !turnstile_enabled(state) {
+        return Ok(());
+    }
+    let token = extract_send_access_cookie(headers)
+        .ok_or_else(|| AppError::Unauthorized("Turnstile verification required".to_string()))?;
+    validate_send_access_cookie(state, &token)
+}
+
+/// Build the Set-Cookie header value for the send-access pass (HttpOnly, backend use).
+fn send_access_cookie_header(token: &str) -> String {
+    format!(
+        "{SEND_ACCESS_COOKIE}={token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age={}",
+        SEND_ACCESS_COOKIE_TTL_MINUTES * 60
+    )
+}
+
+/// Build the Set-Cookie header for the frontend flag cookie (non-HttpOnly).
+fn send_access_flag_cookie_header() -> String {
+    format!(
+        "{SEND_ACCESS_FLAG_COOKIE}=1; Path=/; Secure; SameSite=Lax; Max-Age={}",
+        SEND_ACCESS_COOKIE_TTL_MINUTES * 60
+    )
+}
+
+// ─── Send-verify endpoints ───
+
+/// `GET /send-verify` – serves the Turnstile challenge page with the site key injected.
+#[worker::send]
+pub async fn send_verify_page(
+    State(state): State<Arc<AppState>>,
+) -> Result<Response, AppError> {
+    let site_key = state
+        .env
+        .var("TURNSTILE_SITE_KEY")
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+
+    let html = include_str!("../../static/send-verify.html")
+        .replace(
+            "|| window.__TURNSTILE_SITE_KEY__",
+            &format!("|| '{}'", site_key),
+        );
+
+    let mut response = Response::new(axum::body::Body::from(html));
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    // Allow Turnstile scripts and frames
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static(
+            "default-src 'self'; \
+             script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com; \
+             frame-src https://challenges.cloudflare.com; \
+             style-src 'self' 'unsafe-inline'; \
+             connect-src 'self' https://challenges.cloudflare.com; \
+             img-src 'self' data:"
+        ),
+    );
+    Ok(response)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SendVerifyPayload {
+    token: String,
+}
+
+/// `POST /api/send-verify` – validate Turnstile token and issue a signed cookie.
+#[worker::send]
+pub async fn post_send_verify(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<SendVerifyPayload>,
+) -> Result<Response, AppError> {
+    let client_ip = request_client_ip(&headers);
+    verify_turnstile_token(&state, &payload.token, client_ip.as_deref()).await?;
+
+    let cookie_value = generate_send_access_cookie(&state)?;
+    let mut response = Response::new(axum::body::Body::from(
+        serde_json::to_string(&json!({ "ok": true })).unwrap(),
+    ));
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    // Set the HttpOnly signed JWT cookie (for backend verification)
+    response.headers_mut().append(
+        axum::http::header::SET_COOKIE,
+        axum::http::HeaderValue::from_str(&send_access_cookie_header(&cookie_value))
+            .map_err(|_| AppError::Internal)?,
+    );
+    // Set the non-HttpOnly flag cookie (for frontend JS detection)
+    response.headers_mut().append(
+        axum::http::header::SET_COOKIE,
+        axum::http::HeaderValue::from_str(&send_access_flag_cookie_header())
+            .map_err(|_| AppError::Internal)?,
+    );
+    Ok(response)
 }
 
 /// Check that both D1 and R2 have at least 20% free space before allowing a file upload.
@@ -999,17 +1232,14 @@ pub async fn post_access(
     let client_ip = request_client_ip(&headers);
     log::info!(
         target: targets::AUTH,
-        "send.access.request access_id={} ip={} has_password_payload={} has_turnstile_token={}",
+        "send.access.request access_id={} ip={} has_password_payload={} has_turnstile_cookie={}",
         access_id,
         client_ip.as_deref().unwrap_or("unknown"),
         payload.password.as_deref().map(str::trim).map(|s| !s.is_empty()).unwrap_or(false),
-        payload
-            .cf_turnstile_response
-            .as_deref()
-            .map(str::trim)
-            .map(|s| !s.is_empty())
-            .unwrap_or(false)
+        extract_send_access_cookie(&headers).is_some()
     );
+    // Require Turnstile send-access pass (cookie set by /send-verify flow)
+    require_send_access_pass(&state, &headers)?;
     enforce_send_access_rate_limit(
         &state,
         format!(
@@ -1017,12 +1247,6 @@ pub async fn post_access(
             access_id,
             client_ip.as_deref().unwrap_or("unknown")
         ),
-    )
-    .await?;
-    verify_turnstile(
-        &state,
-        payload.cf_turnstile_response.as_deref(),
-        client_ip.as_deref(),
     )
     .await?;
 
@@ -1062,18 +1286,15 @@ pub async fn post_access_file(
     let client_ip = request_client_ip(&headers);
     log::info!(
         target: targets::AUTH,
-        "send.access_file.request send_id={} file_id={} ip={} has_password_payload={} has_turnstile_token={}",
+        "send.access_file.request send_id={} file_id={} ip={} has_password_payload={} has_turnstile_cookie={}",
         send_id,
         file_id,
         client_ip.as_deref().unwrap_or("unknown"),
         payload.password.as_deref().map(str::trim).map(|s| !s.is_empty()).unwrap_or(false),
-        payload
-            .cf_turnstile_response
-            .as_deref()
-            .map(str::trim)
-            .map(|s| !s.is_empty())
-            .unwrap_or(false)
+        extract_send_access_cookie(&headers).is_some()
     );
+    // Require Turnstile send-access pass (cookie set by /send-verify flow)
+    require_send_access_pass(&state, &headers)?;
     enforce_send_access_rate_limit(
         &state,
         format!(
@@ -1082,12 +1303,6 @@ pub async fn post_access_file(
             file_id,
             client_ip.as_deref().unwrap_or("unknown")
         ),
-    )
-    .await?;
-    verify_turnstile(
-        &state,
-        payload.cf_turnstile_response.as_deref(),
-        client_ip.as_deref(),
     )
     .await?;
 

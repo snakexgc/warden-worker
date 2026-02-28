@@ -138,6 +138,8 @@ pub struct SendData {
 #[serde(rename_all = "camelCase")]
 pub struct SendAccessData {
     pub password: Option<String>,
+    /// Kept for deserialization compatibility; Turnstile is now enforced via cookie.
+    #[allow(dead_code)]
     #[serde(rename = "cf-turnstile-response", alias = "cfTurnstileResponse")]
     pub cf_turnstile_response: Option<String>,
 }
@@ -204,31 +206,37 @@ pub fn send_to_json(send: &SendDBModel) -> Value {
         }
     }
 
-    let password_b64 = send.password_hash.as_deref().and_then(|h| {
-        general_purpose::STANDARD.decode(h).ok().map(|bytes| {
-            general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-        })
-    });
-
-    json!({
+    let mut result = json!({
         "id": send.id,
         "accessId": access_id_from_uuid(&send.id),
         "type": send.r#type,
         "name": send.name,
         "notes": send.notes,
+        "emails": "",
+        "emailHashes": "",
         "text": if send.r#type == SEND_TYPE_TEXT { Some(&data_value) } else { None },
         "file": if send.r#type == SEND_TYPE_FILE { Some(&data_value) } else { None },
         "key": send.key,
         "maxAccessCount": send.max_access_count,
         "accessCount": send.access_count,
-        "password": password_b64,
         "disabled": send.disabled,
         "hideEmail": send.hide_email,
         "revisionDate": send.updated_at,
         "expirationDate": send.expiration_date,
         "deletionDate": send.deletion_date,
         "object": "send",
-    })
+    });
+
+    if let Some(ref password_hash) = send.password_hash {
+        if let Ok(decoded) = general_purpose::STANDARD.decode(password_hash) {
+            let password_b64 = general_purpose::URL_SAFE_NO_PAD.encode(decoded);
+            if let Some(obj) = result.as_object_mut() {
+                obj.insert("password".to_string(), Value::String(password_b64));
+            }
+        }
+    }
+
+    result
 }
 
 pub fn send_to_json_access(send: &SendDBModel, creator_identifier: Option<String>) -> Value {

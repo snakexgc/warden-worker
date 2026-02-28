@@ -33,6 +33,9 @@ pub fn api_router(env: Env, ctx: Option<Context>) -> Router<()> {
         .route("/demo.html", get(demo_html))
         .route("/css/vaultwarden.css", get(css::vaultwarden_css))
         .route("/icons/{*path}", get(icons::get_icon))
+        // Turnstile send-access verification
+        .route("/send-verify", get(sends::send_verify_page))
+        .route("/api/send-verify", post(sends::post_send_verify))
         // Identity/Auth routes
         .route("/identity/accounts/prelogin", post(accounts::prelogin))
         .route("/api/accounts/prelogin", post(accounts::prelogin))

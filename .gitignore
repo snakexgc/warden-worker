@@ -5,4 +5,5 @@ vaultwarden
 cfvw_web_builds
 keyguard-app-master
 workerfork
-log
+log*
+bw_web_builds

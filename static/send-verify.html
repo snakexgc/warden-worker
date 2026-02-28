@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Human Verification – Bitwarden Send</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background: #f5f5f5;
+      color: #333;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+    .card {
+      background: #fff;
+      border-radius: 8px;
+      box-shadow: 0 2px 12px rgba(0,0,0,.08);
+      padding: 2rem 2.5rem;
+      max-width: 420px;
+      width: 100%;
+      text-align: center;
+    }
+    .card h1 {
+      font-size: 1.25rem;
+      margin-bottom: .5rem;
+    }
+    .card p {
+      font-size: .9rem;
+      color: #666;
+      margin-bottom: 1.5rem;
+    }
+    #turnstile-box {
+      display: flex;
+      justify-content: center;
+      margin-bottom: 1rem;
+      min-height: 65px;
+    }
+    #status {
+      font-size: .85rem;
+      min-height: 1.2em;
+    }
+    #status.error { color: #d32f2f; }
+    #status.ok    { color: #388e3c; }
+    #continue-btn {
+      display: none;
+      margin-top: 1rem;
+      padding: .6rem 2rem;
+      font-size: .95rem;
+      color: #fff;
+      background: #1976d2;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    #continue-btn:hover { background: #1565c0; }
+    .spinner {
+      border: 3px solid #e0e0e0;
+      border-top-color: #1976d2;
+      border-radius: 50%;
+      width: 24px; height: 24px;
+      animation: spin .8s linear infinite;
+      display: inline-block;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Verify you are human</h1>
+    <p>Please complete the challenge below to access this Bitwarden Send.</p>
+    <div id="turnstile-box"></div>
+    <div id="status"></div>
+    <button id="continue-btn" onclick="goToSend()">Continue to Send</button>
+  </div>
+
+  <script>
+    // Read configuration injected as a meta tag or fall back to a global
+    const SITE_KEY = document.querySelector('meta[name="turnstile-site-key"]')?.content
+                     || window.__TURNSTILE_SITE_KEY__
+                     || '';
+
+    const params  = new URLSearchParams(window.location.search);
+    const returnUrl = params.get('return') || '/';
+
+    function setStatus(msg, cls) {
+      const el = document.getElementById('status');
+      el.textContent = msg;
+      el.className = cls || '';
+    }
+
+    function goToSend() {
+      window.location.href = returnUrl;
+    }
+
+    function onTurnstileLoad() {
+      if (!SITE_KEY) {
+        setStatus('Turnstile site key not configured.', 'error');
+        return;
+      }
+      window.turnstile.render('#turnstile-box', {
+        sitekey: SITE_KEY,
+        callback: onVerify,
+        'error-callback': function () {
+          setStatus('Challenge failed. Please try again.', 'error');
+        },
+      });
+    }
+
+    async function onVerify(token) {
+      setStatus('');
+      document.getElementById('status').innerHTML = '<span class="spinner"></span> Verifying…';
+
+      try {
+        const resp = await fetch('/api/send-verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: token }),
+          credentials: 'same-origin',
+        });
+
+        if (resp.ok) {
+          setStatus('Verified! Click the button below to continue.', 'ok');
+          document.getElementById('continue-btn').style.display = 'inline-block';
+        } else {
+          const data = await resp.json().catch(function () { return {}; });
+          setStatus(data.error || 'Verification failed. Please try again.', 'error');
+          if (window.turnstile) window.turnstile.reset();
+        }
+      } catch (e) {
+        setStatus('Network error. Please try again.', 'error');
+        if (window.turnstile) window.turnstile.reset();
+      }
+    }
+  </script>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onTurnstileLoad" async defer></script>
+</body>
+</html>
