@@ -20,6 +20,7 @@ use crate::{
     auth::Claims,
     db,
     error::AppError,
+    logging::targets,
     notify::{self, NotifyContext, NotifyEvent},
     router::AppState,
     models::send::{
@@ -28,7 +29,15 @@ use crate::{
     },
 };
 
-const SEND_FILE_B64_CHUNK_LEN: usize = 1_500_000;
+const SEND_FILES_BUCKET_BINDING: &str = "SEND_FILES_BUCKET";
+const SEND_ACCESS_RATE_LIMITER_BINDING: &str = "SEND_ACCESS_LIMITER";
+
+/// D1 free tier: 500 MB
+const D1_MAX_BYTES: i64 = 500 * 1024 * 1024;
+/// R2 free tier: 10 GB
+const R2_MAX_BYTES: i64 = 10 * 1024 * 1024 * 1024;
+/// Reject uploads when remaining space < 20% of free tier
+const STORAGE_MIN_FREE_RATIO: f64 = 0.20;
 
 fn now_rfc3339_millis() -> String {
     Utc::now()
@@ -39,6 +48,92 @@ fn parse_rfc3339(s: &str) -> Result<DateTime<Utc>, AppError> {
     let dt = DateTime::parse_from_rfc3339(s).map_err(|_| AppError::BadRequest("Invalid date".to_string()))?;
     Ok(dt.with_timezone(&Utc))
 }
+
+fn request_client_ip(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("CF-Connecting-IP")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            headers
+                .get("X-Forwarded-For")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.split(',').next())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+}
+
+async fn verify_turnstile(
+    _state: &Arc<AppState>,
+    _token: Option<&str>,
+    _client_ip: Option<&str>,
+) -> Result<(), AppError> {
+    // Currently disabled: Turnstile verification is not compatible with Bitwarden Web Vault
+    // TODO: Implement a custom web page for send access with Turnstile challenge
+    Ok(())
+}
+
+/// Check that both D1 and R2 have at least 20% free space before allowing a file upload.
+async fn check_storage_quota(db: &worker::D1Database, state: &Arc<AppState>, incoming_file_size: i64) -> Result<(), AppError> {
+    // --- D1 check ---
+    let d1_used: Option<i64> = db
+        .prepare(
+            "SELECT COALESCE(SUM(LENGTH(data)),0) \
+             + (SELECT COALESCE(SUM(LENGTH(data)),0) FROM sends) \
+             + (SELECT COALESCE(SUM(LENGTH(name)),0) FROM folders) \
+             AS bytes FROM ciphers"
+        )
+        .bind(&[])?
+        .first(Some("bytes"))
+        .await
+        .map_err(|_| AppError::Database)?;
+    let d1_used = d1_used.unwrap_or(0);
+    let d1_remaining = D1_MAX_BYTES - d1_used;
+    let d1_threshold = (D1_MAX_BYTES as f64 * STORAGE_MIN_FREE_RATIO) as i64;
+    if d1_remaining < d1_threshold {
+        return Err(AppError::BadRequest(format!(
+            "D1 storage nearly full: {remaining} remaining (threshold {threshold})",
+            remaining = display_size(d1_remaining.max(0)),
+            threshold = display_size(d1_threshold),
+        )));
+    }
+
+    // --- R2 check ---
+    let r2_used: Option<i64> = db
+        .prepare("SELECT COALESCE(SUM(size), 0) AS bytes FROM send_files WHERE storage_type = 'r2'")
+        .bind(&[])?
+        .first(Some("bytes"))
+        .await
+        .map_err(|_| AppError::Database)?;
+    let r2_used = r2_used.unwrap_or(0);
+    let r2_after_upload = r2_used + incoming_file_size;
+    let r2_remaining = R2_MAX_BYTES - r2_after_upload;
+    let r2_threshold = (R2_MAX_BYTES as f64 * STORAGE_MIN_FREE_RATIO) as i64;
+    if r2_remaining < r2_threshold {
+        return Err(AppError::BadRequest(format!(
+            "R2 storage nearly full: {remaining} remaining after upload (threshold {threshold})",
+            remaining = display_size(r2_remaining.max(0)),
+            threshold = display_size(r2_threshold),
+        )));
+    }
+
+    Ok(())
+}
+
+async fn enforce_send_access_rate_limit(state: &Arc<AppState>, key: String) -> Result<(), AppError> {
+    let limiter = match state.env.rate_limiter(SEND_ACCESS_RATE_LIMITER_BINDING) {
+        Ok(l) => l,
+        Err(_) => return Ok(()), // Skip rate limiting if binding is not configured
+    };
+    let outcome = limiter.limit(key).await.map_err(|_| AppError::Internal)?;
+    if !outcome.success {
+        return Err(AppError::TooManyRequests("Too many requests".to_string()));
+    }
+    Ok(())
+}
+
 
 fn display_size(bytes: i64) -> String {
     if bytes < 1024 {
@@ -170,19 +265,24 @@ fn validate_send_access(send: &SendDBModel) -> Result<(), AppError> {
 
 fn validate_send_password(send: &SendDBModel, password: Option<String>) -> Result<(), AppError> {
     let Some(stored_hash_b64) = send.password_hash.as_deref() else {
+        log::debug!(target: targets::AUTH, "send.password_check.skip send_id={} reason=no_password_hash", send.id);
         return Ok(());
     };
     let Some(stored_salt_b64) = send.password_salt.as_deref() else {
+        log::error!(target: targets::AUTH, "send.password_check.error send_id={} reason=missing_salt", send.id);
         return Err(AppError::Internal);
     };
 
     let Some(password) = password else {
+        log::warn!(target: targets::AUTH, "send.password_check.fail send_id={} reason=password_not_provided", send.id);
         return Err(AppError::Unauthorized("Password not provided".to_string()));
     };
     let candidate = hash_password(&password, stored_salt_b64)?;
     if !constant_time_eq(stored_hash_b64.as_bytes(), candidate.as_bytes()) {
+        log::warn!(target: targets::AUTH, "send.password_check.fail send_id={} reason=password_mismatch", send.id);
         return Err(AppError::BadRequest("Invalid password".to_string()));
     }
+    log::debug!(target: targets::AUTH, "send.password_check.ok send_id={}", send.id);
     Ok(())
 }
 
@@ -243,15 +343,28 @@ pub async fn delete_send(
         .ok_or_else(|| AppError::NotFound("Send not found".to_string()))?;
 
     if owned.r#type == SEND_TYPE_FILE {
-        query!(
-            &db,
-            "DELETE FROM send_file_chunks WHERE send_file_id IN (SELECT id FROM send_files WHERE send_id = ?1 AND user_id = ?2)",
-            send_id,
-            claims.sub
-        )
-        .map_err(|_| AppError::Database)?
-        .run()
-        .await?;
+        let file_rows: Vec<Value> = db
+            .prepare("SELECT r2_object_key, storage_type FROM send_files WHERE send_id = ?1 AND user_id = ?2")
+            .bind(&[send_id.clone().into(), claims.sub.clone().into()])?
+            .all()
+            .await
+            .map_err(|_| AppError::Database)?
+            .results()?;
+
+        if let Ok(bucket) = state.env.bucket(SEND_FILES_BUCKET_BINDING) {
+            for row in file_rows {
+                let storage_type = row
+                    .get("storage_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("d1_base64");
+                if storage_type != "r2" {
+                    continue;
+                }
+                if let Some(key) = row.get("r2_object_key").and_then(|v| v.as_str()) {
+                    let _ = bucket.delete(key.to_string()).await;
+                }
+            }
+        }
 
         query!(
             &db,
@@ -305,6 +418,19 @@ pub async fn post_send(
     if payload.r#type == SEND_TYPE_FILE {
         return Err(AppError::BadRequest("File sends should use /api/sends/file/v2".to_string()));
     }
+
+    log::info!(
+        target: targets::API,
+        "send.create.request user_id={} type={} has_password={} has_turnstile_field=false",
+        claims.sub,
+        payload.r#type,
+        payload
+            .password
+            .as_deref()
+            .map(str::trim)
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+    );
 
     let payload = payload;
     let name = payload.name.clone();
@@ -360,6 +486,15 @@ pub async fn post_send(
         .await?
         .ok_or_else(|| AppError::Internal)?;
 
+    log::info!(
+        target: targets::API,
+        "send.create.success user_id={} send_id={} type={} stored_has_password={}",
+        claims.sub,
+        send_id,
+        send_type,
+        send.password_hash.as_deref().is_some()
+    );
+
     let meta = notify::extract_request_meta(&headers);
     notify::notify_background(
         &state.ctx,
@@ -378,6 +513,224 @@ pub async fn post_send(
 }
 
 #[worker::send]
+pub async fn put_send(
+    claims: Claims,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(send_id): Path<String>,
+    Json(raw_payload): Json<Value>,
+) -> Result<Json<Value>, AppError> {
+    let db = db::get_db(&state.env)?;
+    claims.verify_security_stamp(&db).await?;
+
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("<missing>");
+    let raw_password = raw_payload.get("password");
+    let has_password_key = raw_payload.get("password").is_some();
+    let raw_password_kind = match raw_password {
+        Some(Value::String(_)) => "string",
+        Some(Value::Null) => "null",
+        Some(_) => "non_string",
+        None => "missing",
+    };
+    let raw_password_len = raw_password
+        .and_then(|v| v.as_str())
+        .map(|s| s.len())
+        .unwrap_or(0);
+    log::info!(
+        target: targets::API,
+        "send.update.raw send_id={} content_type={} has_password_key={} password_kind={} password_len={}",
+        send_id,
+        content_type,
+        has_password_key,
+        raw_password_kind,
+        raw_password_len
+    );
+
+    let payload: SendData = serde_json::from_value(raw_payload)
+        .map_err(|_| AppError::BadRequest("Invalid send payload".to_string()))?;
+
+    let existing = get_send_by_id_and_user(&db, &send_id, &claims.sub)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Send not found".to_string()))?;
+
+    if existing.r#type != payload.r#type {
+        return Err(AppError::BadRequest("Cannot change send type".to_string()));
+    }
+
+    log::info!(
+        target: targets::API,
+        "send.update.request user_id={} send_id={} type={} has_password={}",
+        claims.sub,
+        send_id,
+        payload.r#type,
+        payload
+            .password
+            .as_deref()
+            .map(str::trim)
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+    );
+
+    let payload = payload;
+    let name = payload.name.clone();
+    let notes = payload.notes.clone();
+    let max_access_count = payload.max_access_count;
+    let expiration_date = payload.expiration_date.clone();
+    let deletion_date = payload.deletion_date.clone();
+    let disabled = payload.disabled;
+    let hide_email = payload.hide_email;
+
+    let key = payload.key.clone();
+    let data_str = if payload.r#type == SEND_TYPE_TEXT {
+        let mut text = payload
+            .text
+            .ok_or_else(|| AppError::BadRequest("Missing text".to_string()))?;
+        if let Some(obj) = text.as_object_mut() {
+            obj.remove("response");
+        }
+        serde_json::to_string(&text).map_err(|_| AppError::Internal)?
+    } else {
+        existing.data.clone()
+    };
+
+    let now = now_rfc3339_millis();
+
+    let mut password_hash = existing.password_hash.clone();
+    let mut password_salt = existing.password_salt.clone();
+    let mut password_iter = existing.password_iter;
+
+    if let Some(password) = payload.password.as_deref() {
+        let salt = new_salt_b64();
+        let hash = hash_password(password, &salt)?;
+        password_hash = Some(hash);
+        password_salt = Some(salt);
+        password_iter = None;
+    }
+
+    log::info!(
+        target: targets::API,
+        "send.update.password_apply send_id={} has_password_key={} apply_new_password={} keep_existing_password={}",
+        send_id,
+        has_password_key,
+        payload.password.as_deref().is_some(),
+        payload.password.as_deref().is_none()
+    );
+
+    query!(
+        &db,
+        "UPDATE sends
+         SET name = ?1,
+             notes = ?2,
+             data = ?3,
+             key = ?4,
+             password_hash = ?5,
+             password_salt = ?6,
+             password_iter = ?7,
+             max_access_count = ?8,
+             updated_at = ?9,
+             expiration_date = ?10,
+             deletion_date = ?11,
+             disabled = ?12,
+             hide_email = ?13
+         WHERE id = ?14 AND user_id = ?15",
+        name,
+        notes,
+        data_str,
+        key,
+        password_hash,
+        password_salt,
+        password_iter,
+        max_access_count,
+        now,
+        expiration_date,
+        deletion_date,
+        if disabled { 1 } else { 0 },
+        hide_email.map(|b| if b { 1 } else { 0 }),
+        send_id,
+        claims.sub
+    )
+    .map_err(|_| AppError::Database)?
+    .run()
+    .await?;
+
+    let send = get_send_by_id_and_user(&db, &existing.id, &existing.user_id)
+        .await?
+        .ok_or_else(|| AppError::Internal)?;
+
+    log::info!(
+        target: targets::API,
+        "send.update.success user_id={} send_id={} type={} stored_has_password={}",
+        existing.user_id,
+        existing.id,
+        existing.r#type,
+        send.password_hash.as_deref().is_some()
+    );
+
+    let meta = notify::extract_request_meta(&headers);
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
+        NotifyEvent::SendCreate,
+        NotifyContext {
+            user_id: Some(existing.user_id),
+            user_email: Some(claims.email),
+            send_id: Some(existing.id),
+            detail: Some(format!("type={}", existing.r#type)),
+            meta,
+            ..Default::default()
+        },
+    );
+
+    Ok(Json(send_to_json(&send)))
+}
+
+#[worker::send]
+pub async fn put_remove_send_password(
+    claims: Claims,
+    State(state): State<Arc<AppState>>,
+    Path(send_id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let db = db::get_db(&state.env)?;
+    claims.verify_security_stamp(&db).await?;
+
+    let existing = get_send_by_id_and_user(&db, &send_id, &claims.sub)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Send not found".to_string()))?;
+
+    query!(
+        &db,
+        "UPDATE sends
+         SET password_hash = NULL,
+             password_salt = NULL,
+             password_iter = NULL,
+             updated_at = ?1
+         WHERE id = ?2 AND user_id = ?3",
+        now_rfc3339_millis(),
+        send_id,
+        claims.sub
+    )
+    .map_err(|_| AppError::Database)?
+    .run()
+    .await?;
+
+    let send = get_send_by_id_and_user(&db, &existing.id, &existing.user_id)
+        .await?
+        .ok_or_else(|| AppError::Internal)?;
+
+    log::info!(
+        target: targets::API,
+        "send.remove_password.success user_id={} send_id={}",
+        existing.user_id,
+        existing.id
+    );
+
+    Ok(Json(send_to_json(&send)))
+}
+
+#[worker::send]
 pub async fn post_send_file_v2(
     claims: Claims,
     State(state): State<Arc<AppState>>,
@@ -391,6 +744,14 @@ pub async fn post_send_file_v2(
         return Err(AppError::BadRequest("Send content is not a file".to_string()));
     }
 
+    log::info!(
+        target: targets::API,
+        "send.create_file.request user_id={} type={} file_length={}",
+        claims.sub,
+        payload.r#type,
+        payload.file_length.unwrap_or(-1)
+    );
+
     let payload = payload;
     let file_length = payload
         .file_length
@@ -398,6 +759,9 @@ pub async fn post_send_file_v2(
     if file_length < 0 {
         return Err(AppError::BadRequest("Send size can't be negative".to_string()));
     }
+
+    // Reject early if D1 or R2 is nearly full
+    check_storage_quota(&db, &state, file_length).await?;
 
     let name = payload.name.clone();
     let notes = payload.notes.clone();
@@ -419,6 +783,7 @@ pub async fn post_send_file_v2(
     let send_id = Uuid::new_v4().to_string();
     let now = now_rfc3339_millis();
     let data_str = serde_json::to_string(&data_value).map_err(|_| AppError::Internal)?;
+    let object_key = format!("sends/{}/{}/{}", claims.sub, send_id, file_id);
 
     query!(
         &db,
@@ -445,8 +810,8 @@ pub async fn post_send_file_v2(
 
     query!(
         &db,
-        "INSERT INTO send_files (id, send_id, user_id, file_name, size, mime, data_base64, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, ?6, ?7)",
+        "INSERT INTO send_files (id, send_id, user_id, file_name, size, mime, data_base64, r2_object_key, storage_type, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, ?6, ?7, ?8, ?9)",
         file_id,
         send_id,
         claims.sub,
@@ -456,6 +821,8 @@ pub async fn post_send_file_v2(
             .unwrap_or("file")
             .to_string(),
         file_length,
+        object_key,
+        "r2",
         now,
         now
     )
@@ -466,6 +833,15 @@ pub async fn post_send_file_v2(
     let send = get_send_by_id_and_user(&db, &send_id, &claims.sub)
         .await?
         .ok_or_else(|| AppError::Internal)?;
+
+    log::info!(
+        target: targets::API,
+        "send.create_file.success user_id={} send_id={} file_id={} object_key={}",
+        claims.sub,
+        send_id,
+        file_id,
+        object_key
+    );
 
     let send_id_for_notify = send_id.clone();
     let file_name = data_value
@@ -513,21 +889,39 @@ pub async fn post_send_file_v2_data(
         return Err(AppError::BadRequest("Send content is not a file".to_string()));
     }
 
-    let size: Option<i64> = db
-        .prepare("SELECT size FROM send_files WHERE id = ?1 AND send_id = ?2 AND user_id = ?3 LIMIT 1")
+    let file_row: Option<Value> = db
+        .prepare("SELECT size, r2_object_key, storage_type FROM send_files WHERE id = ?1 AND send_id = ?2 AND user_id = ?3 LIMIT 1")
         .bind(&[file_id.clone().into(), send_id.clone().into(), claims.sub.clone().into()])?
-        .first(Some("size"))
+        .first(None)
         .await
         .map_err(|_| AppError::Database)?;
-    let size = size.ok_or_else(|| AppError::NotFound("Send not found. Unable to save the file.".to_string()))?;
+    let file_row = file_row.ok_or_else(|| AppError::NotFound("Send not found. Unable to save the file.".to_string()))?;
+    let size = file_row
+        .get("size")
+        .and_then(|v| v.as_i64())
+        .ok_or(AppError::Internal)?;
     if size < 0 {
         return Err(AppError::BadRequest("Send size can't be negative".to_string()));
     }
+    let object_key = file_row
+        .get("r2_object_key")
+        .and_then(|v| v.as_str())
+        .ok_or(AppError::Internal)?
+        .to_string();
+    let storage_type = file_row
+        .get("storage_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("d1_base64");
+    if storage_type != "r2" {
+        return Err(AppError::BadRequest("Send storage backend mismatch".to_string()));
+    }
 
     let now = now_rfc3339_millis();
-
-    let estimated_b64_len: usize = ((size as usize + 2) / 3) * 4;
-    let should_inline = estimated_b64_len <= SEND_FILE_B64_CHUNK_LEN;
+    let expected_size = size as usize;
+    let bucket = state
+        .env
+        .bucket(SEND_FILES_BUCKET_BINDING)
+        .map_err(|_| AppError::Internal)?;
 
     let mut uploaded = false;
     while let Some(mut field) = multipart
@@ -542,129 +936,36 @@ pub async fn post_send_file_v2_data(
 
         uploaded = true;
 
-        if should_inline {
-            let mut carry: Vec<u8> = Vec::with_capacity(2);
-            let mut data_b64 = String::new();
-            while let Some(chunk) = field
-                .chunk()
-                .await
-                .map_err(|e| AppError::BadRequest(format!("Invalid multipart data: {e}")))?
-            {
-                let mut combined = Vec::with_capacity(carry.len() + chunk.len());
-                combined.extend_from_slice(&carry);
-                combined.extend_from_slice(&chunk);
-
-                let full_len = (combined.len() / 3) * 3;
-                if full_len > 0 {
-                    data_b64.push_str(&general_purpose::STANDARD.encode(&combined[..full_len]));
-                }
-                carry.clear();
-                carry.extend_from_slice(&combined[full_len..]);
-            }
-            if !carry.is_empty() {
-                data_b64.push_str(&general_purpose::STANDARD.encode(&carry));
-            }
-
-            query!(
-                &db,
-                "UPDATE send_files SET data_base64 = ?1, updated_at = ?2 WHERE id = ?3 AND send_id = ?4 AND user_id = ?5",
-                data_b64,
-                now,
-                file_id,
-                send_id,
-                claims.sub
-            )
-            .map_err(|_| AppError::Database)?
-            .run()
-            .await?;
-
-            query!(
-                &db,
-                "DELETE FROM send_file_chunks WHERE send_file_id = ?1",
-                file_id
-            )
-            .map_err(|_| AppError::Database)?
-            .run()
-            .await?;
-        } else {
-            query!(
-                &db,
-                "UPDATE send_files SET data_base64 = NULL, updated_at = ?1 WHERE id = ?2 AND send_id = ?3 AND user_id = ?4",
-                now,
-                file_id,
-                send_id,
-                claims.sub
-            )
-            .map_err(|_| AppError::Database)?
-            .run()
-            .await?;
-
-            query!(
-                &db,
-                "DELETE FROM send_file_chunks WHERE send_file_id = ?1",
-                file_id
-            )
-            .map_err(|_| AppError::Database)?
-            .run()
-            .await?;
-
-            let mut carry: Vec<u8> = Vec::with_capacity(2);
-            let mut b64_buf = String::new();
-            let mut chunk_index: i32 = 0;
-
-            while let Some(chunk) = field
-                .chunk()
-                .await
-                .map_err(|e| AppError::BadRequest(format!("Invalid multipart data: {e}")))?
-            {
-                let mut combined = Vec::with_capacity(carry.len() + chunk.len());
-                combined.extend_from_slice(&carry);
-                combined.extend_from_slice(&chunk);
-
-                let full_len = (combined.len() / 3) * 3;
-                if full_len > 0 {
-                    b64_buf.push_str(&general_purpose::STANDARD.encode(&combined[..full_len]));
-                }
-                carry.clear();
-                carry.extend_from_slice(&combined[full_len..]);
-
-                while b64_buf.len() >= SEND_FILE_B64_CHUNK_LEN {
-                    let tail = b64_buf.split_off(SEND_FILE_B64_CHUNK_LEN);
-                    let part = std::mem::replace(&mut b64_buf, tail);
-                    query!(
-                        &db,
-                        "INSERT INTO send_file_chunks (send_file_id, chunk_index, data_base64, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                        file_id,
-                        chunk_index,
-                        part,
-                        now,
-                        now
-                    )
-                    .map_err(|_| AppError::Database)?
-                    .run()
-                    .await?;
-                    chunk_index += 1;
-                }
-            }
-
-            if !carry.is_empty() {
-                b64_buf.push_str(&general_purpose::STANDARD.encode(&carry));
-            }
-            if !b64_buf.is_empty() {
-                query!(
-                    &db,
-                    "INSERT INTO send_file_chunks (send_file_id, chunk_index, data_base64, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    file_id,
-                    chunk_index,
-                    b64_buf,
-                    now,
-                    now
-                )
-                .map_err(|_| AppError::Database)?
-                .run()
-                .await?;
-            }
+        let mut bytes = Vec::with_capacity(expected_size);
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Invalid multipart data: {e}")))?
+        {
+            bytes.extend_from_slice(&chunk);
         }
+
+        if bytes.len() != expected_size {
+            return Err(AppError::BadRequest("Uploaded size mismatch".to_string()));
+        }
+
+        bucket
+            .put(object_key.clone(), bytes)
+            .execute()
+            .await
+            .map_err(|_| AppError::Internal)?;
+
+        query!(
+            &db,
+            "UPDATE send_files SET updated_at = ?1 WHERE id = ?2 AND send_id = ?3 AND user_id = ?4",
+            now,
+            file_id,
+            send_id,
+            claims.sub
+        )
+        .map_err(|_| AppError::Database)?
+        .run()
+        .await?;
 
         break;
     }
@@ -690,14 +991,53 @@ pub async fn post_send_file_v2_data(
 #[worker::send]
 pub async fn post_access(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(access_id): Path<String>,
     Json(payload): Json<SendAccessData>,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
+    let client_ip = request_client_ip(&headers);
+    log::info!(
+        target: targets::AUTH,
+        "send.access.request access_id={} ip={} has_password_payload={} has_turnstile_token={}",
+        access_id,
+        client_ip.as_deref().unwrap_or("unknown"),
+        payload.password.as_deref().map(str::trim).map(|s| !s.is_empty()).unwrap_or(false),
+        payload
+            .cf_turnstile_response
+            .as_deref()
+            .map(str::trim)
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+    );
+    enforce_send_access_rate_limit(
+        &state,
+        format!(
+            "send_access:{}:{}",
+            access_id,
+            client_ip.as_deref().unwrap_or("unknown")
+        ),
+    )
+    .await?;
+    verify_turnstile(
+        &state,
+        payload.cf_turnstile_response.as_deref(),
+        client_ip.as_deref(),
+    )
+    .await?;
+
     let send_id = uuid_from_access_id(&access_id).ok_or_else(|| AppError::NotFound("Send not found".to_string()))?;
     let send = get_send_by_id(&db, &send_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Send not found".to_string()))?;
+
+    log::info!(
+        target: targets::AUTH,
+        "send.access.loaded send_id={} type={} stored_has_password={}",
+        send.id,
+        send.r#type,
+        send.password_hash.as_deref().is_some()
+    );
 
     validate_send_access(&send)?;
     validate_send_password(&send, payload.password)?;
@@ -707,19 +1047,61 @@ pub async fn post_access(
     }
 
     let creator_identifier = get_creator_identifier(&db, &send).await?;
+    log::info!(target: targets::AUTH, "send.access.success send_id={} type={}", send.id, send.r#type);
     Ok(Json(send_to_json_access(&send, creator_identifier)))
 }
 
 #[worker::send]
 pub async fn post_access_file(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path((send_id, file_id)): Path<(String, String)>,
     Json(payload): Json<SendAccessData>,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
+    let client_ip = request_client_ip(&headers);
+    log::info!(
+        target: targets::AUTH,
+        "send.access_file.request send_id={} file_id={} ip={} has_password_payload={} has_turnstile_token={}",
+        send_id,
+        file_id,
+        client_ip.as_deref().unwrap_or("unknown"),
+        payload.password.as_deref().map(str::trim).map(|s| !s.is_empty()).unwrap_or(false),
+        payload
+            .cf_turnstile_response
+            .as_deref()
+            .map(str::trim)
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+    );
+    enforce_send_access_rate_limit(
+        &state,
+        format!(
+            "send_access_file:{}:{}:{}",
+            send_id,
+            file_id,
+            client_ip.as_deref().unwrap_or("unknown")
+        ),
+    )
+    .await?;
+    verify_turnstile(
+        &state,
+        payload.cf_turnstile_response.as_deref(),
+        client_ip.as_deref(),
+    )
+    .await?;
+
     let send = get_send_by_id(&db, &send_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Send not found".to_string()))?;
+
+    log::info!(
+        target: targets::AUTH,
+        "send.access_file.loaded send_id={} type={} stored_has_password={}",
+        send.id,
+        send.r#type,
+        send.password_hash.as_deref().is_some()
+    );
 
     validate_send_access(&send)?;
     validate_send_password(&send, payload.password)?;
@@ -738,6 +1120,8 @@ pub async fn post_access_file(
 
     let token = generate_download_token(&state, &send_id, &file_id)?;
     let url = format!("/api/sends/{send_id}/{file_id}?t={token}");
+
+    log::info!(target: targets::AUTH, "send.access_file.success send_id={} file_id={}", send_id, file_id);
 
     Ok(Json(json!({
         "object": "send-fileDownload",
@@ -795,7 +1179,6 @@ pub async fn download_send(
 ) -> Result<Response, AppError> {
     validate_download_token(&state, &q.t, &send_id, &file_id)?;
     let db = db::get_db(&state.env)?;
-
     let row: Option<Value> = db
         .prepare("SELECT * FROM send_files WHERE id = ?1 AND send_id = ?2 LIMIT 1")
         .bind(&[file_id.clone().into(), send_id.clone().into()])?
@@ -806,33 +1189,22 @@ pub async fn download_send(
         return Err(AppError::NotFound("File not found".to_string()));
     };
     let file = serde_json::from_value::<SendFileDBModel>(row).map_err(|_| AppError::Internal)?;
-    let data_b64 = match file.data_base64 {
-        Some(v) => v,
-        None => {
-            let rows: Vec<Value> = db
-                .prepare("SELECT data_base64 FROM send_file_chunks WHERE send_file_id = ?1 ORDER BY chunk_index ASC")
-                .bind(&[file_id.clone().into()])?
-                .all()
-                .await
-                .map_err(|_| AppError::Database)?
-                .results()?;
-
-            if rows.is_empty() {
-                return Err(AppError::NotFound("File not found".to_string()));
-            }
-
-            let mut out = String::new();
-            for row in rows {
-                let part = row
-                    .get("data_base64")
-                    .and_then(|v| v.as_str())
-                    .ok_or(AppError::Internal)?;
-                out.push_str(part);
-            }
-            out
-        }
-    };
-    let bytes = general_purpose::STANDARD.decode(data_b64).map_err(|_| AppError::Internal)?;
+    if file.storage_type.as_deref() != Some("r2") {
+        return Err(AppError::NotFound("File not found".to_string()));
+    }
+    let object_key = file.r2_object_key.as_deref().ok_or(AppError::Internal)?;
+    let bucket = state
+        .env
+        .bucket(SEND_FILES_BUCKET_BINDING)
+        .map_err(|_| AppError::Internal)?;
+    let object = bucket
+        .get(object_key)
+        .execute()
+        .await
+        .map_err(|_| AppError::Internal)?
+        .ok_or_else(|| AppError::NotFound("File not found".to_string()))?;
+    let body = object.body().ok_or(AppError::Internal)?;
+    let bytes = body.bytes().await.map_err(|_| AppError::Internal)?;
 
     let mut response = Response::new(axum::body::Body::from(bytes));
     *response.status_mut() = StatusCode::OK;

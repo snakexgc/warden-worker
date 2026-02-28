@@ -45,6 +45,7 @@ TWO_FACTOR_ENC_KEY
 WEWORK_WEBHOOK_URL
 TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID
+TURNSTILE_SECRET_KEY
 ```
 - **JWT_SECRET**：访问令牌签名密钥。用于签署短效 Access Token。**必须设置强随机字符串。**
 - **JWT_REFRESH_SECRET**：刷新令牌签名密钥。用于签署长效 Refresh Token。**必须设置强随机字符串，且不要与 JWT_SECRET 相同。**
@@ -54,6 +55,7 @@ TELEGRAM_CHAT_ID
 - **WEWORK_WEBHOOK_URL**：可选，企业微信群机器人的 Webhook 地址。用于事件通知和邮箱二步验证验证码发送。
 - **TELEGRAM_BOT_TOKEN**：可选，Telegram Bot 的 Token。从 [@BotFather](https://t.me/BotFather) 获取。
 - **TELEGRAM_CHAT_ID**：可选，接收通知的 Chat ID。可以是个人用户 ID、群组 ID 或频道 ID。通过 [@userinfobot](https://t.me/userinfobot) 获取个人 ID。
+- **TURNSTILE_SECRET_KEY**：可选但建议开启，Cloudflare Turnstile 私钥；用于匿名访问 Send 时的人机验证。
 
 ### 可选：动态 vaultwarden.css（参考 Vaultwarden 方案）
 
@@ -106,6 +108,10 @@ wrangler d1 create vaultsql
 
 把输出的 `database_id` 写入 `wrangler.jsonc` 的 `d1_databases`。
 
+并在 Cloudflare 中创建一个 R2 Bucket（例如 `warden-send-files`），将 bucket 名称写入 `wrangler.jsonc` 的 `r2_buckets`（`SEND_FILES_BUCKET` 绑定）。
+
+另外请在 `wrangler.jsonc` 配置 `ratelimits`（示例中使用 `SEND_ACCESS_LIMITER`）用于匿名 Send 访问限流；`namespace_id` 需要在你的账号内保持唯一，可按需调整 `limit/period`。
+
 ### 2. 初始化数据库
 
 注意：`sql/schema.sql` 会 `DROP TABLE`，用于全新部署（会清空数据，**请注意导出密码库**）。
@@ -127,6 +133,7 @@ wrangler secret put TWO_FACTOR_ENC_KEY
 wrangler secret put WEWORK_WEBHOOK_URL
 wrangler secret put TELEGRAM_BOT_TOKEN
 wrangler secret put TELEGRAM_CHAT_ID
+wrangler secret put TURNSTILE_SECRET_KEY
 ```
 
 - **JWT_SECRET**：访问令牌签名密钥。用于签署短效 Access Token。**必须设置强随机字符串。**
@@ -137,6 +144,7 @@ wrangler secret put TELEGRAM_CHAT_ID
 - **WEWORK_WEBHOOK_URL**：可选，企业微信群机器人的 Webhook 地址（形如 `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...`）。用于事件通知和邮箱二步验证验证码发送。
 - **TELEGRAM_BOT_TOKEN**：可选，Telegram Bot 的 Token。从 [@BotFather](https://t.me/BotFather) 获取。
 - **TELEGRAM_CHAT_ID**：可选，接收通知的 Chat ID。可以是个人用户 ID、群组 ID 或频道 ID。通过 [@userinfobot](https://t.me/userinfobot) 获取个人 ID。
+- **TURNSTILE_SECRET_KEY**：可选但建议开启，Cloudflare Turnstile 私钥；用于匿名访问 Send 时的人机验证。
 
 ### 4. 配置通知（可选但建议）
 

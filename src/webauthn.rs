@@ -1005,6 +1005,7 @@ pub async fn verify_passwordless_login_assertion(
             AppError::Crypto(msg) => msg,
             AppError::Internal => "internal server error".to_string(),
             AppError::JsonWebToken(_) => "invalid token".to_string(),
+            AppError::TooManyRequests(msg) => msg,
         }
     }
 

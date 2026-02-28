@@ -138,6 +138,8 @@ pub struct SendData {
 #[serde(rename_all = "camelCase")]
 pub struct SendAccessData {
     pub password: Option<String>,
+    #[serde(rename = "cf-turnstile-response", alias = "cfTurnstileResponse")]
+    pub cf_turnstile_response: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -175,6 +177,8 @@ pub struct SendFileDBModel {
     pub size: i64,
     pub mime: Option<String>,
     pub data_base64: Option<String>,
+    pub r2_object_key: Option<String>,
+    pub storage_type: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -200,6 +204,12 @@ pub fn send_to_json(send: &SendDBModel) -> Value {
         }
     }
 
+    let password_b64 = send.password_hash.as_deref().and_then(|h| {
+        general_purpose::STANDARD.decode(h).ok().map(|bytes| {
+            general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+        })
+    });
+
     json!({
         "id": send.id,
         "accessId": access_id_from_uuid(&send.id),
@@ -211,11 +221,7 @@ pub fn send_to_json(send: &SendDBModel) -> Value {
         "key": send.key,
         "maxAccessCount": send.max_access_count,
         "accessCount": send.access_count,
-        "password": send
-            .password_hash
-            .as_deref()
-            .and_then(|h| general_purpose::STANDARD.decode(h).ok())
-            .map(|bytes| general_purpose::URL_SAFE_NO_PAD.encode(bytes)),
+        "password": password_b64,
         "disabled": send.disabled,
         "hideEmail": send.hide_email,
         "revisionDate": send.updated_at,

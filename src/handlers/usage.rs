@@ -76,38 +76,7 @@ pub async fn d1_usage(
         }
     };
 
-    let (send_files_inline_bytes, send_files_chunks_bytes) = match user_id {
-        None => {
-            let inline = sum_i64(
-                &db,
-                "SELECT COALESCE(SUM(LENGTH(data_base64)), 0) AS bytes FROM send_files",
-                &[],
-            )
-            .await?;
-            let chunks = sum_i64(
-                &db,
-                "SELECT COALESCE(SUM(LENGTH(data_base64)), 0) AS bytes FROM send_file_chunks",
-                &[],
-            )
-            .await?;
-            (inline, chunks)
-        }
-        Some(user_id) => {
-            let inline = sum_i64(
-                &db,
-                "SELECT COALESCE(SUM(LENGTH(sf.data_base64)), 0) AS bytes FROM send_files sf WHERE sf.user_id = ?1",
-                &[user_id.into()],
-            )
-            .await?;
-            let chunks = sum_i64(
-                &db,
-                "SELECT COALESCE(SUM(LENGTH(c.data_base64)), 0) AS bytes FROM send_file_chunks c JOIN send_files sf ON sf.id = c.send_file_id WHERE sf.user_id = ?1",
-                &[user_id.into()],
-            )
-            .await?;
-            (inline, chunks)
-        }
-    };
+    let send_files_bytes = 0_i64;
 
     let (folders_bytes, devices_bytes, totp_bytes, users_bytes) = match user_id {
         None => {
@@ -166,14 +135,10 @@ pub async fn d1_usage(
         }
     };
 
-    let send_files_bytes = send_files_inline_bytes + send_files_chunks_bytes;
-
     let mut items = vec![
         json!({"key":"ciphers","name":"密码库（ciphers.data）","bytes":ciphers_bytes}),
         json!({"key":"sends_text","name":"Send 文本（sends.data, type=0）","bytes":sends_text_bytes}),
         json!({"key":"sends_file_meta","name":"Send 文件元数据（sends.data, type=1）","bytes":sends_file_meta_bytes}),
-        json!({"key":"send_files_inline","name":"Send 文件内容（send_files.data_base64）","bytes":send_files_inline_bytes}),
-        json!({"key":"send_files_chunks","name":"Send 文件内容分片（send_file_chunks.data_base64）","bytes":send_files_chunks_bytes}),
         json!({"key":"folders","name":"文件夹（folders.name）","bytes":folders_bytes}),
         json!({"key":"two_factor","name":"二次验证（two_factor_authenticator.secret_enc）","bytes":totp_bytes}),
         json!({"key":"devices","name":"设备（devices.*）","bytes":devices_bytes}),
@@ -194,12 +159,20 @@ pub async fn d1_usage(
     } else {
         (total_bytes as f64) * 100.0 / (D1_MAX_BYTES as f64)
     };
+    let remaining_bytes = (D1_MAX_BYTES - total_bytes).max(0);
+    let remaining_percent = if D1_MAX_BYTES <= 0 {
+        0.0
+    } else {
+        (remaining_bytes as f64) * 100.0 / (D1_MAX_BYTES as f64)
+    };
 
     Ok(Json(json!({
         "object": "d1-usage",
         "maxBytes": D1_MAX_BYTES,
         "totalBytes": total_bytes,
         "totalPercent": total_percent,
+        "remainingBytes": remaining_bytes,
+        "remainingPercent": remaining_percent,
         "sendFilesBytes": send_files_bytes,
         "items": items,
         "userId": user_id

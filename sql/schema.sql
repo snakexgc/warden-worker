@@ -98,6 +98,8 @@ CREATE TABLE IF NOT EXISTS send_files (
     size INTEGER NOT NULL,
     mime TEXT,
     data_base64 TEXT,
+    r2_object_key TEXT,
+    storage_type TEXT NOT NULL DEFAULT 'd1_base64',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (send_id) REFERENCES sends(id) ON DELETE CASCADE,

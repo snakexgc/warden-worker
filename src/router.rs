@@ -162,7 +162,13 @@ pub fn api_router(env: Env, ctx: Option<Context>) -> Router<()> {
         .route("/api/sends/access/{access_id}", post(sends::post_access))
         .route(
             "/api/sends/{send_id}",
-            get(sends::get_send).delete(sends::delete_send),
+            get(sends::get_send)
+                .put(sends::put_send)
+                .delete(sends::delete_send),
+        )
+        .route(
+            "/api/sends/{send_id}/remove-password",
+            put(sends::put_remove_send_password),
         )
         .route(
             "/api/sends/{send_id}/access/file/{file_id}",
