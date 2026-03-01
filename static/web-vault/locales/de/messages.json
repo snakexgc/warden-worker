@@ -14,32 +14,8 @@
   "noCriticalAppsAtRisk": {
     "message": "Keine kritischen Anwendungen gefährdet"
   },
-  "critical": {
-    "message": "Kritisch ($COUNT$)",
-    "placeholders": {
-      "count": {
-        "content": "$1",
-        "example": "3"
-      }
-    }
-  },
-  "notCritical": {
-    "message": "Nicht kritisch ($COUNT$)",
-    "placeholders": {
-      "count": {
-        "content": "$1",
-        "example": "5"
-      }
-    }
-  },
-  "criticalBadge": {
-    "message": "Kritisch"
-  },
   "accessIntelligence": {
     "message": "Access Intelligence"
-  },
-  "noApplicationsMatchTheseFilters": {
-    "message": "Es gibt keine Anwendungen, die diesen Filtern entsprechen"
   },
   "passwordRisk": {
     "message": "Passwort-Risiko"
@@ -273,9 +249,6 @@
   },
   "application": {
     "message": "Anwendung"
-  },
-  "applications": {
-    "message": "Anwendungen"
   },
   "atRiskPasswords": {
     "message": "Gefährdete Passwörter"
@@ -612,9 +585,6 @@
   },
   "email": {
     "message": "E-Mail"
-  },
-  "emails": {
-    "message": "E-Mails"
   },
   "phone": {
     "message": "Telefon"
@@ -1247,9 +1217,6 @@
   "selectAll": {
     "message": "Alle auswählen"
   },
-  "deselectAll": {
-    "message": "Alles abwählen"
-  },
   "unselectAll": {
     "message": "Alle abwählen"
   },
@@ -1397,12 +1364,6 @@
   },
   "no": {
     "message": "Nein"
-  },
-  "noAuth": {
-    "message": "Alle mit dem Link"
-  },
-  "anyOneWithPassword": {
-    "message": "Alle mit einem von dir festgelegtem Passwort"
   },
   "location": {
     "message": "Standort"
@@ -1788,9 +1749,6 @@
   "noMembersInList": {
     "message": "Keine Mitglieder zum Anzeigen vorhanden."
   },
-  "noMembersToExport": {
-    "message": "Es gibt keine Mitglieder zum Exportieren."
-  },
   "noEventsInList": {
     "message": "Keine Ereignisse vorhanden."
   },
@@ -2011,13 +1969,8 @@
   "encExportAccountWarningDesc": {
     "message": "Die Verschlüsselungscodes eines Kontos sind für jedes Bitwarden-Benutzerkonto einzigartig, deshalb kannst du keinen verschlüsselten Export in ein anderes Konto importieren."
   },
-  "exportNoun": {
-    "message": "Export",
-    "description": "The noun form of the word Export"
-  },
-  "exportVerb": {
-    "message": "Exportieren",
-    "description": "The verb form of the word Export"
+  "export": {
+    "message": "Exportieren"
   },
   "exportFrom": {
     "message": "Exportieren ab"
@@ -2344,13 +2297,8 @@
   "tools": {
     "message": "Werkzeuge"
   },
-  "importNoun": {
-    "message": "Import",
-    "description": "The noun form of the word Import"
-  },
-  "importVerb": {
-    "message": "Importieren",
-    "description": "The verb form of the word Import"
+  "import": {
+    "message": "Import"
   },
   "importData": {
     "message": "Daten importieren"
@@ -2579,9 +2527,6 @@
   "enabled": {
     "message": "Aktiviert"
   },
-  "optionEnabled": {
-    "message": "Aktiviert"
-  },
   "restoreAccess": {
     "message": "Zugriff wiederherstellen"
   },
@@ -2678,9 +2623,6 @@
   },
   "key": {
     "message": "Schlüssel"
-  },
-  "unnamedKey": {
-    "message": "Unbenannter Schlüssel"
   },
   "twoStepAuthenticatorEnterCodeV2": {
     "message": "Verifizierungscode"
@@ -3191,9 +3133,6 @@
   "premiumSubscriptionEndedDesc": {
     "message": "Starte dein Premium-Abonnement neu, um den Zugriff auf dein Archiv wiederherzustellen. Wenn du die Details für einen archivierten Eintrag vor dem Neustart bearbeitest, wird er wieder zurück in deinen Tresor verschoben."
   },
-  "itemRestored": {
-    "message": "Eintrag wurde wiederhergestellt"
-  },
   "restartPremium": {
     "message": "Premium neu starten"
   },
@@ -3320,9 +3259,6 @@
   "nextChargeHeader": {
     "message": "Nächste Abbuchung"
   },
-  "nextChargeDate": {
-    "message": "Nächstes Zahlungsdatum"
-  },
   "plan": {
     "message": "Tarif"
   },
@@ -3345,9 +3281,6 @@
     "message": "Abonnement verwalten"
   },
   "launchCloudSubscription": {
-    "message": "Cloud-Abonnement starten"
-  },
-  "launchCloudSubscriptionSentenceCase": {
     "message": "Cloud-Abonnement starten"
   },
   "storage": {
@@ -3811,9 +3744,6 @@
   "editCollection": {
     "message": "Sammlung bearbeiten"
   },
-  "viewCollection": {
-    "message": "Sammlung anzeigen"
-  },
   "collectionInfo": {
     "message": "Sammlungsinformationen"
   },
@@ -4267,12 +4197,6 @@
         "example": "Google"
       }
     }
-  },
-  "userAcceptedTransfer": {
-    "message": "Eigentumsübertragung an die Organisation akzeptiert."
-  },
-  "userDeclinedTransfer": {
-    "message": "Widerrufen wegen Ablehnung der Übertragung an die Organisation."
   },
   "invitedUserId": {
     "message": "Benutzer $ID$ eingeladen.",
@@ -5463,12 +5387,6 @@
   "restoreSelected": {
     "message": "Auswahl wiederherstellen"
   },
-  "archivedItemRestored": {
-    "message": "Archivierter Eintrag wiederhergestellt"
-  },
-  "archivedItemsRestored": {
-    "message": "Archivierte Einträge wiederhergestellt"
-  },
   "restoredItem": {
     "message": "Eintrag wiederhergestellt"
   },
@@ -5651,6 +5569,10 @@
   "sendTypeText": {
     "message": "Text"
   },
+  "sendPasswordDescV3": {
+    "message": "Füge ein optionales Passwort hinzu, mit dem Empfänger auf dieses Send zugreifen können.",
+    "description": "'Send' is a noun and the name of a feature called 'Bitwarden Send'. It should not be translated."
+  },
   "createSend": {
     "message": "Neues Send",
     "description": "'Send' is a noun and the name of a feature called 'Bitwarden Send'. It should not be translated."
@@ -5661,57 +5583,6 @@
   },
   "createdSend": {
     "message": "Send gespeichert",
-    "description": "'Send' is a noun and the name of a feature called 'Bitwarden Send'. It should not be translated."
-  },
-  "sendCreatedSuccessfully": {
-    "message": "Send erfolgreich erstellt!",
-    "description": "'Send' is a noun and the name of a feature called 'Bitwarden Send'. It should not be translated."
-  },
-  "sendCreatedDescriptionV2": {
-    "message": "Kopiere und teile diesen Send-Link. Das Send wird für jeden mit dem Link für die nächsten $TIME$ verfügbar sein.",
-    "description": "'Send' is a noun and the name of a feature called 'Bitwarden Send'. It should not be translated.",
-    "placeholders": {
-      "time": {
-        "content": "$1",
-        "example": "7 days, 1 hour, 1 day"
-      }
-    }
-  },
-  "sendCreatedDescriptionPassword": {
-    "message": "Kopiere und teile diesen Send-Link. Das Send wird für jeden mit dem Link und dem von dir festgelegten Passwort für die nächsten $TIME$ verfügbar sein.",
-    "description": "'Send' is a noun and the name of a feature called 'Bitwarden Send'. It should not be translated.",
-    "placeholders": {
-      "time": {
-        "content": "$1",
-        "example": "7 days, 1 hour, 1 day"
-      }
-    }
-  },
-  "sendCreatedDescriptionEmail": {
-    "message": "Kopiere und teile diesen Send-Link. Er kann von den von dir angegebenen Personen für die nächsten $TIME$ angesehen werden.",
-    "description": "'Send' is a noun and the name of a feature called 'Bitwarden Send'. It should not be translated.",
-    "placeholders": {
-      "time": {
-        "content": "$1",
-        "example": "7 days, 1 hour, 1 day"
-      }
-    }
-  },
-  "durationTimeHours": {
-    "message": "$HOURS$ Stunden",
-    "placeholders": {
-      "hours": {
-        "content": "$1",
-        "example": "5"
-      }
-    }
-  },
-  "newTextSend": {
-    "message": "Neues Text-Send",
-    "description": "'Send' is a noun and the name of a feature called 'Bitwarden Send'. It should not be translated."
-  },
-  "newFileSend": {
-    "message": "Neues Datei-Send",
     "description": "'Send' is a noun and the name of a feature called 'Bitwarden Send'. It should not be translated."
   },
   "editedSend": {
@@ -5752,9 +5623,6 @@
   },
   "revoked": {
     "message": "Widerrufen"
-  },
-  "accepted": {
-    "message": "Akzeptiert"
   },
   "sendLink": {
     "message": "Send-Link",
@@ -5975,37 +5843,6 @@
         "example": "John Smith"
       }
     }
-  },
-  "centralizeDataOwnership": {
-    "message": "Zentralisierung der Eigentumsrechte an Organisationen"
-  },
-  "centralizeDataOwnershipDesc": {
-    "message": "Alle Mitgliedereinträge gehen in den Besitz der Organisation über und werden von dieser verwaltet. Administratoren und Eigentümer sind davon ausgenommen. "
-  },
-  "centralizeDataOwnershipContentAnchor": {
-    "message": "Erfahre mehr über zentralisierte Eigentumsrechte",
-    "description": "This will be used as a hyperlink"
-  },
-  "benefits": {
-    "message": "Vorteile"
-  },
-  "centralizeDataOwnershipBenefit1": {
-    "message": "Verschaffe dir einen vollständigen Überblick über den Zustand deiner Zugangsdaten, einschließlich geteilter und nicht geteilter Einträge."
-  },
-  "centralizeDataOwnershipBenefit2": {
-    "message": "Übertrage Einträge bei Austritt und Ablösung von Mitgliedern ganz einfach und sorge dafür, dass keine Zugriffslücken entstehen."
-  },
-  "centralizeDataOwnershipBenefit3": {
-    "message": "Stelle allen Benutzern einen eigenen \"Meine Einträge\"-Bereich für die Verwaltung ihrer eigenen Zugangsdaten zur Verfügung."
-  },
-  "centralizeDataOwnershipWarningTitle": {
-    "message": "Mitglieder auffordern, ihre Einträge zu übertragen"
-  },
-  "centralizeDataOwnershipWarningDesc": {
-    "message": "Wenn Mitglieder Einträge in ihrem eigenen Tresor haben, werden sie aufgefordert, diese entweder an die Organisation zu übertragen oder zu die Organisation verlassen. Wenn sie gehen, wird ihr Zugriff widerrufen, kann aber jederzeit wiederhergestellt werden."
-  },
-  "centralizeDataOwnershipWarningLink": {
-    "message": "Erfahre mehr über die Übertragung"
   },
   "organizationDataOwnership": {
     "message": "Eigentumsrechte an Unternehmensdaten erzwingen"
@@ -6444,12 +6281,6 @@
   },
   "enrolledAccountRecovery": {
     "message": "Für Kontowiederherstellung registriert"
-  },
-  "enrolled": {
-    "message": "Registriert"
-  },
-  "notEnrolled": {
-    "message": "Nicht registriert"
   },
   "withdrawAccountRecovery": {
     "message": "Von Kontowiederherstellung abmelden"
@@ -6986,16 +6817,16 @@
   "personalVaultExportPolicyInEffect": {
     "message": "Eine oder mehrere Unternehmensrichtlinien verhindern es, dass du deinen persönlichen Tresor exportieren kannst."
   },
-  "activateAutofillPolicy": {
+  "activateAutofill": {
     "message": "Auto-Ausfüllen aktivieren"
   },
-  "activateAutofillPolicyDescription": {
+  "activateAutofillPolicyDesc": {
     "message": "Aktiviere die Einstellung \"Auto-Ausfüllen beim Laden einer Seite\" in der Browser-Erweiterung für alle bestehenden und neuen Mitglieder."
   },
-  "autofillOnPageLoadExploitWarning": {
+  "experimentalFeature": {
     "message": "Kompromittierte oder nicht vertrauenswürdige Websites können Auto-Ausfüllen beim Laden der Seite ausnutzen."
   },
-  "learnMoreAboutAutofillPolicy": {
+  "learnMoreAboutAutofill": {
     "message": "Erfahre mehr über Auto-Ausfüllen"
   },
   "selectType": {
@@ -10493,14 +10324,8 @@
   "datadogEventIntegrationDesc": {
     "message": "Tresor-Ereignisdaten an deine Datadog-Instanz senden"
   },
-  "huntressEventIntegrationDesc": {
-    "message": "Sende Ereignisdaten an deine Huntress SIEM-Instanz"
-  },
   "failedToSaveIntegration": {
     "message": "Fehler beim Speichern der Integration. Bitte versuche es später erneut."
-  },
-  "mustBeOrganizationOwnerAdmin": {
-    "message": "Du musst der Besitzer oder Administrator der Organisation sein, um diese Aktion ausführen zu können."
   },
   "mustBeOrgOwnerToPerformAction": {
     "message": "Du musst der Besitzer der Organisation sein, um diese Aktion auszuführen."
@@ -10609,12 +10434,6 @@
   },
   "index": {
     "message": "Index"
-  },
-  "httpEventCollectorUrl": {
-    "message": "HTTP Ereignissammler-URL"
-  },
-  "httpEventCollectorToken": {
-    "message": "HTTP Ereignissammler-Token"
   },
   "selectAPlan": {
     "message": "Einen Tarif auswählen"
@@ -11430,18 +11249,6 @@
   "automaticDomainClaimProcess": {
     "message": "Bitwarden wird in den ersten 72 Stunden 3 Mal versuchen, die Domain zu beanspruchen. Wenn die Domain nicht beansprucht werden kann, überprüfe den DNS-Eintrag auf deinem Host und beanspruche sie manuell. Die Domain wird in 7 Tagen aus deiner Organisation entfernt, wenn sie nicht beansprucht ist."
   },
-  "automaticDomainClaimProcess1": {
-    "message": "Bitwarden wird versuchen, die Domain innerhalb von 72 Stunden zu beanspruchen. Wenn die Domain nicht beansprucht werden kann, überprüfe deinen DNS-Eintrag und beanspruche die Domain manuell. Nicht beanspruchte Domains werden nach 7 Tagen entfernt."
-  },
-  "automaticDomainClaimProcess2": {
-    "message": "Einmal beansprucht, werden bestehende Mitglieder mit beanspruchten Domains per E-Mail über die "
-  },
-  "accountOwnershipChange": {
-    "message": "Änderung des Kontoeigentums"
-  },
-  "automaticDomainClaimProcessEnd": {
-    "message": "informiert."
-  },
   "domainNotClaimed": {
     "message": "$DOMAIN$ nicht beansprucht. Überprüfe deine DNS-Einträge.",
     "placeholders": {
@@ -11454,8 +11261,8 @@
   "domainStatusClaimed": {
     "message": "Beansprucht"
   },
-  "domainStatusPending": {
-    "message": "Ausstehend"
+  "domainStatusUnderVerification": {
+    "message": "In Verifizierung"
   },
   "claimedDomainsDescription": {
     "message": "Beanspruche eine Domain für eigene Mitgliederkonten. Die SSO-Kennungsseite wird beim Anmelden für Mitglieder mit beanspruchten Domains übersprungen und Administratoren werden in der Lage sein, beanspruchte Konten zu löschen."
@@ -11742,12 +11549,6 @@
   "changeAtRiskPasswordAndAddWebsite": {
     "message": "Diese Zugangsdaten sind gefährdet und es fehlt eine Website. Füge eine Website hinzu und ändere das Passwort für mehr Sicherheit."
   },
-  "vulnerablePassword": {
-    "message": "Gefährdetes Passwort."
-  },
-  "changeNow": {
-    "message": "Jetzt ändern"
-  },
   "missingWebsite": {
     "message": "Fehlende Webseite"
   },
@@ -11786,12 +11587,6 @@
   "unArchive": {
     "message": "Nicht mehr archivieren"
   },
-  "archived": {
-    "message": "Archiviert"
-  },
-  "unArchiveAndSave": {
-    "message": "Nicht mehr archivieren und speichern"
-  },
   "itemsInArchive": {
     "message": "Einträge im Archiv"
   },
@@ -11807,9 +11602,6 @@
   "itemsWereSentToArchive": {
     "message": "Einträge wurden ins Archiv verschoben"
   },
-  "itemWasUnarchived": {
-    "message": "Eintrag wird nicht mehr archiviert"
-  },
   "itemUnarchived": {
     "message": "Eintrag wird nicht mehr archiviert"
   },
@@ -11823,8 +11615,8 @@
     "message": "Eintrag archivieren",
     "description": "Verb"
   },
-  "archiveItemDialogContent": {
-    "message": "Nach der Archivierung wird dieser Eintrag aus den Suchergebnissen und Auto-Ausfüllen-Vorschlägen ausgeschlossen."
+  "archiveItemConfirmDesc": {
+    "message": "Archivierte Einträge werden von allgemeinen Suchergebnissen und Auto-Ausfüllen-Vorschlägen ausgeschlossen. Bist du sicher, dass du diesen Eintrag archivieren möchtest?"
   },
   "archiveBulkItems": {
     "message": "Einträge archivieren",
@@ -12177,15 +11969,6 @@
   "verifyNow": {
     "message": "Jetzt verifizieren."
   },
-  "unlockWithPasskey": {
-    "message": "Mit Passkey entsperren"
-  },
-  "prfUnlockFailed": {
-    "message": "Entsperren mit Passkey fehlgeschlagen. Bitte versuche es erneut oder verwende eine andere Entsperrmethode."
-  },
-  "noPrfCredentialsAvailable": {
-    "message": "Es sind keine PRF-fähigen Passkeys zum Entsperren verfügbar."
-  },
   "additionalStorageGB": {
     "message": "Zusätzlicher Speicher GB"
   },
@@ -12493,9 +12276,6 @@
   "userVerificationFailed": {
     "message": "Benutzerverifizierung fehlgeschlagen."
   },
-  "resizeSideNavigation": {
-    "message": "Größe der Seitennavigation ändern"
-  },
   "recoveryDeleteCiphersTitle": {
     "message": "Nicht-wiederherstellbare Tresor-Einträge löschen"
   },
@@ -12629,170 +12409,5 @@
   },
   "whyAmISeeingThis": {
     "message": "Warum wird mir das angezeigt?"
-  },
-  "youHaveBitwardenPremium": {
-    "message": "Du hast Bitwarden Premium"
-  },
-  "viewAndManagePremiumSubscription": {
-    "message": "Dein Premium-Abonnement anzeigen und verwalten"
-  },
-  "youNeedToUpdateLicenseFile": {
-    "message": "Du musst deine Lizenzdatei aktualisieren"
-  },
-  "youNeedToUpdateLicenseFileDate": {
-    "message": "$DATE$.",
-    "placeholders": {
-      "date": {
-        "content": "$1",
-        "example": "June 12, 2026"
-      }
-    }
-  },
-  "uploadLicenseFile": {
-    "message": "Lizenzdatei hochladen"
-  },
-  "uploadYourLicenseFile": {
-    "message": "Lade deine Lizenzdatei hoch"
-  },
-  "uploadYourPremiumLicenseFile": {
-    "message": "Lade deine Premium-Lizenzdatei hoch"
-  },
-  "uploadLicenseFileDesc": {
-    "message": "Dein Lizenzdateiname wird in etwa so aussehen: $FILE_NAME$",
-    "placeholders": {
-      "file_name": {
-        "content": "$1",
-        "example": "bitwarden_license.json"
-      }
-    }
-  },
-  "alreadyHaveSubscriptionQuestion": {
-    "message": "Du hast bereits ein Abonnement?"
-  },
-  "alreadyHaveSubscriptionSelfHostedMessage": {
-    "message": "Öffne die Abonnementseite in deinem Bitwarden Cloud-Konto und lade deine Lizenzdatei herunter. Gehe dann zu dieser Seite zurück und lade sie unten hoch."
-  },
-  "viewAllPlans": {
-    "message": "Alle Tarife anzeigen"
-  },
-  "planDescPremium": {
-    "message": "Umfassende Online-Sicherheit"
-  },
-  "updatePayment": {
-    "message": "Zahlungsmethode aktualisieren"
-  },
-  "weCouldNotProcessYourPayment": {
-    "message": "Wir konnten deine Zahlung nicht verarbeiten. Bitte aktualisiere deine Zahlungsmethode oder wende dich an das Support-Team, um Hilfe zu erhalten."
-  },
-  "yourSubscriptionHasExpired": {
-    "message": "Dein Abonnement ist abgelaufen. Bitte kontaktiere das Support-Team für Hilfe."
-  },
-  "yourSubscriptionIsScheduledToCancel": {
-    "message": "Dein Abonnement wird am $DATE$ gekündigt. Du kannst es davor jederzeit wieder reaktivieren.",
-    "placeholders": {
-      "date": {
-        "content": "$1",
-        "example": "Dec. 22, 2025"
-      }
-    }
-  },
-  "premiumShareEvenMore": {
-    "message": "Teile noch mehr mit Families oder erhalte eine leistungsstarke und vertrauenswürdige Passwortsicherheit mit Teams oder Enterprise."
-  },
-  "youHaveAGracePeriod": {
-    "message": "Du hast eine Nachfrist von $DAYS$ Tagen ab Ablaufdatum deines Abonnements. Bitte begleiche die letzten fälligen Rechnungen bis zum $DATE$.",
-    "placeholders": {
-      "days": {
-        "content": "$1",
-        "example": "14"
-      },
-      "date": {
-        "content": "$2",
-        "example": "Dec. 22, 2025"
-      }
-    }
-  },
-  "manageInvoices": {
-    "message": "Rechnungen verwalten"
-  },
-  "yourNextChargeIsFor": {
-    "message": "Deine nächste Abbuchung erfolgt am"
-  },
-  "dueOn": {
-    "message": "fällig am"
-  },
-  "yourSubscriptionWillBeSuspendedOn": {
-    "message": "Dein Abonnement wird deaktiviert am"
-  },
-  "yourSubscriptionWasSuspendedOn": {
-    "message": "Dein Abonnement wurde deaktiviert am"
-  },
-  "yourSubscriptionWillBeCanceledOn": {
-    "message": "Dein Abonnement wird gekündigt am"
-  },
-  "yourSubscriptionWasCanceledOn": {
-    "message": "Dein Abonnement wurde gekündigt am"
-  },
-  "storageFull": {
-    "message": "Speicherplatz voll"
-  },
-  "storageUsedDescription": {
-    "message": "Du hast $USED$ von $AVAILABLE$ GB deines verschlüsselten Datenspeichers verwendet.",
-    "placeholders": {
-      "used": {
-        "content": "$1",
-        "example": "1"
-      },
-      "available": {
-        "content": "$2",
-        "example": "5"
-      }
-    }
-  },
-  "storageFullDescription": {
-    "message": "Du hast die gesamten $GB$ GB deines verschlüsselten Speichers verwendet. Um mit dem Speichern von Dateien fortzufahren, füge mehr Speicher hinzu."
-  },
-  "whoCanView": {
-    "message": "Wer kann das sehen"
-  },
-  "specificPeople": {
-    "message": "Bestimmte Personen"
-  },
-  "emailVerificationDesc": {
-    "message": "Nach dem Teilen dieses Send-Links müssen Einzelpersonen ihre E-Mail-Adresse mit einem Code verifizieren, um dieses Send anzuzeigen."
-  },
-  "enterMultipleEmailsSeparatedByComma": {
-    "message": "Gib mehrere E-Mail-Adressen ein, indem du sie mit einem Komma trennst."
-  },
-  "emailPlaceholder": {
-    "message": "benutzer@bitwarden.com, benutzer@acme.com"
-  },
-  "whenYouRemoveStorage": {
-    "message": "Wenn du Speicherplatz entfernst, erhältst du eine anteilige Gutschrift, die automatisch mit deiner nächsten Rechnung verrechnet wird."
-  },
-  "ownerBadgeA11yDescription": {
-    "message": "Eigentümer, $OWNER$, alle Einträge anzeigen, die $OWNER$ gehören",
-    "placeholders": {
-      "owner": {
-        "content": "$1",
-        "example": "My Org Name"
-      }
-    }
-  },
-  "youHavePremium": {
-    "message": "Du hast Premium"
-  },
-  "emailProtected": {
-    "message": "E-Mail-Adresse geschützt"
-  },
-  "invalidSendPassword": {
-    "message": "Ungültiges Send-Passwort"
-  },
-  "sendPasswordHelperText": {
-    "message": "Personen müssen das Passwort eingeben, um dieses Send anzusehen",
-    "description": "'Send' is a noun and the name of a feature called 'Bitwarden Send'. It should not be translated."
-  },
-  "perUser": {
-    "message": "pro Benutzer"
   }
 }

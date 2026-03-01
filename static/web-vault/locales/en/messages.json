@@ -14,32 +14,8 @@
   "noCriticalAppsAtRisk": {
     "message": "No critical applications at risk"
   },
-  "critical":{
-    "message": "Critical ($COUNT$)",
-    "placeholders": {
-      "count": {
-        "content": "$1",
-        "example": "3"
-      }
-    }
-  },
-  "notCritical": {
-    "message": "Not critical ($COUNT$)",
-    "placeholders": {
-      "count": {
-        "content": "$1",
-        "example": "5"
-      }
-    }
-  },
-  "criticalBadge":{
-    "message": "Critical"
-  },
   "accessIntelligence": {
     "message": "Access Intelligence"
-  },
-  "noApplicationsMatchTheseFilters": {
-    "message": "No applications match these filters"
   },
   "passwordRisk": {
     "message": "Password Risk"
@@ -273,9 +249,6 @@
   },
   "application": {
     "message": "Application"
-  },
-  "applications": {
-    "message": "Applications"
   },
   "atRiskPasswords": {
     "message": "At-risk passwords"
@@ -612,9 +585,6 @@
   },
   "email": {
     "message": "Email"
-  },
-  "emails": {
-    "message": "Emails"
   },
   "phone": {
     "message": "Phone"
@@ -1218,7 +1188,7 @@
     "message": "Me"
   },
   "myItems": {
-    "message": "My Items"
+    "message": "My items"
   },
   "myVault": {
     "message": "My vault"
@@ -1246,9 +1216,6 @@
   },
   "selectAll": {
     "message": "Select all"
-  },
-  "deselectAll": {
-    "message": "Deselect all"
   },
   "unselectAll": {
     "message": "Unselect all"
@@ -1397,12 +1364,6 @@
   },
   "no": {
     "message": "No"
-  },
-  "noAuth": {
-    "message": "Anyone with the link"
-  },
-  "anyOneWithPassword": {
-    "message": "Anyone with a password set by you"
   },
   "location": {
     "message": "Location"
@@ -1788,9 +1749,6 @@
   "noMembersInList": {
     "message": "There are no members to list."
   },
-  "noMembersToExport": {
-    "message": "There are no members to export."
-  },
   "noEventsInList": {
     "message": "There are no events to list."
   },
@@ -2011,13 +1969,8 @@
   "encExportAccountWarningDesc": {
     "message": "Account encryption keys are unique to each Bitwarden user account, so you can't import an encrypted export into a different account."
   },
-  "exportNoun": {
-    "message": "Export",
-    "description": "The noun form of the word Export"
-  },
-  "exportVerb": {
-    "message": "Export",
-    "description": "The verb form of the word Export"
+  "export": {
+    "message": "Export"
   },
   "exportFrom": {
     "message": "Export from"
@@ -2344,13 +2297,8 @@
   "tools": {
     "message": "Tools"
   },
-  "importNoun": {
-    "message": "Import",
-    "description": "The noun form of the word Import"
-  },
-  "importVerb": {
-    "message": "Import",
-    "description": "The verb form of the word Import"
+  "import": {
+    "message": "Import"
   },
   "importData": {
     "message": "Import data"
@@ -2579,9 +2527,6 @@
   "enabled": {
     "message": "Turned on"
   },
-  "optionEnabled": {
-    "message": "Enabled"
-  },
   "restoreAccess": {
     "message": "Restore access"
   },
@@ -2678,9 +2623,6 @@
   },
   "key": {
     "message": "Key"
-  },
-  "unnamedKey": {
-    "message": "Unnamed key"
   },
   "twoStepAuthenticatorEnterCodeV2": {
     "message": "Verification code"
@@ -3191,9 +3133,6 @@
   "premiumSubscriptionEndedDesc": {
     "message": "To regain access to your archive, restart your Premium subscription. If you edit details for an archived item before restarting, it'll be moved back into your vault."
   },
-  "itemRestored": {
-    "message": "Item has been restored"
-  },
   "restartPremium": {
     "message": "Restart Premium"
   },
@@ -3320,10 +3259,7 @@
   "nextChargeHeader": {
     "message": "Next Charge"
   },
-  "nextChargeDate": {
-    "message": "Next charge date"
-  },
-  "plan": {
+   "plan": {
     "message": "Plan"
   },
   "details": {
@@ -3346,9 +3282,6 @@
   },
   "launchCloudSubscription": {
     "message": "Launch Cloud Subscription"
-  },
-  "launchCloudSubscriptionSentenceCase": {
-    "message": "Launch cloud subscription"
   },
   "storage": {
     "message": "Storage"
@@ -3721,6 +3654,9 @@
   "defaultCollection": {
     "message": "Default collection"
   },
+  "myItems": {
+    "message": "My Items"
+  },
   "getHelp": {
     "message": "Get help"
   },
@@ -3810,9 +3746,6 @@
   },
   "editCollection": {
     "message": "Edit collection"
-  },
-  "viewCollection": {
-    "message": "View collection"
   },
   "collectionInfo": {
     "message": "Collection info"
@@ -4268,12 +4201,6 @@
       }
     }
   },
-  "userAcceptedTransfer": {
-    "message": "Accepted transfer to organization ownership."
-  },
-  "userDeclinedTransfer": {
-    "message": "Revoked for declining transfer to organization ownership."
-  },
   "invitedUserId": {
     "message": "Invited user $ID$.",
     "placeholders": {
@@ -4548,6 +4475,7 @@
   "updateBrowser": {
     "message": "Update browser"
   },
+
   "generatingYourAccessIntelligence": {
     "message": "Generating your Access Intelligence..."
   },
@@ -5463,12 +5391,6 @@
   "restoreSelected": {
     "message": "Restore selected"
   },
-  "archivedItemRestored": {
-    "message": "Archived item restored"
-  },
-  "archivedItemsRestored": {
-    "message": "Archived items restored"
-  },
   "restoredItem": {
     "message": "Item restored"
   },
@@ -5651,6 +5573,10 @@
   "sendTypeText": {
     "message": "Text"
   },
+  "sendPasswordDescV3": {
+    "message": "Add an optional password for recipients to access this Send.",
+    "description": "'Send' is a noun and the name of a feature called 'Bitwarden Send'. It should not be translated."
+  },
   "createSend": {
     "message": "New Send",
     "description": "'Send' is a noun and the name of a feature called 'Bitwarden Send'. It should not be translated."
@@ -5661,57 +5587,6 @@
   },
   "createdSend": {
     "message": "Send saved",
-    "description": "'Send' is a noun and the name of a feature called 'Bitwarden Send'. It should not be translated."
-  },
-  "sendCreatedSuccessfully": {
-    "message": "Send created successfully!",
-    "description": "'Send' is a noun and the name of a feature called 'Bitwarden Send'. It should not be translated."
-  },
-  "sendCreatedDescriptionV2": {
-    "message": "Copy and share this Send link. The Send will be available to anyone with the link for the next $TIME$.",
-    "description": "'Send' is a noun and the name of a feature called 'Bitwarden Send'. It should not be translated.",
-    "placeholders": {
-      "time": {
-        "content": "$1",
-        "example": "7 days, 1 hour, 1 day"
-      }
-    }
-  },
-  "sendCreatedDescriptionPassword": {
-    "message": "Copy and share this Send link. The Send will be available to anyone with the link and password you set for the next $TIME$.",
-    "description": "'Send' is a noun and the name of a feature called 'Bitwarden Send'. It should not be translated.",
-    "placeholders": {
-      "time": {
-        "content": "$1",
-        "example": "7 days, 1 hour, 1 day"
-      }
-    }
-  },
-  "sendCreatedDescriptionEmail": {
-    "message": "Copy and share this Send link. It can be viewed by the people you specified for the next $TIME$.",
-    "description": "'Send' is a noun and the name of a feature called 'Bitwarden Send'. It should not be translated.",
-    "placeholders": {
-      "time": {
-        "content": "$1",
-        "example": "7 days, 1 hour, 1 day"
-      }
-    }
-  },
-  "durationTimeHours": {
-    "message": "$HOURS$ hours",
-    "placeholders": {
-      "hours": {
-        "content": "$1",
-        "example": "5"
-      }
-    }
-  },
-  "newTextSend": {
-    "message": "New Text Send",
-    "description": "'Send' is a noun and the name of a feature called 'Bitwarden Send'. It should not be translated."
-  },
-  "newFileSend": {
-    "message": "New File Send",
     "description": "'Send' is a noun and the name of a feature called 'Bitwarden Send'. It should not be translated."
   },
   "editedSend": {
@@ -5752,9 +5627,6 @@
   },
   "revoked": {
     "message": "Revoked"
-  },
-  "accepted": {
-    "message": "Accepted"
   },
   "sendLink": {
     "message": "Send link",
@@ -5976,37 +5848,6 @@
       }
     }
   },
-  "centralizeDataOwnership":{
-    "message": "Centralize organization ownership"
-  },
-  "centralizeDataOwnershipDesc":{
-    "message": "All member items will be owned and managed by the organization. Admins and owners are exempt. "
-  },
-  "centralizeDataOwnershipContentAnchor": {
-    "message": "Learn more about centralized ownership",
-    "description": "This will be used as a hyperlink"
-  },
-  "benefits":{
-    "message": "Benefits"
-  },
-  "centralizeDataOwnershipBenefit1":{
-    "message": "Gain full visibility into credential health, including shared and unshared items."
-  },
-  "centralizeDataOwnershipBenefit2":{
-    "message": "Easily transfer items during member offboarding and succession, ensuring there are no access gaps."
-  },
-  "centralizeDataOwnershipBenefit3":{
-    "message": "Give all users a dedicated \"My Items\" space for managing their own logins."
-  },
-  "centralizeDataOwnershipWarningTitle": {
-    "message": "Prompt members to transfer their items"
-  },
-  "centralizeDataOwnershipWarningDesc": {
-    "message": "If members have items in their individual vault, they will be prompted to either transfer them to the organization or leave. If they leave, their access is revoked but can be restored anytime."
-  },
-  "centralizeDataOwnershipWarningLink": {
-    "message": "Learn more about the transfer"
-  },
   "organizationDataOwnership": {
     "message": "Enforce organization data ownership"
   },
@@ -6022,22 +5863,22 @@
     "message": "credential lifecycle",
     "description": "This will be used as a hyperlink"
   },
-  "organizationDataOwnershipWarningTitle": {
+  "organizationDataOwnershipWarningTitle":{
     "message": "Are you sure you want to proceed?"
   },
-  "organizationDataOwnershipWarning1": {
+  "organizationDataOwnershipWarning1":{
     "message": "will remain accessible to members"
   },
-  "organizationDataOwnershipWarning2": {
+  "organizationDataOwnershipWarning2":{
     "message": "will not be automatically selected when creating new items"
   },
-  "organizationDataOwnershipWarning3": {
+  "organizationDataOwnershipWarning3":{
     "message": "cannot be managed from the Admin Console until the user is offboarded"
   },
-  "organizationDataOwnershipWarningContentTop": {
+  "organizationDataOwnershipWarningContentTop":{
     "message": "By turning this policy off, the default collection: "
   },
-  "organizationDataOwnershipWarningContentBottom": {
+  "organizationDataOwnershipWarningContentBottom":{
     "message": "Learn more about the ",
     "description": "This will be used as part of a larger sentence, broken up to include links. The full sentence will read 'Learn more about the credential lifecycle.'"
   },
@@ -6161,7 +6002,7 @@
   "uriMatchDetectionOptionsLabel": {
     "message": "Default URI match detection"
   },
-  "invalidUriMatchDefaultPolicySetting": {
+    "invalidUriMatchDefaultPolicySetting": {
     "message": "Please select a valid URI match detection option.",
     "description": "Error message displayed when a user attempts to save URI match detection policy settings with an invalid selection."
   },
@@ -6444,12 +6285,6 @@
   },
   "enrolledAccountRecovery": {
     "message": "Enrolled in account recovery"
-  },
-  "enrolled": {
-    "message": "Enrolled"
-  },
-  "notEnrolled": {
-    "message": "Not enrolled"
   },
   "withdrawAccountRecovery": {
     "message": "Withdraw from account recovery"
@@ -6986,17 +6821,17 @@
   "personalVaultExportPolicyInEffect": {
     "message": "One or more organization policies prevents you from exporting your individual vault."
   },
-  "activateAutofillPolicy": {
-    "message": "Activate autofill"
+  "activateAutofill": {
+    "message": "Activate auto-fill"
   },
-  "activateAutofillPolicyDescription": {
-    "message": "Activate the autofill on page load setting on the browser extension for all existing and new members."
+  "activateAutofillPolicyDesc": {
+    "message": "Activate the auto-fill on page load setting on the browser extension for all existing and new members."
   },
-  "autofillOnPageLoadExploitWarning": {
-    "message": "Compromised or untrusted websites can exploit autofill on page load."
+  "experimentalFeature": {
+    "message": "Compromised or untrusted websites can exploit auto-fill on page load."
   },
-  "learnMoreAboutAutofillPolicy": {
-    "message": "Learn more about autofill"
+  "learnMoreAboutAutofill": {
+    "message": "Learn more about auto-fill"
   },
   "selectType": {
     "message": "Select SSO type"
@@ -9077,7 +8912,7 @@
     }
   },
   "accessedSecret": {
-    "message": "Accessed secret $SECRET_ID$.",
+  "message": "Accessed secret $SECRET_ID$.",
     "placeholders": {
       "secret_id": {
         "content": "$1",
@@ -9085,7 +8920,7 @@
       }
     }
   },
-  "editedSecretWithId": {
+   "editedSecretWithId": {
     "message": "Edited a secret with identifier: $SECRET_ID$",
     "placeholders": {
       "secret_id": {
@@ -9094,7 +8929,7 @@
       }
     }
   },
-  "deletedSecretWithId": {
+   "deletedSecretWithId": {
     "message": "Deleted a secret with identifier: $SECRET_ID$",
     "placeholders": {
       "secret_id": {
@@ -9112,7 +8947,7 @@
       }
     }
   },
-  "restoredSecretWithId": {
+   "restoredSecretWithId": {
     "message": "Restored a secret with identifier: $SECRET_ID$",
     "placeholders": {
       "secret_id": {
@@ -9121,7 +8956,7 @@
       }
     }
   },
-  "createdSecretWithId": {
+   "createdSecretWithId": {
     "message": "Created a new secret with identifier: $SECRET_ID$",
     "placeholders": {
       "secret_id": {
@@ -9131,7 +8966,7 @@
     }
   },
   "accessedProjectWithIdentifier": {
-    "message": "Accessed a project with identifier: $PROJECT_ID$.",
+  "message": "Accessed a project with identifier: $PROJECT_ID$.",
     "placeholders": {
       "project_id": {
         "content": "$1",
@@ -9140,7 +8975,7 @@
     }
   },
   "nameUnavailableProjectDeleted": {
-    "message": "Deleted project Id: $PROJECT_ID$",
+  "message": "Deleted project Id: $PROJECT_ID$",
     "placeholders": {
       "project_id": {
         "content": "$1",
@@ -9149,7 +8984,7 @@
     }
   },
   "nameUnavailableSecretDeleted": {
-    "message": "Deleted secret Id: $SECRET_ID$",
+  "message": "Deleted secret Id: $SECRET_ID$",
     "placeholders": {
       "secret_id": {
         "content": "$1",
@@ -9158,7 +8993,7 @@
     }
   },
   "nameUnavailableServiceAccountDeleted": {
-    "message": "Deleted machine account Id: $SERVICE_ACCOUNT_ID$",
+  "message": "Deleted machine account Id: $SERVICE_ACCOUNT_ID$",
     "placeholders": {
       "service_account_id": {
         "content": "$1",
@@ -9166,7 +9001,7 @@
       }
     }
   },
-  "editedProjectWithId": {
+   "editedProjectWithId": {
     "message": "Edited a project with identifier: $PROJECT_ID$",
     "placeholders": {
       "project_id": {
@@ -9245,7 +9080,7 @@
       }
     }
   },
-  "deletedProjectWithId": {
+   "deletedProjectWithId": {
     "message": "Deleted a project with identifier: $PROJECT_ID$",
     "placeholders": {
       "project_id": {
@@ -9254,7 +9089,7 @@
       }
     }
   },
-  "createdProjectWithId": {
+   "createdProjectWithId": {
     "message": "Created a new project with identifier: $PROJECT_ID$",
     "placeholders": {
       "project_id": {
@@ -9972,15 +9807,15 @@
     "message": "Common formats",
     "description": "Label indicating the most common import formats"
   },
-  "uriMatchDefaultStrategyHint": {
+    "uriMatchDefaultStrategyHint": {
     "message": "URI match detection is how Bitwarden identifies autofill suggestions.",
     "description": "Explains to the user that URI match detection determines how Bitwarden suggests autofill options, and clarifies that this default strategy applies when no specific match detection is set for a login item."
   },
-  "regExAdvancedOptionWarning": {
+   "regExAdvancedOptionWarning": {
     "message": "\"Regular expression\" is an advanced option with increased risk of exposing credentials.",
     "description": "Content for dialog which warns a user when selecting 'regular expression' matching strategy as a cipher match strategy"
   },
-  "startsWithAdvancedOptionWarning": {
+   "startsWithAdvancedOptionWarning": {
     "message": "\"Starts with\" is an advanced option with increased risk of exposing credentials.",
     "description": "Content for dialog which warns a user when selecting 'starts with' matching strategy as a cipher match strategy"
   },
@@ -9988,11 +9823,11 @@
     "message": "More about match detection",
     "description": "Link to match detection docs on warning dialog for advance match strategy"
   },
-  "uriAdvancedOption": {
+   "uriAdvancedOption":{
     "message": "Advanced options",
     "description": "Advanced option placeholder for uri option component"
   },
-  "warningCapitalized": {
+   "warningCapitalized": {
     "message": "Warning",
     "description": "Warning (should maintain locale-relevant capitalization)"
   },
@@ -10493,14 +10328,8 @@
   "datadogEventIntegrationDesc": {
     "message": "Send vault event data to your Datadog instance"
   },
-  "huntressEventIntegrationDesc": {
-    "message": "Send event data to your Huntress SIEM instance"
-  },
   "failedToSaveIntegration": {
     "message": "Failed to save integration. Please try again later."
-  },
-  "mustBeOrganizationOwnerAdmin": {
-    "message": "You must be an Organization Owner or Admin to perform this action."
   },
   "mustBeOrgOwnerToPerformAction": {
     "message": "You must be the organization owner to perform this action."
@@ -10609,12 +10438,6 @@
   },
   "index": {
     "message": "Index"
-  },
-  "httpEventCollectorUrl": {
-    "message": "HTTP Event Collector URL"
-  },
-  "httpEventCollectorToken": {
-    "message": "HTTP Event Collector Token"
   },
   "selectAPlan": {
     "message": "Select a plan"
@@ -11430,18 +11253,6 @@
   "automaticDomainClaimProcess": {
     "message": "Bitwarden will attempt to claim the domain 3 times during the first 72 hours. If the domain can’t be claimed, check the DNS record in your host and manually claim. The domain will be removed from your organization in 7 days if it is not claimed."
   },
-  "automaticDomainClaimProcess1": {
-    "message": "Bitwarden will attempt to claim the domain within 72 hours. If the domain can't be claimed, verify your DNS record and claim manually. Unclaimed domains are removed after 7 days."
-  },
-  "automaticDomainClaimProcess2": {
-    "message": "Once claimed, existing members with claimed domains will be emailed about the "
-  },
-  "accountOwnershipChange": {
-    "message": "account ownership change"
-  },
-  "automaticDomainClaimProcessEnd": {
-    "message": "."
-  },
   "domainNotClaimed": {
     "message": "$DOMAIN$ not claimed. Check your DNS records.",
     "placeholders": {
@@ -11454,8 +11265,8 @@
   "domainStatusClaimed": {
     "message": "Claimed"
   },
-  "domainStatusPending": {
-    "message": "Pending"
+  "domainStatusUnderVerification": {
+    "message": "Under verification"
   },
   "claimedDomainsDescription": {
     "message": "Claim a domain to own member accounts. The SSO identifier page will be skipped during login for members with claimed domains and administrators will be able to delete claimed accounts."
@@ -11742,12 +11553,6 @@
   "changeAtRiskPasswordAndAddWebsite": {
     "message": "This login is at-risk and missing a website. Add a website and change the password for stronger security."
   },
-   "vulnerablePassword": {
-    "message": "Vulnerable password."
-  },
-  "changeNow": {
-    "message": "Change now"
-  },
   "missingWebsite": {
     "message": "Missing website"
   },
@@ -11786,12 +11591,6 @@
   "unArchive": {
     "message": "Unarchive"
   },
-  "archived": {
-    "message": "Archived"
-  },
-  "unArchiveAndSave": {
-    "message": "Unarchive and save"
-  },
   "itemsInArchive": {
     "message": "Items in archive"
   },
@@ -11807,9 +11606,6 @@
   "itemsWereSentToArchive": {
     "message": "Items were sent to archive"
   },
-  "itemWasUnarchived": {
-    "message": "Item was unarchived"
-  },
   "itemUnarchived": {
     "message": "Item was unarchived"
   },
@@ -11823,8 +11619,8 @@
     "message": "Archive item",
     "description": "Verb"
   },
-  "archiveItemDialogContent": {
-    "message": "Once archived, this item will be excluded from search results and autofill suggestions."
+  "archiveItemConfirmDesc": {
+    "message": "Archived items are excluded from general search results and autofill suggestions. Are you sure you want to archive this item?"
   },
   "archiveBulkItems": {
     "message": "Archive items",
@@ -12177,15 +11973,6 @@
   "verifyNow": {
     "message": "Verify now."
   },
-  "unlockWithPasskey": {
-    "message": "Unlock with passkey"
-  },
-  "prfUnlockFailed": {
-    "message": "Failed to unlock with passkey. Please try again or use another unlock method."
-  },
-  "noPrfCredentialsAvailable": {
-    "message": "No PRF-enabled passkeys are available for unlock."
-  },
   "additionalStorageGB": {
     "message": "Additional storage GB"
   },
@@ -12375,6 +12162,9 @@
   "updateYourEncryptionSettings": {
     "message": "Update your encryption settings"
   },
+  "updateSettings": {
+    "message": "Update settings"
+  },
   "algorithm": {
     "message": "Algorithm"
   },
@@ -12445,7 +12235,7 @@
       }
     }
   },
-  "removeMasterPasswordForOrgUserKeyConnector": {
+  "removeMasterPasswordForOrgUserKeyConnector":{
     "message": "Your organization is no longer using master passwords to log into Bitwarden. To continue, verify the organization and domain."
   },
   "continueWithLogIn": {
@@ -12463,10 +12253,10 @@
   "verifyYourOrganization": {
     "message": "Verify your organization to log in"
   },
-  "organizationVerified": {
+  "organizationVerified":{
     "message": "Organization verified"
   },
-  "domainVerified": {
+  "domainVerified":{
     "message": "Domain verified"
   },
   "leaveOrganizationContent": {
@@ -12492,9 +12282,6 @@
   },
   "userVerificationFailed": {
     "message": "User verification failed."
-  },
-  "resizeSideNavigation": {
-    "message": "Resize side navigation"
   },
   "recoveryDeleteCiphersTitle": {
     "message": "Delete unrecoverable vault items"
@@ -12600,7 +12387,7 @@
       }
     }
   },
-  "howToManageMyVault": {
+   "howToManageMyVault": {
     "message": "How do I manage my vault?"
   },
   "transferItemsToOrganizationTitle": {
@@ -12608,7 +12395,7 @@
     "placeholders": {
       "organization": {
         "content": "$1",
-        "example": "My Org Name"
+        "example": "My Org Name"  
       }
     }
   },
@@ -12617,7 +12404,7 @@
     "placeholders": {
       "organization": {
         "content": "$1",
-        "example": "My Org Name"
+        "example": "My Org Name"  
       }
     }
   },
@@ -12629,170 +12416,5 @@
   },
   "whyAmISeeingThis": {
     "message": "Why am I seeing this?"
-  },
-  "youHaveBitwardenPremium": {
-    "message": "You have Bitwarden Premium"
-  },
-  "viewAndManagePremiumSubscription": {
-    "message": "View and manage your Premium subscription"
-  },
-  "youNeedToUpdateLicenseFile": {
-    "message": "You'll need to update your license file"
-  },
-  "youNeedToUpdateLicenseFileDate": {
-    "message": "$DATE$.",
-    "placeholders": {
-      "date": {
-        "content": "$1",
-        "example": "June 12, 2026"
-      }
-    }
-  },
-  "uploadLicenseFile": {
-    "message": "Upload license file"
-  },
-  "uploadYourLicenseFile": {
-    "message": "Upload your license file"
-  },
-  "uploadYourPremiumLicenseFile": {
-    "message": "Upload your Premium license file"
-  },
-  "uploadLicenseFileDesc": {
-    "message": "Your license file name will be similar to: $FILE_NAME$",
-    "placeholders": {
-      "file_name": {
-        "content": "$1",
-        "example": "bitwarden_license.json"
-      }
-    }
-  },
-  "alreadyHaveSubscriptionQuestion": {
-    "message": "Already have a subscription?"
-  },
-  "alreadyHaveSubscriptionSelfHostedMessage": {
-    "message": "Open the subscription page on your Bitwarden cloud account and download your license file. Then return to this screen and upload it below."
-  },
-  "viewAllPlans": {
-    "message": "View all plans"
-  },
-  "planDescPremium": {
-    "message": "Complete online security"
-  },
-  "updatePayment": {
-    "message": "Update payment"
-  },
-  "weCouldNotProcessYourPayment": {
-    "message": "We could not process your payment. Please update your payment method or contact the support team for assistance."
-  },
-  "yourSubscriptionHasExpired": {
-    "message": "Your subscription has expired. Please contact the support team for assistance."
-  },
-  "yourSubscriptionIsScheduledToCancel": {
-    "message": "Your subscription is scheduled to cancel on $DATE$. You can reinstate it anytime before then.",
-    "placeholders": {
-      "date": {
-        "content": "$1",
-        "example": "Dec. 22, 2025"
-      }
-    }
-  },
-  "premiumShareEvenMore": {
-    "message": "Share even more with Families, or get powerful, trusted password security with Teams or Enterprise."
-  },
-  "youHaveAGracePeriod": {
-    "message": "You have a grace period of $DAYS$ days from your subscription expiration date. Please resolve the past due invoices by $DATE$.",
-    "placeholders": {
-      "days": {
-        "content": "$1",
-        "example": "14"
-      },
-      "date": {
-        "content": "$2",
-        "example": "Dec. 22, 2025"
-      }
-    }
-  },
-  "manageInvoices": {
-    "message": "Manage invoices"
-  },
-  "yourNextChargeIsFor": {
-    "message": "Your next charge is for"
-  },
-  "dueOn": {
-    "message": "due on"
-  },
-  "yourSubscriptionWillBeSuspendedOn": {
-    "message": "Your subscription will be suspended on"
-  },
-  "yourSubscriptionWasSuspendedOn": {
-    "message": "Your subscription was suspended on"
-  },
-  "yourSubscriptionWillBeCanceledOn": {
-    "message": "Your subscription will be canceled on"
-  },
-  "yourSubscriptionWasCanceledOn": {
-    "message": "Your subscription was canceled on"
-  },
-  "storageFull": {
-    "message": "Storage full"
-  },
-  "storageUsedDescription": {
-    "message": "You have used $USED$ out of $AVAILABLE$ GB of your encrypted file storage.",
-    "placeholders": {
-      "used": {
-        "content": "$1",
-        "example": "1"
-      },
-      "available": {
-        "content": "$2",
-        "example": "5"
-      }
-    }
-  },
-  "storageFullDescription": {
-    "message": "You have used all $GB$ GB of your encrypted storage. To continue storing files, add more storage."
-  },
-  "whoCanView": {
-    "message": "Who can view"
-  },
-  "specificPeople": {
-    "message": "Specific people"
-  },
-  "emailVerificationDesc": {
-    "message": "After sharing this Send link, individuals will need to verify their email with a code to view this Send."
-  },
-  "enterMultipleEmailsSeparatedByComma": {
-    "message": "Enter multiple emails by separating with a comma."
-  },
-  "emailPlaceholder": {
-    "message": "user@bitwarden.com , user@acme.com"
-  },
-  "whenYouRemoveStorage": {
-    "message": "When you remove storage, you will receive a prorated account credit that will automatically go toward your next bill."
-  },
-  "ownerBadgeA11yDescription":{
-    "message": "Owner, $OWNER$, show all items owned by $OWNER$",
-    "placeholders":{
-      "owner": {
-        "content": "$1",
-        "example": "My Org Name"
-      }
-    }
-  },
-  "youHavePremium": {
-    "message": "You have Premium"
-  },
-  "emailProtected": {
-    "message": "Email protected"
-  },
-  "invalidSendPassword": {
-    "message": "Invalid Send password"
-  },
-  "sendPasswordHelperText": {
-    "message": "Individuals will need to enter the password to view this Send",
-    "description": "'Send' is a noun and the name of a feature called 'Bitwarden Send'. It should not be translated."
-  },
-  "perUser": {
-    "message": "per user"
   }
 }
