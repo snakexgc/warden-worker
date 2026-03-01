@@ -43,10 +43,9 @@
 		// 是否显示 Emergency Access 入口（false=隐藏）
 		"VW_CSS_EMERGENCY_ACCESS_ALLOWED": "true",
 		// 是否加载用户自定义 CSS（配合 VW_CSS_USER 使用）
-		"VW_CSS_LOAD_USER_CSS": "true"
-		// 用户自定义 CSS 建议通过 Secret 注入，不建议明文写入 vars：
-		// wrangler secret put VW_CSS_USER
-		// 读取优先级：Secret(VW_CSS_USER) > vars(VW_CSS_USER)
+		"VW_CSS_LOAD_USER_CSS": "true",
+		// 用户自定义 CSS 
+		"VW_CSS_USER": "/* 隐藏\"紧急访问\"侧边栏菜单项 */\n[route=\"settings/emergency-access\"] {\n  display: none !important;\n}"
 	},
 	// D1 数据库绑定（必须完整，否则会被认为是新建/覆盖）
 	"d1_databases": [
