@@ -6,7 +6,7 @@ Warden Worker 是一个运行在 Cloudflare Workers 上的轻量级 Bitwarden �
 
 ## 功能
 
-- 无服务器部署：Cloudflare Workers + D1 Sql
+- 无服务器部署：Cloudflare Workers + D1 Sql + R2 存储桶
 - 兼容多端：官方 Bitwarden（浏览器扩展 / 桌面 / 安卓）与多数第三方客户端
 - 核心能力：注册/登录、同步、密码项（Cipher）增删改、文件夹、TOTP（Authenticator）二步验证、邮箱二步验证
 - 官方安卓兼容：支持 `/api/devices/knowndevice` 与 remember-device 流程
@@ -33,6 +33,7 @@ Fork 本仓库到你的 GitHub 账号。
 | `D1_DATABASE_ID` | D1 数据库 ID | `wrangler d1 info vaultsql` 或 Cloudflare D1 控制台 |
 
 *** 在Cloudflare控制台创建D1数据库后，还需要执行 `sql/schema.sql`中的代码来初始化数据库。 ***
+cloudflare dashboard -> 存储和数据库 -> D1 SQL 数据库 -> vaultsql -> 控制台 ->粘贴 `sql/schema.sql` 内容 -> 执行
 
 ### 3. 配置Cloudflare Workers运行环境密钥
 在 Cloudflare Dashboard -> Workers -> Settings -> Variables 中手动添加以下机密变量。
@@ -40,22 +41,23 @@ Fork 本仓库到你的 GitHub 账号。
 JWT_SECRET
 JWT_REFRESH_SECRET
 ALLOWED_EMAILS
-DOMAIN
 TWO_FACTOR_ENC_KEY
 WEWORK_WEBHOOK_URL
 TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID
 TURNSTILE_SECRET_KEY
+TURNSTILE_SITE_KEY
 ```
 - **JWT_SECRET**：访问令牌签名密钥。用于签署短效 Access Token。**必须设置强随机字符串。**
 - **JWT_REFRESH_SECRET**：刷新令牌签名密钥。用于签署长效 Refresh Token。**必须设置强随机字符串，且不要与 JWT_SECRET 相同。**
 - **ALLOWED_EMAILS**：首个账号注册白名单（仅在"数据库还没有任何用户"时启用），多个邮箱用英文逗号分隔。
-- **DOMAIN**：**必选**，你的服务域名，格式如 `https://vault.example.com`。用于 WebAuthn 安全密钥注册等功能。
 - **TWO_FACTOR_ENC_KEY**：可选，Base64 的 32 字节密钥；用于加密存储 TOTP 秘钥
 - **WEWORK_WEBHOOK_URL**：可选，企业微信群机器人的 Webhook 地址。用于事件通知和邮箱二步验证验证码发送。
 - **TELEGRAM_BOT_TOKEN**：可选，Telegram Bot 的 Token。从 [@BotFather](https://t.me/BotFather) 获取。
 - **TELEGRAM_CHAT_ID**：可选，接收通知的 Chat ID。可以是个人用户 ID、群组 ID 或频道 ID。通过 [@userinfobot](https://t.me/userinfobot) 获取个人 ID。
-- **TURNSTILE_SECRET_KEY**：可选但建议开启，Cloudflare Turnstile 私钥；用于匿名访问 Send 时的人机验证。
+- **TURNSTILE_SECRET_KEY**：可选但建议开启，Cloudflare Turnstile 私钥；用于匿名访问 Send 时的人机验证。可以从 Cloudflare Dashboard -> 应用程序安全 -> Turnstile -> 密钥 中获取。
+- **TURNSTILE_SITE_KEY**：可选但建议开启，Cloudflare Turnstile 站点密钥；用于匿名访问 Send 时的人机验证。可以从 Cloudflare Dashboard -> 应用程序安全 -> Turnstile -> 站点密钥 中获取。
+**人机验证说明**：开启后，匿名用户访问 Send 时会要求完成人机验证，防止被刷D1和R2的额度。
 
 ### 可选：动态 vaultwarden.css（参考 Vaultwarden 方案）
 
@@ -75,21 +77,10 @@ Worker 已支持动态生成 `GET /css/vaultwarden.css`，可通过环境变量�
 - `VW_CSS_LOAD_USER_CSS`：是否加载自定义 CSS（默认 `true`）
 - `VW_CSS_USER`：自定义 CSS 文本（可放到 Worker Secret，优先读取 Secret）
 
-示例：
-
-```bash
-wrangler secret put VW_CSS_USER
-# 粘贴你的自定义 CSS，保存即可
-```
-
-可以使用PowerShell生成 TWO_FACTOR_ENC_KEY ：
-```powershell
-[Convert]::ToBase64String((1..32 | ForEach-Object {Get-Random -Minimum 0 -Maximum 256}))
-```
 ### 4. 部署
 在 GitHub 仓库的 **Actions** 中触发工作流，即可自动部署到 Cloudflare Workers。
 
-## 手动部署（wrangler 命令行）
+## 手动部署（wrangler 命令行）(极度不推荐)
 
 ### 0. 前置条件
 
@@ -167,28 +158,122 @@ wrangler deploy
 - 首次启用 TOTP 后，建议在同一台设备上完成一次“输入 TOTP 登录”，后续官方安卓会自动走 remember-device。
 - 如果你在网页端点击了“踢出所有设备”，所有已登录的客户端将在下次尝试刷新 Token 时（通常 2 小时内）被迫登出，需要重新登录。
 
-## 已实现的关键接口（部分）
+## 已实现的关键接口（完整列表）
 
-- 配置与探测：`GET /api/config`、`GET /api/alive`、`GET /api/now`、`GET /api/version`
-- 登录：`POST /identity/accounts/prelogin`、`POST /identity/connect/token`
-- 账户安全：`POST /api/accounts/security-stamp` (踢出设备)
-- 密码提示：`POST /api/accounts/password-hint`（需要启用企业微信 Webhook）
-- 同步：`GET /api/sync`
-- 密码项：`POST /api/ciphers/create`、`PUT /api/ciphers/{id}`、`PUT /api/ciphers/{id}/delete`
-- 文件夹：`POST /api/folders`、`PUT /api/folders/{id}`、`DELETE /api/folders/{id}`
-- 2FA：`GET /api/two-factor`、`/api/two-factor/authenticator/*`、`/api/two-factor/email/*`
-- 官方安卓设备探测：`GET /api/devices/knowndevice`
-- icon支持: `GET /icons/{*res}`
-- 域名规则支持: `GET /api/settings/domains`
-- 加密密钥支持: `POST /api/accounts/kdf`
-- 头像颜色支持: `POST /api/accounts/avatar`
-- 邮箱二次验证支持: `POST /api/two-factor/email/register`、`POST /api/two-factor/email/verify`
+### 配置与探测
+- `GET /api/config` - 获取服务配置
+- `GET /api/alive` - 健康检查
+- `GET /api/now` - 获取服务器当前时间
+- `GET /api/version` - 获取版本号
+- `GET /css/vaultwarden.css` - 动态生成 CSS（支持自定义主题）
+- `GET /icons/{*path}` - 获取网站图标
 
-### Vaultwarden 对齐新增接口
-为了与 Vaultwarden 保持一致，新增了以下接口：
-- `GET /api/collections`（当前返回空数组）
-- `GET /api/policies`（当前返回空数组）
-- `GET /api/organizations`（当前返回空数组）
+### 账户与认证
+- `POST /identity/accounts/prelogin` - 预登录（获取 KDF 参数）
+- `POST /identity/connect/token` - 获取访问令牌
+- `POST /identity/accounts/register/finish` - 完成注册
+- `POST /identity/accounts/register/send-verification-email` - 发送注册验证邮件
+- `GET /api/accounts/profile` - 获取账户资料
+- `POST/PUT /api/accounts/profile` - 更新账户资料
+- `PUT/POST /api/accounts/avatar` - 更新头像
+- `POST /api/accounts/security-stamp` - 更新安全戳（踢出所有设备）
+- `GET /api/accounts/revision-date` - 获取最后修改时间
+- `POST /api/accounts/password-hint` - 获取密码提示
+- `POST /api/accounts/prelogin` - 预登录（兼容路径）
+- `POST /api/accounts/request-otp` - 请求 OTP
+- `POST /api/accounts/verify-otp` - 验证 OTP
+- `POST /api/accounts/verify-password` - 验证密码
+- `PUT /api/accounts/password` - 修改主密码
+- `PUT /api/accounts/email` - 修改邮箱
+- `POST /api/accounts/kdf` - 更新 KDF 设置
+
+### 设备管理
+- `GET /api/devices` - 获取设备列表
+- `GET /api/devices/identifier/{id}` - 根据标识获取设备
+- `GET /api/devices/knowndevice` - 检查已知设备（官方安卓兼容）
+- `PUT/POST /api/devices/identifier/{id}/token` - 更新设备令牌
+- `PUT/POST /api/devices/identifier/{id}/clear-token` - 清除设备令牌
+
+### 两步验证（2FA）
+- `GET /api/two-factor` - 获取 2FA 状态
+- `POST /api/two-factor/get-authenticator` - 获取身份验证器配置
+- `POST/PUT/DELETE /api/two-factor/authenticator` - 启用/禁用身份验证器
+- `POST /api/two-factor/authenticator/request` - 请求身份验证器验证码
+- `POST /api/two-factor/authenticator/enable` - 启用身份验证器
+- `POST /api/two-factor/authenticator/disable` - 禁用身份验证器
+- `POST /api/two-factor/get-email` - 获取邮箱 2FA 配置
+- `POST /api/two-factor/send-email` - 发送验证邮件
+- `PUT/DELETE /api/two-factor/email` - 验证/禁用邮箱 2FA
+- `POST/PUT /api/two-factor/disable` - 通用禁用 2FA
+- `POST /api/two-factor/get-recover` - 获取恢复代码
+- `POST /api/two-factor/recover` - 使用恢复码恢复
+- `POST /two-factor/send-email-login` - 登录时发送验证码
+- `POST /api/two-factor/send-email-login` - 登录时发送验证码（API 路径）
+- `POST /api/two-factor/get-webauthn` - 获取 WebAuthn 配置
+- `POST /api/two-factor/get-webauthn-challenge` - 获取 WebAuthn 挑战
+- `POST/PUT/DELETE /api/two-factor/webauthn` - WebAuthn 管理
+
+### WebAuthn 安全密钥
+- `GET/POST /accounts/webauthn/assertion-options` - 获取断言选项
+- `GET/POST /identity/accounts/webauthn/assertion-options` - 获取断言选项（兼容路径）
+- `GET/POST /api/webauthn` - 列出/创建凭证
+- `POST /api/webauthn/attestation-options` - 获取注册选项
+- `POST /api/webauthn/prf-probe` - PRF 探测
+- `POST /api/webauthn/assertion-options` - 获取断言选项
+- `PUT /api/webauthn/{credential_id}` - 更新凭证
+- `POST /api/webauthn/{credential_id}/delete` - 删除凭证
+
+### 数据同步
+- `GET /api/sync` - 完整同步密码库
+- `POST /api/ciphers/import` - 导入数据
+
+### 密码项（Ciphers）管理
+- `POST /api/ciphers/create` - 创建密码项
+- `POST /api/ciphers` - 批量创建密码项
+- `DELETE /api/ciphers` - 批量硬删除密码项
+- `PUT /api/ciphers/{id}` - 更新密码项
+- `DELETE /api/ciphers/{id}` - 硬删除密码项
+- `PUT/POST /api/ciphers/{id}/delete` - 软删除/硬删除密码项
+- `PUT /api/ciphers/{id}/restore` - 恢复密码项
+- `PUT/POST /api/ciphers/delete` - 批量软删除/硬删除
+- `PUT /api/ciphers/restore` - 批量恢复密码项
+
+### 文件夹管理
+- `POST /api/folders` - 创建文件夹
+- `PUT /api/folders/{id}` - 更新文件夹
+- `DELETE /api/folders/{id}` - 删除文件夹
+
+### Send 文件共享
+- `GET /api/sends` - 获取 Send 列表
+- `POST /api/sends` - 创建 Send
+- `POST /api/sends/file/v2` - 创建文件 Send
+- `POST /api/sends/access/{access_id}` - 访问 Send
+- `GET /api/sends/{send_id}` - 获取 Send 详情
+- `PUT /api/sends/{send_id}` - 更新 Send
+- `DELETE /api/sends/{send_id}` - 删除 Send
+- `PUT /api/sends/{send_id}/remove-password` - 移除 Send 密码
+- `POST /api/sends/{send_id}/access/file/{file_id}` - 访问文件
+- `GET /api/sends/{send_id}/{file_id}` - 下载文件
+- `POST /api/sends/{send_id}/file/{file_id}` - 上传文件（最大 100MB）
+- `POST /sends/{send_id}/file/{file_id}` - 上传文件（兼容路径）
+- `GET /send-verify` - Turnstile 验证页面
+- `POST /api/send-verify` - Turnstile 验证
+
+### 设置与兼容性
+- `GET/POST/PUT /api/settings/domains` - 获取/更新域名设置
+- `GET /api/collections` - 获取集合列表（兼容 Vaultwarden，返回空数组）
+- `GET /api/policies` - 获取策略列表（兼容 Vaultwarden，返回空数组）
+- `GET /api/organizations` - 获取组织列表（兼容 Vaultwarden，返回空数组）
+
+### 使用统计
+- `GET /api/d1/usage` - 获取 D1 数据库使用统计
+
+### 认证请求（Admin Request）
+- `GET/POST /api/auth-requests` - 获取/创建认证请求
+- `POST /api/auth-requests/admin-request` - 创建管理员认证请求
+- `GET /api/auth-requests/pending` - 获取待处理认证请求
+- `GET/PUT /api/auth-requests/{id}` - 获取/更新认证请求
+- `GET /api/auth-requests/{id}/response` - 获取认证请求响应
 
 ## 🔔 消息通知
 

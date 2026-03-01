@@ -37,7 +37,7 @@ const SEND_ACCESS_COOKIE: &str = "cf_send_pass";
 /// Cookie name for frontend JS detection (non-HttpOnly, simple flag)
 const SEND_ACCESS_FLAG_COOKIE: &str = "cf_send_pass_ok";
 /// Cookie / token validity in minutes
-const SEND_ACCESS_COOKIE_TTL_MINUTES: i64 = 30;
+const SEND_ACCESS_COOKIE_TTL_MINUTES: i64 = 5;
 /// Cloudflare Turnstile siteverify endpoint
 const TURNSTILE_VERIFY_URL: &str = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 

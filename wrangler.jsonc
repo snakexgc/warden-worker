@@ -2,7 +2,7 @@
 	// Worker 基本信息
 	"name": "warden-worker",
 	"main": "src/entry.js",
-	"compatibility_date": "2026-02-18",
+	"compatibility_date": "2026-02-28",
 	// 环境变量配置
 	"vars": {
 		// 日志级别配置格式: <全局级别>[,<模块>=<级别>]*
@@ -13,8 +13,6 @@
 		// 通知事件开关: none | all | 逗号分隔列表
 		// 可选项: login,login_failed,password_hint,password,email,kdf,cipher_create,cipher_update,cipher_delete,import,send_create,send_delete,2fa_enable,2fa_disable,2fa_recovery_code_view,2fa_recover,token_refresh,sync,webauthn_credential_create,webauthn_credential_delete,webauthn_credential_update,webauthn_login
 		"NOTIFY_EVENTS": "all",
-		// Turnstile 站点公钥（前端渲染 challenge 用）
-		"TURNSTILE_SITE_KEY": "0x4AAAAAACjUbMzTk3B_F-G3",
 		// ===============================
 		// 动态 vaultwarden.css 配置（参考 Vaultwarden 设计）
 		// 说明：
@@ -45,7 +43,7 @@
 		// 是否显示 Emergency Access 入口（false=隐藏）
 		"VW_CSS_EMERGENCY_ACCESS_ALLOWED": "true",
 		// 是否加载用户自定义 CSS（配合 VW_CSS_USER 使用）
-		"VW_CSS_LOAD_USER_CSS": "true",
+		"VW_CSS_LOAD_USER_CSS": "true"
 		// 用户自定义 CSS 建议通过 Secret 注入，不建议明文写入 vars：
 		// wrangler secret put VW_CSS_USER
 		// 读取优先级：Secret(VW_CSS_USER) > vars(VW_CSS_USER)
@@ -69,7 +67,7 @@
 			"name": "SEND_ACCESS_LIMITER",
 			"namespace_id": "2001",
 			"simple": {
-				"limit": 10,
+				"limit": 5,
 				"period": 60
 			}
 		}
