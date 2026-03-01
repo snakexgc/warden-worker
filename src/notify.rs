@@ -826,15 +826,6 @@ pub enum EmailType {
     TwoFactorLogin,
 }
 
-impl EmailType {
-    pub fn key(self) -> &'static str {
-        match self {
-            EmailType::TwoFactorEmail => "2fa_email",
-            EmailType::TwoFactorLogin => "2fa_login",
-        }
-    }
-}
-
 pub async fn publish_auth_request(
     env: &Env,
     user_id: &str,

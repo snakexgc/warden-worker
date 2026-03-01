@@ -165,10 +165,10 @@ pub struct TokenRequest {
     token: Option<String>,
     #[serde(rename = "deviceResponse")]
     device_response: Option<String>,
-    #[allow(dead_code)]
-    scope: Option<String>,
-    #[allow(dead_code)]
-    client_id: Option<String>,
+    #[serde(rename = "scope")]
+    _scope: Option<String>,
+    #[serde(rename = "client_id")]
+    _client_id: Option<String>,
     #[serde(rename = "deviceIdentifier", alias = "device_identifier", alias = "deviceId")]
     device_identifier: Option<String>,
     #[serde(rename = "deviceName", alias = "device_name")]
@@ -578,7 +578,6 @@ async fn invalid_two_factor_response(
 }
 
 #[worker::send]
-#[allow(unused_assignments)]
 pub async fn token(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -739,7 +738,6 @@ pub async fn token(
             // 它只在登录验证时作为一种特殊的恢复选项处理
             
             let mut remember_token_to_return: Option<String> = None;
-            let mut two_factor_verified: bool = false;
             if two_factor_enabled {
                 let wants_remember = payload.two_factor_remember.unwrap_or(0) == 1;
                 let provider = payload.two_factor_provider;
@@ -779,7 +777,6 @@ pub async fn token(
                         return Ok(two_factor_required_response(&providers, &user.id, email_data, &headers, &db).await);
                     }
 
-                    two_factor_verified = true;
                     if wants_remember && payload.device_identifier.is_some() {
                         remember_token_to_return = Some(generate_remember_token());
                     }
@@ -1032,7 +1029,7 @@ pub async fn token(
                     if wants_remember && payload.device_identifier.is_some() {
                         remember_token_to_return = Some(generate_remember_token());
                     }
-                } else if !two_factor_verified {
+                } else {
                     let email_data = get_email_2fa_display_info(&providers, &user.id, &state).await;
                     return Ok(two_factor_required_response(&providers, &user.id, email_data, &headers, &db).await);
                 }

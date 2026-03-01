@@ -130,8 +130,8 @@ pub struct SendData {
     pub file: Option<Value>,
     #[serde(default, deserialize_with = "deserialize_trimmed_i64_opt")]
     pub file_length: Option<i64>,
-    #[allow(dead_code)]
-    pub id: Option<String>,
+    #[serde(rename = "id")]
+    pub _id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -139,9 +139,8 @@ pub struct SendData {
 pub struct SendAccessData {
     pub password: Option<String>,
     /// Kept for deserialization compatibility; Turnstile is now enforced via cookie.
-    #[allow(dead_code)]
     #[serde(rename = "cf-turnstile-response", alias = "cfTurnstileResponse")]
-    pub cf_turnstile_response: Option<String>,
+    pub _cf_turnstile_response: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

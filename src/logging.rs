@@ -134,55 +134,17 @@ fn parse_single_level(s: &str) -> Option<LevelFilter> {
 }
 
 pub mod targets {
-    #[allow(dead_code)]
-    pub const REQUEST: &str = "request";
-    #[allow(dead_code)]
-    pub const RESPONSE: &str = "response";
     pub const AUTH: &str = "auth";
     pub const API: &str = "api";
     pub const DB: &str = "db";
-    #[allow(dead_code)]
-    pub const CRYPTO: &str = "crypto";
     pub const EXTERNAL: &str = "external";
     pub const NOTIFY: &str = "notify";
-    #[allow(dead_code)]
-    pub const ERROR: &str = "error";
-    #[allow(dead_code)]
-    pub const PANIC: &str = "panic";
-}
-
-#[macro_export]
-macro_rules! log_request {
-    ($($arg:tt)*) => {
-        log::info!(target: $crate::logging::targets::REQUEST, $($arg)*)
-    };
-}
-
-#[macro_export]
-macro_rules! log_response {
-    ($($arg:tt)*) => {
-        log::info!(target: $crate::logging::targets::RESPONSE, $($arg)*)
-    };
 }
 
 #[macro_export]
 macro_rules! log_auth {
     ($($arg:tt)*) => {
         log::info!(target: $crate::logging::targets::AUTH, $($arg)*)
-    };
-}
-
-#[macro_export]
-macro_rules! log_error {
-    ($($arg:tt)*) => {
-        log::error!(target: $crate::logging::targets::ERROR, $($arg)*)
-    };
-}
-
-#[macro_export]
-macro_rules! log_warn {
-    ($($arg:tt)*) => {
-        log::warn!(target: $crate::logging::targets::ERROR, $($arg)*)
     };
 }
 
@@ -197,13 +159,6 @@ macro_rules! log_api {
 macro_rules! log_db {
     ($($arg:tt)*) => {
         log::debug!(target: $crate::logging::targets::DB, $($arg)*)
-    };
-}
-
-#[macro_export]
-macro_rules! log_crypto {
-    ($($arg:tt)*) => {
-        log::debug!(target: $crate::logging::targets::CRYPTO, $($arg)*)
     };
 }
 

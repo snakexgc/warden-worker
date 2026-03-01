@@ -4,8 +4,7 @@ use worker::{durable_object, DurableObject, Env, HttpRequest, Request, Response,
 
 #[durable_object]
 pub struct HeavyDo {
-    #[allow(dead_code)]
-    state: State,
+    _state: State,
     env: Env,
     router: axum::Router,
 }
@@ -21,7 +20,11 @@ impl DurableObject for HeavyDo {
             .allow_origin(Any);
         let router = crate::router::api_router(env.clone(), None).layer(cors);
 
-        Self { state, env, router }
+        Self {
+            _state: state,
+            env,
+            router,
+        }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {

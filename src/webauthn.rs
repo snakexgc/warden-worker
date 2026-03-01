@@ -22,7 +22,6 @@ pub const WEBAUTHN_PRF_STATUS_SUPPORTED: i32 = 1;
 pub const WEBAUTHN_PRF_STATUS_UNSUPPORTED: i32 = 2;
 pub const WEBAUTHN_USE_LOGIN: &str = "login";
 pub const WEBAUTHN_USE_2FA: &str = "2fa";
-pub const WEBAUTHN_USE_BOTH: &str = "both";
 const CHALLENGE_KIND_REGISTER: &str = "register";
 const CHALLENGE_KIND_LOGIN: &str = "login";
 const CHALLENGE_TTL_SECONDS: i64 = 300;
@@ -66,8 +65,6 @@ struct StoredCredentialRow {
     credential_id_b64url: String,
     public_key_cose_b64: String,
     sign_count: i64,
-    #[allow(dead_code)]
-    name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1002,7 +999,6 @@ pub async fn verify_passwordless_login_assertion(
             AppError::NotFound(msg) => msg,
             AppError::Database => "database error".to_string(),
             AppError::Worker(e) => format!("worker error: {e}"),
-            AppError::Crypto(msg) => msg,
             AppError::Internal => "internal server error".to_string(),
             AppError::JsonWebToken(_) => "invalid token".to_string(),
             AppError::TooManyRequests(msg) => msg,
@@ -1539,16 +1535,11 @@ async fn list_stored_credentials(
             .ok_or(AppError::Database)?
             .to_string();
         let sign_count = row.get("sign_count").and_then(|v| v.as_i64()).unwrap_or(0);
-        let name = row
-            .get("name")
-            .and_then(|v| v.as_str())
-            .map(|v| v.to_string());
         out.push(StoredCredentialRow {
             slot_id,
             credential_id_b64url,
             public_key_cose_b64,
             sign_count,
-            name,
         });
     }
     Ok(out)
@@ -1598,17 +1589,12 @@ async fn get_stored_credential(
         .ok_or(AppError::Database)?
         .to_string();
     let sign_count = row.get("sign_count").and_then(|v| v.as_i64()).unwrap_or(0);
-    let name = row
-        .get("name")
-        .and_then(|v| v.as_str())
-        .map(|v| v.to_string());
 
     Ok(Some(StoredCredentialRow {
         slot_id,
         credential_id_b64url,
         public_key_cose_b64,
         sign_count,
-        name,
     }))
 }
 

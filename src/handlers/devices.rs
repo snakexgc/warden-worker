@@ -130,8 +130,8 @@ pub async fn knowndevice(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PushTokenRequest {
-    #[allow(dead_code)]
-    push_token: String,
+    #[serde(rename = "pushToken")]
+    _push_token: String,
 }
 
 #[worker::send]

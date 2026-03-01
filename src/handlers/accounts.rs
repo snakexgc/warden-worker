@@ -129,7 +129,6 @@ pub struct AuthenticationData {
     #[serde(alias = "Kdf")]
     pub kdf: KdfData,
     #[serde(alias = "masterPasswordAuthenticationHash", alias = "MasterPasswordAuthenticationHash")]
-    #[allow(dead_code)]
     pub master_password_authentication_hash: String,
 }
 
@@ -141,7 +140,6 @@ pub struct UnlockData {
     #[serde(alias = "Kdf")]
     pub kdf: KdfData,
     #[serde(alias = "masterKeyWrappedUserKey", alias = "MasterKeyWrappedUserKey")]
-    #[allow(dead_code)]
     pub master_key_wrapped_user_key: String,
 }
 
@@ -168,10 +166,8 @@ pub struct ChangeKdfFlatRequest {
     #[serde(alias = "kdfIterations", alias = "iterations")]
     pub kdf_iterations: i32,
     #[serde(alias = "kdfMemory", alias = "memory")]
-    #[allow(dead_code)]
     pub kdf_memory: Option<i32>,
     #[serde(alias = "kdfParallelism", alias = "parallelism")]
-    #[allow(dead_code)]
     pub kdf_parallelism: Option<i32>,
     #[serde(alias = "masterPasswordHash", alias = "MasterPasswordHash")]
     pub master_password_hash: String,
@@ -520,7 +516,7 @@ pub async fn register(
         id: Uuid::new_v4().to_string(),
         name: Some(name),
         email,
-        email_verified: false,
+        email_verified: true,
         avatar_color: None,
         master_password_hash,
         master_password_hint,
@@ -729,7 +725,7 @@ pub async fn change_email(
     )
     .bind(&[
         new_email.clone().into(),
-        false.into(),
+        true.into(),
         new_master_password_hash.into(),
         payload.user_symmetric_key.into(),
         kdf_type.into(),
@@ -804,6 +800,11 @@ pub async fn post_kdf(
     let (new_master_password_hash, key, kdf_type, kdf_iterations, kdf_memory_in, kdf_parallelism_in) =
         match &payload {
         ChangeKdfPayload::Vw(p) => {
+            let _ = (
+                &p.authentication_data.master_password_authentication_hash,
+                &p.unlock_data.master_key_wrapped_user_key,
+            );
+
             if p.authentication_data.kdf != p.unlock_data.kdf {
                 return Err(AppError::BadRequest(
                     "KDF settings must be equal for authentication and unlock".to_string(),
@@ -959,7 +960,8 @@ pub async fn password_hint(
 pub struct SendVerificationEmailRequest {
     pub email: String,
     pub name: Option<String>,
-    pub receive_marketing_emails: bool,
+    #[serde(rename = "receiveMarketingEmails")]
+    pub _receive_marketing_emails: bool,
 }
 
 #[derive(Debug, Deserialize)]

@@ -273,18 +273,6 @@ pub async fn publish_auth_response(env: &Env, user_id: &str, auth_request_id: &s
     .await
 }
 
-#[allow(dead_code)]
-pub async fn close_anonymous_subscription(env: &Env, token: &str) -> Result<()> {
-    dispatch_internal(
-        env,
-        INTERNAL_CLOSE_ANONYMOUS_PATH,
-        &CloseAnonymousPayload {
-            token: token.to_string(),
-        },
-    )
-    .await
-}
-
 async fn dispatch_internal(env: &Env, path: &str, payload: &impl Serialize) -> Result<()> {
     let namespace = env.durable_object(DO_BINDING)?;
     let stub = namespace.id_from_name(DO_INSTANCE_NAME)?.get_stub()?;

@@ -2,7 +2,7 @@ use axum::{
     extract::{Multipart, Path, Query, State},
     http::HeaderMap,
     http::StatusCode,
-    response::{Html, Response},
+    response::Response,
     Json,
 };
 use base64::{engine::general_purpose, Engine as _};
@@ -112,7 +112,7 @@ async fn verify_turnstile_token(
         body.as_object_mut().unwrap().insert("remoteip".to_string(), Value::String(ip.to_string()));
     }
 
-    let mut headers = worker::Headers::new();
+    let headers = worker::Headers::new();
     headers.set("Content-Type", "application/json").map_err(|_| AppError::Internal)?;
     let mut init = worker::RequestInit::new();
     init.with_method(worker::Method::Post)
@@ -309,7 +309,7 @@ pub async fn post_send_verify(
 }
 
 /// Check that both D1 and R2 have at least 20% free space before allowing a file upload.
-async fn check_storage_quota(db: &worker::D1Database, state: &Arc<AppState>, incoming_file_size: i64) -> Result<(), AppError> {
+async fn check_storage_quota(db: &worker::D1Database, incoming_file_size: i64) -> Result<(), AppError> {
     // --- D1 check ---
     let d1_used: Option<i64> = db
         .prepare(
@@ -994,7 +994,7 @@ pub async fn post_send_file_v2(
     }
 
     // Reject early if D1 or R2 is nearly full
-    check_storage_quota(&db, &state, file_length).await?;
+    check_storage_quota(&db, file_length).await?;
 
     let name = payload.name.clone();
     let notes = payload.notes.clone();

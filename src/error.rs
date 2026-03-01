@@ -24,9 +24,6 @@ pub enum AppError {
     #[error("Too many requests: {0}")]
     TooManyRequests(String),
 
-    #[error("Crypto error: {0}")]
-    Crypto(String),
-
     #[error(transparent)]
     JsonWebToken(#[from] jsonwebtoken::errors::Error),
 
@@ -49,8 +46,6 @@ impl IntoResponse for AppError {
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg),
             AppError::TooManyRequests(msg) => (StatusCode::TOO_MANY_REQUESTS, msg),
-            AppError::Crypto(msg) => (StatusCode::BAD_REQUEST, msg),
-
             AppError::JsonWebToken(_) => (StatusCode::UNAUTHORIZED, "Invalid token".to_string()),
             AppError::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
