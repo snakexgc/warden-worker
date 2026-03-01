@@ -181,12 +181,12 @@ pub fn api_router(env: Env, ctx: Option<Context>) -> Router<()> {
         .route(
             "/api/sends/{send_id}/file/{file_id}",
             post(sends::post_send_file_v2_data)
-                .layer(DefaultBodyLimit::max(100 * 1024 * 1024)),
+                .layer(DefaultBodyLimit::max(1024 * 1024 * 1024)),
         )
         .route(
             "/sends/{send_id}/file/{file_id}",
             post(sends::post_send_file_v2_data)
-                .layer(DefaultBodyLimit::max(100 * 1024 * 1024)),
+                .layer(DefaultBodyLimit::max(1024 * 1024 * 1024)),
         )
         .route("/api/collections", get(compat::get_collections))
         .route("/api/policies", get(compat::get_policies))

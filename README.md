@@ -254,7 +254,7 @@ wrangler deploy
 - `PUT /api/sends/{send_id}/remove-password` - 移除 Send 密码
 - `POST /api/sends/{send_id}/access/file/{file_id}` - 访问文件
 - `GET /api/sends/{send_id}/{file_id}` - 下载文件
-- `POST /api/sends/{send_id}/file/{file_id}` - 上传文件（最大 100MB）
+- `POST /api/sends/{send_id}/file/{file_id}` - 上传文件（最大 1024MB）
 - `POST /sends/{send_id}/file/{file_id}` - 上传文件（兼容路径）
 - `GET /send-verify` - Turnstile 验证页面
 - `POST /api/send-verify` - Turnstile 验证
