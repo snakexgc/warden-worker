@@ -63,6 +63,14 @@
 	],
 	"ratelimits": [
 		{
+			"name": "LOGIN_LIMITER",
+			"namespace_id": "2002",
+			"simple": {
+				"limit": 2,
+				"period": 60
+			}
+		},
+		{
 			"name": "SEND_ACCESS_LIMITER",
 			"namespace_id": "2001",
 			"simple": {

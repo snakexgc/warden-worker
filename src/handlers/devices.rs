@@ -745,6 +745,7 @@ pub async fn get_auth_request(
     Path(auth_request_id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
+    claims.verify_security_stamp(&db).await?;
     ensure_auth_requests_table(&db).await?;
     purge_expired_auth_requests(&db).await?;
 
@@ -784,6 +785,7 @@ pub async fn put_auth_request(
     Json(payload): Json<AuthResponseRequest>,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
+    claims.verify_security_stamp(&db).await?;
     ensure_device_management_tables(&db).await?;
     purge_expired_auth_requests(&db).await?;
     let user_id = claims.sub.clone();
@@ -818,6 +820,28 @@ pub async fn put_auth_request(
                 "AuthRequest doesn't exist".to_string(),
             ));
         }
+    }
+
+    let approver_device_type = infer_device_type(&headers).unwrap_or(14) as i32;
+    let db_approver_device_type: Option<i64> = db
+        .prepare(
+            "SELECT device_type
+             FROM devices
+             WHERE user_id = ?1 AND device_identifier = ?2
+             LIMIT 1",
+        )
+        .bind(&[
+            user_id.clone().into(),
+            approver_device_identifier.to_string().into(),
+        ])?
+        .first(Some("device_type"))
+        .await
+        .map_err(|_| AppError::Database)?;
+
+    if db_approver_device_type.map(|v| v as i32) != Some(approver_device_type) {
+        return Err(AppError::BadRequest(
+            "AuthRequest doesn't exist".to_string(),
+        ));
     }
 
     let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
@@ -963,6 +987,33 @@ pub async fn get_auth_request_response(
         return Ok(auth_request_not_exist_response());
     };
 
+    let request_ip = row
+        .get("request_ip")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let current_ip = client_ip_from_headers(&headers);
+    if current_ip != request_ip {
+        return Ok(auth_request_not_exist_response());
+    }
+
+    let request_device_type = row
+        .get("device_type")
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32)
+        .unwrap_or(14);
+    let current_device_type = infer_device_type(&headers).unwrap_or(14) as i32;
+    if request_device_type != current_device_type {
+        return Ok(auth_request_not_exist_response());
+    }
+
+    if row
+        .get("authentication_date")
+        .and_then(|v| v.as_str())
+        .is_some()
+    {
+        return Ok(auth_request_not_exist_response());
+    }
+
     let row_code_hash = row
         .get("access_code_hash")
         .and_then(|v| v.as_str())
@@ -997,6 +1048,7 @@ pub async fn get_auth_requests_pending(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
+    claims.verify_security_stamp(&db).await?;
     ensure_auth_requests_table(&db).await?;
     purge_expired_auth_requests(&db).await?;
 

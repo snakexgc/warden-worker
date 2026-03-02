@@ -19,6 +19,8 @@ use crate::{auth::Claims, crypto, db, error::AppError, logging::targets, models:
 use crate::notify::{self, NotifyContext, NotifyEvent};
 use crate::router::AppState;
 
+const LOGIN_RATE_LIMITER_BINDING: &str = "LOGIN_LIMITER";
+
 /// 后台更新设备信息
 /// 将设备表的创建和更新操作放入后台执行，减少登录响应延迟
 fn update_device_background(
@@ -426,6 +428,49 @@ fn set_cookie(
     Ok(())
 }
 
+fn client_ip_from_headers(headers: &HeaderMap) -> String {
+    if let Some(ip) = headers
+        .get("cf-connecting-ip")
+        .or_else(|| headers.get("CF-Connecting-IP"))
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        return ip.to_string();
+    }
+
+    if let Some(ip) = headers
+        .get("x-forwarded-for")
+        .or_else(|| headers.get("X-Forwarded-For"))
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        return ip.to_string();
+    }
+
+    "0.0.0.0".to_string()
+}
+
+async fn enforce_login_rate_limit(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    username: &str,
+) -> Result<(), AppError> {
+    let limiter = match state.env.rate_limiter(LOGIN_RATE_LIMITER_BINDING) {
+        Ok(l) => l,
+        Err(_) => return Ok(()),
+    };
+    let ip = client_ip_from_headers(headers);
+    let key = format!("login:{}:{}", ip, username.trim().to_lowercase());
+    let outcome = limiter.limit(key).await.map_err(|_| AppError::Internal)?;
+    if !outcome.success {
+        return Err(AppError::TooManyRequests("Too many login attempts".to_string()));
+    }
+    Ok(())
+}
+
 async fn get_email_2fa_display_info(
     providers: &[i32],
     user_id: &str,
@@ -589,6 +634,7 @@ pub async fn token(
             let username = payload
                 .username
                 .ok_or_else(|| AppError::BadRequest("Missing username".to_string()))?;
+            enforce_login_rate_limit(&state, &headers, &username).await?;
             let password_hash = if payload.auth_request.is_some() {
                 payload.password.unwrap_or_default()
             } else {
@@ -657,6 +703,48 @@ pub async fn token(
                     return Err(AppError::Unauthorized("Invalid credentials".to_string()));
                 }
 
+                let already_authenticated = ar_row
+                    .get("authentication_date")
+                    .and_then(|v| v.as_str())
+                    .is_some();
+                if already_authenticated {
+                    return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+                }
+
+                let request_device_identifier = ar_row
+                    .get("request_device_identifier")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let request_device_type = ar_row
+                    .get("device_type")
+                    .and_then(|v| v.as_i64())
+                    .map(|v| v as i32)
+                    .unwrap_or(14);
+                let request_ip = ar_row
+                    .get("request_ip")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+
+                let payload_device_identifier = payload
+                    .device_identifier
+                    .as_deref()
+                    .ok_or_else(|| AppError::Unauthorized("Invalid credentials".to_string()))?;
+                if payload_device_identifier != request_device_identifier {
+                    return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+                }
+
+                let payload_device_type = payload
+                    .device_type
+                    .ok_or_else(|| AppError::Unauthorized("Invalid credentials".to_string()))?;
+                if payload_device_type != request_device_type {
+                    return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+                }
+
+                let current_ip = client_ip_from_headers(&headers);
+                if current_ip != request_ip {
+                    return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+                }
+
                 // Verify access code
                 let stored_hash = ar_row
                     .get("access_code_hash")
@@ -668,6 +756,26 @@ pub async fn token(
                 if !constant_time_eq(stored_hash.as_bytes(), candidate_hash.as_bytes()) {
                     return Err(AppError::Unauthorized("Invalid credentials".to_string()));
                 }
+
+                db.prepare(
+                    "UPDATE auth_requests
+                     SET authentication_date = ?1
+                     WHERE id = ?2 AND user_id = ?3 AND authentication_date IS NULL",
+                )
+                .bind(&[
+                    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true).into(),
+                    auth_request_id.into(),
+                    user.id.clone().into(),
+                ])?
+                .run()
+                .await
+                .map_err(|_| AppError::Database)?;
+
+                db.prepare("DELETE FROM auth_requests WHERE id = ?1 AND user_id = ?2")
+                    .bind(&[auth_request_id.into(), user.id.clone().into()])?
+                    .run()
+                    .await
+                    .map_err(|_| AppError::Database)?;
 
                 // Auth-request login bypasses 2FA and remember-device flow
                 let user_id = user.id.clone();

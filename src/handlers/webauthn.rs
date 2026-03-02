@@ -56,7 +56,7 @@ impl SecretVerificationData {
                 }
                 Ok(())
             }
-            (None, Some(otp)) => two_factor::validate_protected_action_otp(db, user_id, otp, false).await,
+            (None, Some(otp)) => two_factor::validate_protected_action_otp(db, user_id, otp, true).await,
             _ => Err(AppError::BadRequest("No validation provided".to_string())),
         }
     }
