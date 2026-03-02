@@ -342,6 +342,13 @@ pub async fn post_security_stamp(
     let now = Utc::now().to_rfc3339();
     let security_stamp = Uuid::new_v4().to_string();
 
+    // Delete all devices for this user (matching vaultwarden behavior)
+    db.prepare("DELETE FROM devices WHERE user_id = ?1")
+        .bind(&[claims.sub.clone().into()])?
+        .run()
+        .await
+        .map_err(|_| AppError::Database)?;
+
     db.prepare("UPDATE users SET security_stamp = ?1, updated_at = ?2 WHERE id = ?3")
         .bind(&[
             security_stamp.clone().into(),
