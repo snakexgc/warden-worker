@@ -575,6 +575,20 @@ pub async fn delete_send(
         .await?
         .ok_or_else(|| AppError::NotFound("Send not found".to_string()))?;
 
+    // 记录删除请求的详细信息
+    log::info!(
+        target: targets::API,
+        "send.delete.request user_id={} send_id={} type={} deletion_date={} expiration_date={:?} access_count={} max_access_count={:?} disabled={}",
+        claims.sub,
+        send_id,
+        owned.r#type,
+        owned.deletion_date,
+        owned.expiration_date,
+        owned.access_count,
+        owned.max_access_count,
+        owned.disabled
+    );
+
     if owned.r#type == SEND_TYPE_FILE {
         let file_rows: Vec<Value> = db
             .prepare("SELECT r2_object_key, storage_type FROM send_files WHERE send_id = ?1 AND user_id = ?2")
@@ -584,6 +598,14 @@ pub async fn delete_send(
             .map_err(|_| AppError::Database)?
             .results()?;
 
+        log::info!(
+            target: targets::API,
+            "send.delete.files user_id={} send_id={} file_count={}",
+            claims.sub,
+            send_id,
+            file_rows.len()
+        );
+
         if let Ok(bucket) = state.env.bucket(SEND_FILES_BUCKET_BINDING) {
             for row in file_rows {
                 let storage_type = row
@@ -591,12 +613,60 @@ pub async fn delete_send(
                     .and_then(|v| v.as_str())
                     .unwrap_or("d1_base64");
                 if storage_type != "r2" {
+                    log::debug!(
+                        target: targets::API,
+                        "send.delete.file.skip_d1 user_id={} send_id={} file_storage_type={}",
+                        claims.sub,
+                        send_id,
+                        storage_type
+                    );
                     continue;
                 }
                 if let Some(key) = row.get("r2_object_key").and_then(|v| v.as_str()) {
-                    let _ = bucket.delete(key.to_string()).await;
+                    log::info!(
+                        target: targets::API,
+                        "send.delete.r2_object.deleting user_id={} send_id={} object_key={}",
+                        claims.sub,
+                        send_id,
+                        key
+                    );
+                    match bucket.delete(key.to_string()).await {
+                        Ok(_) => {
+                            log::info!(
+                                target: targets::API,
+                                "send.delete.r2_object.success user_id={} send_id={} object_key={}",
+                                claims.sub,
+                                send_id,
+                                key
+                            );
+                        }
+                        Err(e) => {
+                            log::error!(
+                                target: targets::API,
+                                "send.delete.r2_object.error user_id={} send_id={} object_key={} error={:?}",
+                                claims.sub,
+                                send_id,
+                                key,
+                                e
+                            );
+                        }
+                    }
+                } else {
+                    log::warn!(
+                        target: targets::API,
+                        "send.delete.r2_object.missing_key user_id={} send_id={}",
+                        claims.sub,
+                        send_id
+                    );
                 }
             }
+        } else {
+            log::error!(
+                target: targets::API,
+                "send.delete.r2_bucket.access_error user_id={} send_id={}",
+                claims.sub,
+                send_id
+            );
         }
 
         query!(
@@ -608,6 +678,13 @@ pub async fn delete_send(
         .map_err(|_| AppError::Database)?
         .run()
         .await?;
+
+        log::info!(
+            target: targets::API,
+            "send.delete.db.send_files user_id={} send_id={}",
+            claims.sub,
+            send_id
+        );
     }
 
     query!(
@@ -619,6 +696,13 @@ pub async fn delete_send(
     .map_err(|_| AppError::Database)?
     .run()
     .await?;
+
+    log::info!(
+        target: targets::API,
+        "send.delete.db.sends user_id={} send_id={}",
+        claims.sub,
+        send_id
+    );
 
     let meta = notify::extract_request_meta(&headers);
     notify::notify_background(
@@ -633,6 +717,14 @@ pub async fn delete_send(
             meta,
             ..Default::default()
         },
+    );
+
+    log::info!(
+        target: targets::API,
+        "send.delete.success user_id={} send_id={} type={}",
+        claims.sub,
+        send_id,
+        owned.r#type
     );
 
     Ok(Json(json!({})))
