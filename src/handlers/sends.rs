@@ -710,9 +710,9 @@ pub async fn delete_send(
         state.env.clone(),
         NotifyEvent::SendDelete,
         NotifyContext {
-            user_id: Some(claims.sub),
-            user_email: Some(claims.email),
-            send_id: Some(send_id),
+            user_id: Some(claims.sub.clone()),
+            user_email: Some(claims.email.clone()),
+            send_id: Some(send_id.clone()),
             detail: Some(format!("type={}", owned.r#type)),
             meta,
             ..Default::default()
