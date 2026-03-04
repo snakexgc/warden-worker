@@ -150,11 +150,6 @@ app-user-layout app-danger-zone button:nth-child(1) {
     display: none !important;
 }
 
-/* 隐藏用户设置中的 Log in with passkey 设置 */
-app-user-layout app-password-settings app-webauthn-login-settings {
-    display: none !important;
-}
-
 /* 侧边栏折叠图标改为 Vaultwarden 图标 */
 bit-nav-logo bit-nav-item a:before {
     content: "";
@@ -215,10 +210,12 @@ pub async fn vaultwarden_css(State(state): State<Arc<AppState>>) -> Response {
     let sso_enabled = env_bool(env, "VW_CSS_SSO_ENABLED", false);
     let sso_only = env_bool(env, "VW_CSS_SSO_ONLY", false);
     let passkey_2fa_supported = env_bool(env, "VW_CSS_PASSKEY_2FA_SUPPORTED", false);
+    let passkey_login_enabled = env_bool(env, "VW_CSS_PASSKEY_LOGIN_ENABLED", false);
     let remember_2fa_disabled = env_bool(env, "VW_CSS_REMEMBER_2FA_DISABLED", false);
     let mail_2fa_enabled = env_bool(env, "VW_CSS_MAIL_2FA_ENABLED", true);
     let mail_enabled = env_bool(env, "VW_CSS_MAIL_ENABLED", true);
     let yubico_enabled = env_bool(env, "VW_CSS_YUBICO_ENABLED", false);
+    let duo_enabled = env_bool(env, "VW_CSS_DUO_ENABLED", false);
     let emergency_access_allowed = env_bool(env, "VW_CSS_EMERGENCY_ACCESS_ALLOWED", true);
     let load_user_css = env_bool(env, "VW_CSS_LOAD_USER_CSS", true);
 
@@ -272,7 +269,15 @@ pub async fn vaultwarden_css(State(state): State<Arc<AppState>>) -> Response {
         add_hide_rule(
             &mut css,
             "Hide passkey 2FA entries when unsupported",
-            ".providers-2fa-7, .vw-passkey-login",
+            ".providers-2fa-7",
+        );
+    }
+
+    if !passkey_login_enabled {
+        add_hide_rule(
+            &mut css,
+            "Hide passkey login entries when disabled",
+            ".vw-passkey-login, app-login-via-webauthn, app-webauthn-login-settings",
         );
     }
 
@@ -297,6 +302,14 @@ pub async fn vaultwarden_css(State(state): State<Arc<AppState>>) -> Response {
             &mut css,
             "Hide YubiKey OTP 2FA entries when disabled",
             ".providers-2fa-3",
+        );
+    }
+
+    if !duo_enabled {
+        add_hide_rule(
+            &mut css,
+            "Hide DUO 2FA entries when disabled",
+            ".providers-2fa-2",
         );
     }
 
