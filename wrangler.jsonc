@@ -10,8 +10,19 @@
 		// 模块级别覆盖示例: info,auth=debug,external=debug
 		// 可用模块: auth, db, external, notify
 		"LOG_LEVEL": "info",
-		// 通知事件开关: none | all | 逗号分隔列表
-		// 可选项: login,login_failed,password_hint,password,email,kdf,cipher_create,cipher_update,cipher_delete,import,send_create,send_delete,2fa_enable,2fa_disable,2fa_recovery_code_view,2fa_recover,token_refresh,sync,webauthn_credential_create,webauthn_credential_delete,webauthn_credential_update,webauthn_login
+		// ===============================
+		// 通知系统配置
+		// ===============================
+		// 最小通知级别: info, warning, error
+		// info: 所有事件都通知
+		// warning: 只通知 warning 和 error 级别的事件
+		// error: 只通知 error 级别的事件
+		"NOTIFY_LEVEL": "warning",
+		// 启用的通知事件: none | all | 逗号分隔列表
+		// 可选项: login,login_failed,password_hint,password,email,kdf,cipher_create,cipher_update,cipher_delete,import,send_create,send_delete,2fa_enable,2fa_disable,2fa_recovery_code_view,2fa_recover,token_refresh,sync,auth_request,auth_response,webauthn_credential_create,webauthn_credential_delete,webauthn_credential_update,webauthn_login
+		// 注意: 通知通道通过 Secrets 配置启用
+		// - WEWORK_WEBHOOK_URL: 企业微信机器人 Webhook
+		// - TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID: Telegram Bot
 		"NOTIFY_EVENTS": "all",
 		// ===============================
 		// 动态 vaultwarden.css 配置（参考 Vaultwarden 设计）
