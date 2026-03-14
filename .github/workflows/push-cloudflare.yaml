@@ -7,11 +7,261 @@ on:
         branches: [main, uat, release*]
     workflow_dispatch:
 
+env:
+    D1_DATABASE_NAME: vaultsql
+    R2_BUCKET_NAME: warden-send-files
+
 jobs:
+    preflight:
+        name: Preflight Checks
+        runs-on: ubuntu-latest
+        outputs:
+            r2_bucket_exists: ${{ steps.check_r2.outputs.bucket_exists }}
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Check required secrets
+              run: |
+                  missing_secrets=""
+                  
+                  if [ -z "${{ secrets.CLOUDFLARE_API_TOKEN }}" ]; then
+                      missing_secrets="${missing_secrets}CLOUDFLARE_API_TOKEN, "
+                  fi
+                  
+                  if [ -z "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}" ]; then
+                      missing_secrets="${missing_secrets}CLOUDFLARE_ACCOUNT_ID, "
+                  fi
+                  
+                  if [ -n "$missing_secrets" ]; then
+                      echo "::error::Missing required secrets: ${missing_secrets%,*}"
+                      echo ""
+                      echo "Please configure the following secrets in your repository settings:"
+                      echo "  - CLOUDFLARE_API_TOKEN: Cloudflare API token with appropriate permissions"
+                      echo "  - CLOUDFLARE_ACCOUNT_ID: Your Cloudflare account ID"
+                      exit 1
+                  fi
+                  
+                  echo "All required secrets are configured."
+
+            - name: Validate Cloudflare API Token Permissions
+              env:
+                  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+                  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+              run: |
+                  echo "Validating Cloudflare API Token permissions..."
+                  
+                  # Test 1: Check if we can access account info (requires Account Settings > Read)
+                  echo "Checking Account Settings > Read permission..."
+                  account_response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CLOUDFLARE_ACCOUNT_ID }}" \
+                      -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}")
+                  
+                  if ! echo "$account_response" | grep -q '"success":true'; then
+                      echo "::error::Failed to access account info. Missing 'Account > Account Settings > Read' permission."
+                      echo "Response: $account_response"
+                      exit 1
+                  fi
+                  echo "✓ Account Settings > Read permission OK"
+                  
+                  # Test 2: Check if we can list D1 databases (requires Workers D1 > Edit)
+                  echo "Checking Workers D1 > Edit permission..."
+                  d1_response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CLOUDFLARE_ACCOUNT_ID }}/d1/database" \
+                      -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}")
+                  
+                  # Check if response contains valid data
+                  if echo "$d1_response" | grep -qE '"result"|"success":true|^\s*\['; then
+                      echo "✓ Workers D1 > Edit permission OK"
+                  else
+                      echo "::error::Failed to list D1 databases. Missing 'Account > Workers D1 > Edit' permission."
+                      echo "Response (first 500 chars): ${d1_response:0:500}"
+                      exit 1
+                  fi
+                  
+                  # Test 3: Check if we can list R2 buckets (requires R2 > Edit)
+                  echo "Checking R2 > Edit permission..."
+                  r2_response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CLOUDFLARE_ACCOUNT_ID }}/r2/buckets" \
+                      -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}")
+                  
+                  # Check if response contains valid data
+                  if echo "$r2_response" | grep -qE '"result"|"success":true|^\s*\['; then
+                      echo "✓ R2 > Edit permission OK"
+                  else
+                      echo "::error::Failed to list R2 buckets. Missing 'Account > R2 > Edit' permission."
+                      echo "Response (first 500 chars): ${r2_response:0:500}"
+                      exit 1
+                  fi
+                  
+                  # Test 4: Check if we can access Workers scripts (requires Workers Scripts > Edit)
+                  echo "Checking Workers Scripts > Edit permission..."
+                  workers_response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CLOUDFLARE_ACCOUNT_ID }}/workers/scripts" \
+                      -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}")
+                  
+                  # Check if response contains valid data (result array or success:true)
+                  if echo "$workers_response" | grep -q '"result"'; then
+                      echo "✓ Workers Scripts > Edit permission OK"
+                  else
+                      echo "::error::Failed to access Workers scripts. Missing 'Account > Workers Scripts > Edit' permission."
+                      echo "Response (first 500 chars): ${workers_response:0:500}"
+                      exit 1
+                  fi
+                  
+                  # Test 5: Check user membership access (requires User > Memberships > Read)
+                  echo "Checking User > Memberships > Read permission..."
+                  membership_response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/user/memberships" \
+                      -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}")
+                  
+                  # Check if response contains valid data
+                  if echo "$membership_response" | grep -qE '"result"|"success":true'; then
+                      echo "✓ User > Memberships > Read permission OK"
+                  else
+                      echo "::error::Failed to access user memberships. Missing 'User > Memberships > Read' permission."
+                      echo "This permission is required for wrangler CLI authentication."
+                      echo "Response (first 500 chars): ${membership_response:0:500}"
+                      exit 1
+                  fi
+                  
+                  echo ""
+                  echo "✅ All required API Token permissions validated successfully!"
+                  echo ""
+                  echo "Validated permissions:"
+                  echo "  ✓ Account > Account Settings > Read"
+                  echo "  ✓ Account > Workers D1 > Edit"
+                  echo "  ✓ Account > R2 > Edit"
+                  echo "  ✓ Account > Workers Scripts > Edit"
+                  echo "  ✓ User > User Details > Read"
+                  echo "  ✓ User > Memberships > Read"
+
+            - name: Setup Wrangler
+              run: npm install -g wrangler@4.73.0
+
+            - name: Check R2 Bucket
+              id: check_r2
+              env:
+                  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+                  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+              run: |
+                  echo "Checking if R2 bucket '${{ env.R2_BUCKET_NAME }}' exists..."
+                  
+                  bucket_list_output=$(wrangler r2 bucket list 2>&1) || true
+                  echo "R2 bucket list output:"
+                  echo "$bucket_list_output"
+                  
+                  if echo "$bucket_list_output" | grep -wE "${{ env.R2_BUCKET_NAME }}" | grep -q .; then
+                      echo "R2 bucket '${{ env.R2_BUCKET_NAME }}' already exists."
+                      echo "bucket_exists=true" >> $GITHUB_OUTPUT
+                  else
+                      echo "R2 bucket '${{ env.R2_BUCKET_NAME }}' does not exist, will create."
+                      echo "bucket_exists=false" >> $GITHUB_OUTPUT
+                  fi
+
+    setup-infrastructure:
+        name: Setup Infrastructure
+        needs: preflight
+        runs-on: ubuntu-latest
+        outputs:
+            d1_database_id: ${{ steps.setup_d1.outputs.database_id }}
+            d1_is_new: ${{ steps.setup_d1.outputs.is_new }}
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Setup Wrangler
+              run: npm install -g wrangler@4.73.0
+
+            - name: Setup D1 Database (create if not exists)
+              id: setup_d1
+              env:
+                  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+                  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+              run: |
+                  echo "Setting up D1 database '${{ env.D1_DATABASE_NAME }}'..."
+                  
+                  # 先尝试列出数据库，查找是否已存在
+                  echo "Step 1: Listing existing D1 databases..."
+                  db_list=$(wrangler d1 list 2>&1) || true
+                  echo "Database list output:"
+                  echo "$db_list"
+                  echo ""
+                  
+                  # 从列表中检查是否存在并提取 ID
+                  if echo "$db_list" | grep -q "${{ env.D1_DATABASE_NAME }}"; then
+                      echo "D1 database '${{ env.D1_DATABASE_NAME }}' already exists."
+                      echo "is_new=false" >> $GITHUB_OUTPUT
+                      
+                      # 从列表中提取对应数据库的 ID
+                      db_id=$(echo "$db_list" | grep "${{ env.D1_DATABASE_NAME }}" | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | head -1 || echo "")
+                      
+                      if [ -z "$db_id" ]; then
+                          echo "::error::Failed to extract database ID from list"
+                          echo "Database list: $db_list"
+                          exit 1
+                      fi
+                      
+                      echo "Found existing database ID: $db_id"
+                  else
+                      # 数据库不存在，创建新的
+                      echo "Step 2: Creating new D1 database..."
+                      db_output=$(wrangler d1 create ${{ env.D1_DATABASE_NAME }} 2>&1) || true
+                      echo "Create output:"
+                      echo "$db_output"
+                      echo ""
+                      
+                      # 从输出中提取 UUID
+                      db_id=$(echo "$db_output" | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | head -1 || echo "")
+                      
+                      if [ -z "$db_id" ]; then
+                          echo "::error::Failed to create D1 database or extract database ID"
+                          echo "Full output: $db_output"
+                          exit 1
+                      fi
+                      
+                      echo "Created new D1 database '${{ env.D1_DATABASE_NAME }}'."
+                      echo "is_new=true" >> $GITHUB_OUTPUT
+                  fi
+                  
+                  echo ""
+                  echo "=== Database Setup Complete ==="
+                  echo "Database Name: ${{ env.D1_DATABASE_NAME }}"
+                  echo "Database ID: $db_id"
+                  echo "database_id=$db_id" >> $GITHUB_OUTPUT
+
+            - name: Initialize D1 Database Schema (only for new databases)
+              if: needs.setup-infrastructure.outputs.d1_is_new == 'true'
+              env:
+                  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+                  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+              run: |
+                  echo "Initializing new D1 database schema..."
+                  wrangler d1 execute ${{ env.D1_DATABASE_NAME }} --file=./sql/schema.sql --remote
+                  echo "Database schema initialized successfully."
+
+            - name: Create R2 Bucket (only if not exists)
+              if: needs.preflight.outputs.r2_bucket_exists != 'true'
+              env:
+                  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+                  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+              run: |
+                  echo "Creating R2 bucket '${{ env.R2_BUCKET_NAME }}'..."
+                  wrangler r2 bucket create ${{ env.R2_BUCKET_NAME }}
+                  echo "R2 bucket created successfully."
+
+            - name: Verify Infrastructure
+              env:
+                  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+                  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+              run: |
+                  echo "=== Infrastructure Verification ==="
+                  echo ""
+                  echo "D1 Database:"
+                  wrangler d1 list || echo "Warning: Failed to list D1 databases"
+                  echo ""
+                  echo "R2 Buckets:"
+                  wrangler r2 bucket list || echo "Warning: Failed to list R2 buckets"
+                  echo ""
+                  echo "=== All infrastructure components are ready ==="
+
     deploy:
         name: Deploy to Cloudflare
+        needs: [preflight, setup-infrastructure]
         runs-on: ubuntu-latest
-        # 避免并发部署导致冲突
         concurrency:
             group: ${{ github.workflow }}-${{ github.ref }}
             cancel-in-progress: true
@@ -19,31 +269,49 @@ jobs:
         steps:
             - uses: actions/checkout@v4
 
-            # 安装 Rust 工具链
-            - run: rustup toolchain install stable --profile minimal
-            - run: rustup target add wasm32-unknown-unknown
-            
+            - name: Install Rust toolchain
+              run: |
+                  rustup toolchain install stable --profile minimal
+                  rustup target add wasm32-unknown-unknown
+
             - name: Install lld
               run: sudo apt install -y lld clang gcc llvm
 
-            # 清理 Cargo 缓存，确保全新构建
             - name: Clean Cargo cache
               run: cargo clean
 
-            # 安装 worker-build (强制重新安装)
             - name: Install worker-build
-              run: |
-                  cargo install worker-build --force
+              run: cargo install worker-build --force
 
-            # 替换数据库 ID
-            - name: Replace D1_DATABASE_ID in wrangler.jsonc
+            - name: Update wrangler.jsonc with database ID
               run: |
-                  sed -i 's/"database_id": "[^"]*"/"database_id": "${{ secrets.D1_DATABASE_ID }}"/g' wrangler.jsonc
-            
-            # 部署 (Wrangler 会自动读取配置并执行 worker-build --release)
-            - uses: cloudflare/wrangler-action@v3
+                  db_id="${{ needs.setup-infrastructure.outputs.d1_database_id }}"
+                  if [ -z "$db_id" ]; then
+                      echo "::error::Database ID is empty, cannot update wrangler.jsonc"
+                      exit 1
+                  fi
+                  sed -i "s/\"database_id\": \"[^\"]*\"/\"database_id\": \"$db_id\"/g" wrangler.jsonc
+                  echo "Updated wrangler.jsonc with database ID: $db_id"
+
+            - name: Deploy to Cloudflare
+              uses: cloudflare/wrangler-action@v3
               id: cf
               with:
                   apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
                   accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-                  wranglerVersion: "4.65.0"
+                  wranglerVersion: "4.73.0"
+
+            - name: Deployment Summary
+              run: |
+                  echo "=== Deployment Complete ==="
+                  echo "Worker deployed successfully!"
+                  echo ""
+                  echo "Infrastructure:"
+                  echo "  - D1 Database: ${{ env.D1_DATABASE_NAME }} (${{ needs.setup-infrastructure.outputs.d1_database_id }})"
+                  echo "  - R2 Bucket: ${{ env.R2_BUCKET_NAME }}"
+                  echo ""
+                  if [ "${{ needs.setup-infrastructure.outputs.d1_is_new }}" == "true" ]; then
+                      echo "Note: New database was created and initialized with schema.sql"
+                  else
+                      echo "Note: Existing database was used (schema not re-initialized)"
+                  fi
