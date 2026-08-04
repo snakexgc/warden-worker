@@ -268,6 +268,7 @@ pub enum NotificationKind {
 pub enum ActionLinkType {
     Registration,
     OrganizationInvite,
+    EmergencyAccessInvite,
 }
 
 #[derive(Debug, Clone)]

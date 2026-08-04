@@ -14,12 +14,107 @@ use crate::error::AppError;
 
 pub const TWO_FACTOR_PROVIDER_AUTHENTICATOR: i32 = 0;
 pub const TWO_FACTOR_PROVIDER_EMAIL: i32 = 1;
+pub const TWO_FACTOR_PROVIDER_DUO: i32 = 2;
+pub const TWO_FACTOR_PROVIDER_YUBIKEY: i32 = 3;
 // 注意：2=Duo, 3=YubiKey, 4=U2f, 5=Remember, 6=OrganizationDuo, 7=Webauthn
 pub const TWO_FACTOR_PROVIDER_WEBAUTHN: i32 = 7;
 pub const TWO_FACTOR_PROVIDER_RECOVERY_CODE: i32 = 8;
 pub const TWO_FACTOR_TYPE_EMAIL_VERIFICATION_CHALLENGE: i32 = 1002;
 pub const PROTECTED_ACTION_OTP_EXPIRATION_TIME: i64 = 600;
 pub const PROTECTED_ACTION_OTP_ATTEMPTS_LIMIT: u64 = 3;
+
+pub async fn ensure_external_two_factor_table(db: &D1Database) -> Result<(), AppError> {
+    db.prepare(
+        "CREATE TABLE IF NOT EXISTS two_factor_external (
+            user_id TEXT NOT NULL,
+            type INTEGER NOT NULL CHECK (type IN (2, 3)),
+            data TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, type),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )",
+    )
+    .run()
+    .await
+    .map_err(|_| AppError::Database)?;
+    Ok(())
+}
+
+pub async fn get_external_two_factor(
+    db: &D1Database,
+    user_id: &str,
+    provider_type: i32,
+) -> Result<Option<String>, AppError> {
+    ensure_external_two_factor_table(db).await?;
+    db.prepare("SELECT data FROM two_factor_external WHERE user_id = ?1 AND type = ?2")
+        .bind(&[user_id.into(), provider_type.into()])?
+        .first(Some("data"))
+        .await
+        .map_err(|_| AppError::Database)
+}
+
+pub async fn is_external_two_factor_enabled(
+    db: &D1Database,
+    user_id: &str,
+    provider_type: i32,
+) -> Result<bool, AppError> {
+    Ok(get_external_two_factor(db, user_id, provider_type)
+        .await?
+        .is_some())
+}
+
+pub async fn upsert_external_two_factor(
+    db: &D1Database,
+    user_id: &str,
+    provider_type: i32,
+    data: &str,
+) -> Result<(), AppError> {
+    ensure_external_two_factor_table(db).await?;
+    let now = Utc::now().to_rfc3339();
+    db.prepare(
+        "INSERT INTO two_factor_external (user_id, type, data, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(user_id, type) DO UPDATE
+         SET data = excluded.data, updated_at = excluded.updated_at",
+    )
+    .bind(&[
+        user_id.into(),
+        provider_type.into(),
+        data.into(),
+        now.clone().into(),
+        now.into(),
+    ])?
+    .run()
+    .await
+    .map_err(|_| AppError::Database)?;
+    Ok(())
+}
+
+pub async fn delete_external_two_factor(
+    db: &D1Database,
+    user_id: &str,
+    provider_type: Option<i32>,
+) -> Result<(), AppError> {
+    ensure_external_two_factor_table(db).await?;
+    match provider_type {
+        Some(provider_type) => {
+            db.prepare("DELETE FROM two_factor_external WHERE user_id = ?1 AND type = ?2")
+                .bind(&[user_id.into(), provider_type.into()])?
+                .run()
+                .await
+                .map_err(|_| AppError::Database)?;
+        }
+        None => {
+            db.prepare("DELETE FROM two_factor_external WHERE user_id = ?1")
+                .bind(&[user_id.into()])?
+                .run()
+                .await
+                .map_err(|_| AppError::Database)?;
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProtectedActionOtpData {
@@ -681,6 +776,7 @@ pub async fn delete_all_two_factors(db: &D1Database, user_id: &str) -> Result<()
     disable_authenticator(db, user_id).await?;
     delete_email_2fa(db, user_id).await?;
     crate::worker_runtime::webauthn::disable_webauthn(db, user_id).await?;
+    delete_external_two_factor(db, user_id, None).await?;
     Ok(())
 }
 

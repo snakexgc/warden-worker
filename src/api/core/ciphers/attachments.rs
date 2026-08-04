@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Arc};
 use uuid::Uuid;
+use worker::wasm_bindgen::JsValue;
 
 use crate::{
     api::AppState,
@@ -115,10 +116,9 @@ async fn get_attachment(
     db: &worker::D1Database,
     cipher_id: &str,
     attachment_id: &str,
-    user_id: &str,
 ) -> Result<Attachment, AppError> {
-    db.prepare("SELECT * FROM cipher_attachments WHERE id = ?1 AND cipher_id = ?2 AND user_id = ?3")
-        .bind(&[attachment_id.into(), cipher_id.into(), user_id.into()])?
+    db.prepare("SELECT * FROM cipher_attachments WHERE id = ?1 AND cipher_id = ?2")
+        .bind(&[attachment_id.into(), cipher_id.into()])?
         .first(None)
         .await
         .map_err(|_| AppError::Database)?
@@ -130,16 +130,30 @@ pub(crate) async fn enrich_ciphers(
     state: &Arc<AppState>,
     ciphers: &mut [Cipher],
 ) -> Result<(), AppError> {
-    let Some(user_id) = ciphers.iter().find_map(|cipher| cipher.user_id.as_deref()) else {
+    if ciphers.is_empty() {
         return Ok(());
-    };
-    let rows: Vec<Attachment> = db
-        .prepare("SELECT * FROM cipher_attachments WHERE user_id = ?1 ORDER BY created_at")
-        .bind(&[user_id.into()])?
-        .all()
-        .await
-        .map_err(|_| AppError::Database)?
-        .results()?;
+    }
+    let mut rows = Vec::new();
+    for chunk in ciphers.chunks(80) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT * FROM cipher_attachments WHERE cipher_id IN ({placeholders}) ORDER BY created_at"
+        );
+        let values = chunk
+            .iter()
+            .map(|cipher| JsValue::from_str(&cipher.id))
+            .collect::<Vec<_>>();
+        let mut chunk_rows: Vec<Attachment> = db
+            .prepare(&sql)
+            .bind(&values)?
+            .all()
+            .await
+            .map_err(|_| AppError::Database)?
+            .results()?;
+        rows.append(&mut chunk_rows);
+    }
 
     let mut grouped: HashMap<String, Vec<Value>> = HashMap::new();
     for row in rows {
@@ -169,16 +183,36 @@ async fn finish_attachment_mutation(
     cipher_id: &str,
     _revision: &str,
 ) -> Result<(), AppError> {
-    let revision = db::update_user_revision(db, &claims.sub).await?;
-    notifications::publish_cipher_update_background(
-        &state.ctx,
-        state.env.clone(),
-        UpdateType::SyncCipherUpdate,
-        claims.sub.clone(),
-        cipher_id.to_string(),
-        revision,
-        claims.device.clone(),
-    );
+    let cipher = super::get_cipher_dbmodel_with_access(
+        db,
+        cipher_id,
+        &claims.sub,
+        super::super::organizations::organizations_enabled(&state.env),
+    )
+    .await?;
+    if let Some(organization_id) = cipher.organization_id.as_deref() {
+        super::finish_organization_cipher_mutation(
+            db,
+            state,
+            organization_id,
+            &claims.sub,
+            cipher_id,
+            claims.device.as_deref(),
+            UpdateType::SyncCipherUpdate,
+        )
+        .await?;
+    } else {
+        let revision = db::update_user_revision(db, &claims.sub).await?;
+        notifications::publish_cipher_update_background(
+            &state.ctx,
+            state.env.clone(),
+            UpdateType::SyncCipherUpdate,
+            claims.sub.clone(),
+            cipher_id.to_string(),
+            revision,
+            claims.device.clone(),
+        );
+    }
     Ok(())
 }
 
@@ -191,14 +225,30 @@ pub async fn create_attachment_v2(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    let cipher_db = super::get_cipher_dbmodel_from_db(&db, &cipher_id, &claims.sub).await?;
+    let cipher_db = super::get_cipher_dbmodel_with_access(
+        &db,
+        &cipher_id,
+        &claims.sub,
+        super::super::organizations::organizations_enabled(&state.env),
+    )
+    .await?;
+    super::require_cipher_write(&cipher_db)?;
 
     let file_size = payload.file_size.into_i64()?;
     r2_file::validate_declared_size(file_size, "Attachment")?;
     let file_name = payload.file_name;
     let attachment_id = Uuid::new_v4().to_string();
     let now = db::now_rfc3339_millis();
-    let object_key = format!("attachments/{}/{}/{}", claims.sub, cipher_id, attachment_id);
+    let attachment_user_id = cipher_db
+        .organization_id
+        .is_none()
+        .then(|| claims.sub.clone());
+    let owner_scope = cipher_db
+        .organization_id
+        .as_deref()
+        .map(|organization_id| format!("organizations/{organization_id}"))
+        .unwrap_or_else(|| claims.sub.clone());
+    let object_key = format!("attachments/{owner_scope}/{cipher_id}/{attachment_id}");
 
     db.prepare(
         "INSERT INTO cipher_attachments (id, cipher_id, user_id, file_name, size, key, r2_object_key, created_at, updated_at)
@@ -207,7 +257,7 @@ pub async fn create_attachment_v2(
     .bind(&[
         attachment_id.clone().into(),
         cipher_id.clone().into(),
-        claims.sub.clone().into(),
+        attachment_user_id.into(),
         file_name.into(),
         (file_size as f64).into(),
         payload.key.into(),
@@ -250,10 +300,26 @@ pub async fn create_attachment_legacy(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    super::get_cipher_dbmodel_from_db(&db, &cipher_id, &claims.sub).await?;
+    let cipher_db = super::get_cipher_dbmodel_with_access(
+        &db,
+        &cipher_id,
+        &claims.sub,
+        super::super::organizations::organizations_enabled(&state.env),
+    )
+    .await?;
+    super::require_cipher_write(&cipher_db)?;
 
     let attachment_id = Uuid::new_v4().to_string();
-    let object_key = format!("attachments/{}/{}/{}", claims.sub, cipher_id, attachment_id);
+    let attachment_user_id = cipher_db
+        .organization_id
+        .is_none()
+        .then(|| claims.sub.clone());
+    let owner_scope = cipher_db
+        .organization_id
+        .as_deref()
+        .map(|organization_id| format!("organizations/{organization_id}"))
+        .unwrap_or_else(|| claims.sub.clone());
+    let object_key = format!("attachments/{owner_scope}/{cipher_id}/{attachment_id}");
     let bucket = state
         .env
         .bucket(BUCKET_BINDING)
@@ -315,7 +381,7 @@ pub async fn create_attachment_legacy(
         .bind(&[
             attachment_id.into(),
             cipher_id.clone().into(),
-            claims.sub.clone().into(),
+            attachment_user_id.into(),
             encrypted_file_name.into(),
             (actual_size as f64).into(),
             attachment_key.into(),
@@ -337,20 +403,21 @@ pub async fn create_attachment_legacy(
         let _ = bucket.delete(object_key).await;
         return Err(err);
     }
-    db.prepare("UPDATE ciphers SET updated_at = ?1 WHERE id = ?2 AND user_id = ?3")
-        .bind(&[
-            now.clone().into(),
-            cipher_id.clone().into(),
-            claims.sub.clone().into(),
-        ])?
+    db.prepare("UPDATE ciphers SET updated_at = ?1 WHERE id = ?2")
+        .bind(&[now.clone().into(), cipher_id.clone().into()])?
         .run()
         .await
         .map_err(|_| AppError::Database)?;
     finish_attachment_mutation(&db, &state, &claims, &cipher_id, &now).await?;
 
-    let mut cipher: Cipher = super::get_cipher_dbmodel_from_db(&db, &cipher_id, &claims.sub)
-        .await?
-        .into();
+    let mut cipher: Cipher = super::get_cipher_dbmodel_with_access(
+        &db,
+        &cipher_id,
+        &claims.sub,
+        super::super::organizations::organizations_enabled(&state.env),
+    )
+    .await?
+    .into();
     enrich_cipher(&db, &state, &mut cipher).await?;
     Ok(Json(
         serde_json::to_value(cipher).map_err(|_| AppError::Internal)?,
@@ -366,8 +433,15 @@ pub async fn upload_attachment_v2(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    super::get_cipher_dbmodel_from_db(&db, &cipher_id, &claims.sub).await?;
-    let attachment = get_attachment(&db, &cipher_id, &attachment_id, &claims.sub).await?;
+    let cipher = super::get_cipher_dbmodel_with_access(
+        &db,
+        &cipher_id,
+        &claims.sub,
+        super::super::organizations::organizations_enabled(&state.env),
+    )
+    .await?;
+    super::require_cipher_write(&cipher)?;
+    let attachment = get_attachment(&db, &cipher_id, &attachment_id).await?;
     r2_file::validate_declared_size(attachment.size, "Attachment")?;
 
     let bucket = state
@@ -397,8 +471,8 @@ pub async fn upload_attachment_v2(
     let max_size = attachment.size.saturating_add(ATTACHMENT_SIZE_LEEWAY);
     if !(min_size..=max_size).contains(&actual_size) {
         let _ = bucket.delete(attachment.r2_object_key).await;
-        db.prepare("DELETE FROM cipher_attachments WHERE id = ?1 AND user_id = ?2")
-            .bind(&[attachment_id.into(), claims.sub.clone().into()])?
+        db.prepare("DELETE FROM cipher_attachments WHERE id = ?1 AND cipher_id = ?2")
+            .bind(&[attachment_id.into(), cipher_id.clone().into()])?
             .run()
             .await
             .map_err(|_| AppError::Database)?;
@@ -409,13 +483,12 @@ pub async fn upload_attachment_v2(
 
     let now = db::now_rfc3339_millis();
     let update_result: Result<(), AppError> = async {
-        db.prepare("UPDATE cipher_attachments SET size = ?1, updated_at = ?2 WHERE id = ?3 AND cipher_id = ?4 AND user_id = ?5")
+        db.prepare("UPDATE cipher_attachments SET size = ?1, updated_at = ?2 WHERE id = ?3 AND cipher_id = ?4")
             .bind(&[
                 (actual_size as f64).into(),
                 now.clone().into(),
                 attachment.id.clone().into(),
                 cipher_id.clone().into(),
-                claims.sub.clone().into(),
             ])?
             .run()
             .await
@@ -427,12 +500,8 @@ pub async fn upload_attachment_v2(
         let _ = bucket.delete(attachment.r2_object_key).await;
         return Err(AppError::Database);
     }
-    db.prepare("UPDATE ciphers SET updated_at = ?1 WHERE id = ?2 AND user_id = ?3")
-        .bind(&[
-            now.clone().into(),
-            cipher_id.clone().into(),
-            claims.sub.clone().into(),
-        ])?
+    db.prepare("UPDATE ciphers SET updated_at = ?1 WHERE id = ?2")
+        .bind(&[now.clone().into(), cipher_id.clone().into()])?
         .run()
         .await
         .map_err(|_| AppError::Database)?;
@@ -448,8 +517,14 @@ pub async fn attachment_metadata(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    super::get_cipher_dbmodel_from_db(&db, &cipher_id, &claims.sub).await?;
-    let attachment = get_attachment(&db, &cipher_id, &attachment_id, &claims.sub).await?;
+    super::get_cipher_dbmodel_with_access(
+        &db,
+        &cipher_id,
+        &claims.sub,
+        super::super::organizations::organizations_enabled(&state.env),
+    )
+    .await?;
+    let attachment = get_attachment(&db, &cipher_id, &attachment_id).await?;
     Ok(Json(attachment_to_json(&state, &attachment)?))
 }
 
@@ -461,8 +536,15 @@ pub async fn delete_attachment(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    super::get_cipher_dbmodel_from_db(&db, &cipher_id, &claims.sub).await?;
-    let attachment = get_attachment(&db, &cipher_id, &attachment_id, &claims.sub).await?;
+    let cipher = super::get_cipher_dbmodel_with_access(
+        &db,
+        &cipher_id,
+        &claims.sub,
+        super::super::organizations::organizations_enabled(&state.env),
+    )
+    .await?;
+    super::require_cipher_write(&cipher)?;
+    let attachment = get_attachment(&db, &cipher_id, &attachment_id).await?;
     let bucket = state
         .env
         .bucket(BUCKET_BINDING)
@@ -471,30 +553,27 @@ pub async fn delete_attachment(
         .delete(attachment.r2_object_key)
         .await
         .map_err(|_| AppError::Internal)?;
-    db.prepare("DELETE FROM cipher_attachments WHERE id = ?1 AND cipher_id = ?2 AND user_id = ?3")
-        .bind(&[
-            attachment_id.into(),
-            cipher_id.clone().into(),
-            claims.sub.clone().into(),
-        ])?
+    db.prepare("DELETE FROM cipher_attachments WHERE id = ?1 AND cipher_id = ?2")
+        .bind(&[attachment_id.into(), cipher_id.clone().into()])?
         .run()
         .await
         .map_err(|_| AppError::Database)?;
     let now = db::now_rfc3339_millis();
-    db.prepare("UPDATE ciphers SET updated_at = ?1 WHERE id = ?2 AND user_id = ?3")
-        .bind(&[
-            now.clone().into(),
-            cipher_id.clone().into(),
-            claims.sub.clone().into(),
-        ])?
+    db.prepare("UPDATE ciphers SET updated_at = ?1 WHERE id = ?2")
+        .bind(&[now.clone().into(), cipher_id.clone().into()])?
         .run()
         .await
         .map_err(|_| AppError::Database)?;
     finish_attachment_mutation(&db, &state, &claims, &cipher_id, &now).await?;
 
-    let mut cipher: Cipher = super::get_cipher_dbmodel_from_db(&db, &cipher_id, &claims.sub)
-        .await?
-        .into();
+    let mut cipher: Cipher = super::get_cipher_dbmodel_with_access(
+        &db,
+        &cipher_id,
+        &claims.sub,
+        super::super::organizations::organizations_enabled(&state.env),
+    )
+    .await?
+    .into();
     enrich_cipher(&db, &state, &mut cipher).await?;
     Ok(Json(json!({ "cipher": cipher })))
 }
@@ -506,6 +585,22 @@ pub async fn delete_attachment_post(
     path: Path<(String, String)>,
 ) -> Result<Json<Value>, AppError> {
     delete_attachment(claims, state, path).await
+}
+
+#[worker::send]
+pub async fn share_attachment(
+    claims: Claims,
+    state: State<Arc<AppState>>,
+    Path((cipher_id, attachment_id)): Path<(String, String)>,
+    multipart: Multipart,
+) -> Result<Json<Value>, AppError> {
+    let _ = delete_attachment(
+        claims.clone(),
+        State(state.0.clone()),
+        Path((cipher_id.clone(), attachment_id)),
+    )
+    .await?;
+    create_attachment_legacy(claims, state, Path(cipher_id), multipart).await
 }
 
 #[worker::send]
@@ -574,13 +669,10 @@ pub(crate) async fn delete_cipher_attachments_from_r2(
     env: &worker::Env,
     db: &worker::D1Database,
     cipher_id: &str,
-    user_id: &str,
 ) -> Result<(), AppError> {
     let rows: Vec<Value> = db
-        .prepare(
-            "SELECT r2_object_key FROM cipher_attachments WHERE cipher_id = ?1 AND user_id = ?2",
-        )
-        .bind(&[cipher_id.into(), user_id.into()])?
+        .prepare("SELECT r2_object_key FROM cipher_attachments WHERE cipher_id = ?1")
+        .bind(&[cipher_id.into()])?
         .all()
         .await
         .map_err(|_| AppError::Database)?

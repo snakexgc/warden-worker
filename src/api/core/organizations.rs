@@ -22,7 +22,7 @@ use crate::{
     db::models::{
         Collection, Group, MEMBER_STATUS_ACCEPTED, MEMBER_STATUS_CONFIRMED, MEMBER_STATUS_INVITED,
         MEMBER_TYPE_ADMIN, MEMBER_TYPE_MANAGER, MEMBER_TYPE_OWNER, MEMBER_TYPE_USER, Membership,
-        OrgPolicy, Organization,
+        OrgPolicy, Organization, OrganizationApiKey,
     },
     error::AppError,
     extensions::notify::{self, ActionLinkType},
@@ -277,7 +277,7 @@ pub(crate) fn events_enabled(env: &worker::Env) -> bool {
     env_bool(env, "ORG_EVENTS_ENABLED", false)
 }
 
-fn groups_enabled(env: &worker::Env) -> bool {
+pub(crate) fn groups_enabled(env: &worker::Env) -> bool {
     env_bool(env, "ORG_GROUPS_ENABLED", false)
 }
 
@@ -326,7 +326,10 @@ fn valid_policy_type(policy_type: i32) -> bool {
     matches!(policy_type, 0 | 1 | 2 | 3 | 5 | 6 | 7 | 8 | 14 | 15 | 16)
 }
 
-async fn load_organization(db: &D1Database, org_id: &str) -> Result<Organization, AppError> {
+pub(crate) async fn load_organization(
+    db: &D1Database,
+    org_id: &str,
+) -> Result<Organization, AppError> {
     db.prepare("SELECT * FROM organizations WHERE id = ?1")
         .bind(&[org_id.into()])?
         .first(None)
@@ -348,7 +351,7 @@ pub(crate) async fn load_membership(
         .ok_or_else(|| AppError::NotFound("Organization not found".to_string()))
 }
 
-async fn validate_membership_policies(
+pub(crate) async fn validate_membership_policies(
     db: &D1Database,
     member: &Membership,
 ) -> Result<(), AppError> {
@@ -743,6 +746,116 @@ pub async fn set_organization_keys(
         "publicKey": data.public_key,
         "privateKey": data.encrypted_private_key
     })))
+}
+
+/// Vaultwarden returns one synthetic verified SSO domain so current clients
+/// can prefill their SSO organization selector. This project does not expose
+/// an SSO login flow, but keeping the response contract avoids a client-side
+/// dead end without claiming that SSO itself is enabled.
+#[worker::send]
+pub async fn get_org_domain_sso_verified(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let domain = state.public_url("");
+    Json(json!({
+        "object": "list",
+        "data": [{
+            "organizationIdentifier": "vaultwarden",
+            "organizationName": "vaultwarden",
+            "domainName": domain
+        }],
+        "continuationToken": null
+    }))
+}
+
+async fn organization_api_key(
+    claims: Claims,
+    state: Arc<AppState>,
+    org_id: String,
+    data: crate::api::core::accounts::SecretVerificationRequest,
+    rotate: bool,
+) -> Result<Json<Value>, AppError> {
+    ensure_enabled(&state.env)?;
+    let db = db::get_db(&state.env)?;
+    claims.verify_security_stamp(&db).await?;
+    let member = load_membership(&db, &claims.sub, &org_id).await?;
+    require_admin(&member)?;
+    crate::api::core::accounts::validate_password_or_otp(&db, &claims.sub, &data).await?;
+
+    let existing: Option<OrganizationApiKey> = db
+        .prepare("SELECT id, organization_id, type, api_key, revision_date FROM organization_api_key WHERE organization_id = ?1")
+        .bind(&[org_id.clone().into()])?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?;
+
+    let record = match existing {
+        Some(mut record) if rotate => {
+            record.api_key = crate::crypto::generate_api_key();
+            record.revision_date = db::now_rfc3339_millis();
+            db.prepare(
+                "UPDATE organization_api_key SET api_key = ?1, revision_date = ?2 WHERE id = ?3 AND organization_id = ?4",
+            )
+            .bind(&[
+                record.api_key.clone().into(),
+                record.revision_date.clone().into(),
+                record.id.clone().into(),
+                org_id.into(),
+            ])?
+            .run()
+            .await
+            .map_err(|_| AppError::Database)?;
+            record
+        }
+        Some(record) => record,
+        None => {
+            let record = OrganizationApiKey {
+                id: Uuid::new_v4().to_string(),
+                organization_id: org_id.clone(),
+                key_type: 0,
+                api_key: crate::crypto::generate_api_key(),
+                revision_date: db::now_rfc3339_millis(),
+            };
+            db.prepare(
+                "INSERT INTO organization_api_key (id, organization_id, type, api_key, revision_date) VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .bind(&[
+                record.id.clone().into(),
+                record.organization_id.clone().into(),
+                record.key_type.into(),
+                record.api_key.clone().into(),
+                record.revision_date.clone().into(),
+            ])?
+            .run()
+            .await
+            .map_err(|_| AppError::Database)?;
+            record
+        }
+    };
+
+    Ok(Json(json!({
+        "apiKey": record.api_key,
+        "revisionDate": record.revision_date,
+        "object": "apiKey"
+    })))
+}
+
+#[worker::send]
+pub async fn post_organization_api_key(
+    claims: Claims,
+    State(state): State<Arc<AppState>>,
+    Path(org_id): Path<String>,
+    Json(data): Json<crate::api::core::accounts::SecretVerificationRequest>,
+) -> Result<Json<Value>, AppError> {
+    organization_api_key(claims, state, org_id, data, false).await
+}
+
+#[worker::send]
+pub async fn rotate_organization_api_key(
+    claims: Claims,
+    State(state): State<Arc<AppState>>,
+    Path(org_id): Path<String>,
+    Json(data): Json<crate::api::core::accounts::SecretVerificationRequest>,
+) -> Result<Json<Value>, AppError> {
+    organization_api_key(claims, state, org_id, data, true).await
 }
 
 #[worker::send]
@@ -2104,7 +2217,7 @@ fn parse_member_type(value: &Value) -> Result<(i32, bool), AppError> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn send_invite_link(
+pub(crate) async fn send_invite_link(
     state: &AppState,
     org: &Organization,
     email: &str,
@@ -3643,7 +3756,7 @@ pub(crate) async fn hide_send_email_is_disabled(
     }))
 }
 
-async fn delete_membership_preserving_owner(
+pub(crate) async fn delete_membership_preserving_owner(
     db: &D1Database,
     org_id: &str,
     member_id: &str,

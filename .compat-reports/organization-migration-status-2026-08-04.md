@@ -4,63 +4,61 @@
 
 对比基线：
 
-- Warden Worker：`d89466593dd4c799cb9a311ff65211fb7f927dc8` 加当前未提交实现
+- Warden Worker 分支：`agent/organization-management-migration`
+- 本轮开始提交：`53c2376239a6f730cf9764abcb5fa42495e05924`
 - Vaultwarden：`2629bcbe1380c894e3a7f52cafcac3988edb8fbb`
-- Vaultwarden 组织端点基线：`src/api/core/organizations.rs`
 
-## 结论
+## 当前结论
 
-组织核心功能能够在 Cloudflare Workers、D1、R2 和 Durable Objects 上实现。当前工作树已经完成可试运行的组织核心链路，但尚未达到 Vaultwarden 全量组织/企业能力的语义等价，因此 `ORGANIZATIONS_ENABLED` 默认保持为 `false`。
+Vaultwarden core 的组织管理、组织密码项/附件、Public Directory Connector 导入、组织 API Key、紧急访问，以及 Duo/YubiKey 管理与登录端点，已经在 Workers 架构中形成可执行实现。
 
-对 Vaultwarden `organizations.rs` 的 77 个规范化方法-路径组合进行机械比对后，当前路由已覆盖 74 个，剩余 3 个：
+方法级机械审计覆盖 Vaultwarden core 的 252 个方法-路径注册。本项目唯一未直接按 `/api` 前缀匹配的记录是上游 `events.rs` 中的 `POST /collect`；它在 Vaultwarden 由 `/events` 挂载，在本项目对应已有的 `POST /events/collect`，不是功能缺失。
 
-- `POST /api/organizations/domain/sso/verified`：SSO 未实现。
-- `POST /api/organizations/{id}/api-key`：组织 API Key 未实现。
-- `POST /api/organizations/{id}/rotate-api-key`：组织 API Key 轮换未实现。
+路由存在不等于所有企业能力语义完全等价。SSO、SCIM、Provider、Duo OIDC 等独立企业集成仍不在当前迁移范围内，因此 `ORGANIZATIONS_ENABLED`、`ORG_GROUPS_ENABLED`、`ORG_EVENTS_ENABLED` 继续默认关闭，待端到端环境回归后再开启。
 
-路由存在只表示客户端不会因缺少路径而失败，不代表响应字段、权限副作用和并发行为已经逐项完全等价。
+## 已补齐
 
-## 已实现
-
-| 能力 | 当前状态 | Workers 实现方式 |
+| 能力 | 状态 | Workers 实现 |
 | --- | --- | --- |
-| 多用户与注册 | 已实现 | 移除单用户触发器；一次性注册/邀请 JWT；Webhook/Telegram outbox 与 Cron 重试 |
-| 组织 CRUD | 已实现 | D1 `organizations`、`users_organizations`；Owner/Admin/Manager 守卫 |
-| 成员邀请与管理 | 已实现 | 邀请、接受、确认、重发、编辑、吊销、恢复、删除及批量端点；最后一个 Owner 由原子条件写保护 |
-| 账户恢复 | 已实现核心流程 | Reset Password 策略、用户自助加入/退出、管理员恢复、security stamp 登出 |
-| 集合与授权 | 已实现 | 直接成员授权、组授权、`accessAll/readOnly/hidePasswords/manage` |
-| 共享密码项 | 已实现核心流程 | 个人与组织密码项统一鉴权查询；集合分配；按用户收藏、文件夹和归档 |
-| Sync/Profile | 已实现 | 返回组织、集合、策略和当前用户可访问的共享密码项 |
-| 组织导入/导出 | 已实现核心流程 | D1 每批 40 条；导入上限 500 个密码项/集合；导出组织集合和密码项 |
-| 策略 | 部分实现 | 2FA、Single Organization、Disable Send、Send Options、Account Recovery 已进入业务判断 |
-| 组 | 已实现核心 CRUD/授权 | 默认由 `ORG_GROUPS_ENABLED=false` 关闭 |
-| 事件 | 已实现客户端采集与查询 | D1 持久化、组织/成员/密码项分页查询；默认关闭 |
-| 实时同步 | 已实现核心广播 | 组织密码项变更向所有已确认成员广播；HeavyDo 按身份稳定分片 |
+| 多用户与组织 CRUD | 已实现 | D1 成员、角色、状态、最后 Owner 保护 |
+| 邀请/确认/撤销/恢复 | 已实现 | JWT 邀请；Webhook/Telegram/企业微信 outbox 投递 |
+| Collection/Group 授权 | 已实现 | 直接成员与组授权；`accessAll/readOnly/hidePasswords/manage` |
+| 组织密码项 | 已实现 | admin/share/delete/restore/bulk 别名与成员广播 |
+| 组织附件 | 已实现 | 父密码项鉴权；D1 可空 owner；R2 organization scope |
+| Sync/Profile/Policy | 已实现核心语义 | 组织、集合、策略、共享密码项进入同步结果 |
+| 组织导入/导出 | 已实现 | Web Vault 导入和 Public Directory Connector 导入 |
+| 组织 API Key | 已实现 | 生成/轮换及 `scope=api.organization` client credentials |
+| 紧急访问 | 已实现 | 邀请、确认、等待、批准、查看、接管、策略与 Cron 推进 |
+| Duo/YubiKey OTP | 已实现 | Workers fetch 外部校验、D1 配置和登录 provider 链 |
 
-## 仍需补齐或强化
+## 有意保留的项目扩展
 
-1. 组织密码项附件：当前会安全拒绝，不能复用个人附件的 `user_id` 权限模型。
-2. 组织 API Key 和 `scope=api.organization` 客户端凭据登录。
-3. SSO、SCIM、Provider、Directory Connector/Public API 等企业集成。
-4. 服务端组织操作事件：当前可保存客户端上报事件，但大部分组织 mutation 尚未自动生成审计事件。
-5. 策略完整语义：Master Password、Remove Individual Vault、Organization Data Ownership 等仍需逐端点接入。
-6. 大型导入原子性：D1 跨批请求不是一个事务，失败时可能已写入前面的批次；需增加导入作业状态和补偿清理。
-7. Groups/Events 的端到端 Web Vault 回归尚未完成，因此两个开关默认关闭。
+- Send 的 Turnstile 人机验证及其签名访问凭证。
+- Passkey/WebAuthn 密钥登录和本项目已有的 Auth Request 登录。
+- Webhook、Telegram Bot、企业微信、通知 outbox 与 Cron 重试。
+- Cloudflare D1、R2、Durable Objects、HeavyDo 分片及用量接口。
 
-## 已验证
+## 尚未宣称完全等价的范围
 
-- `cargo test --lib`：67/67 通过。
-- `node --test tests/heavy_do_routing.test.mjs`：4/4 通过。
-- `cargo clippy --target wasm32-unknown-unknown -- -D warnings`：通过。
+1. Enterprise SSO、SCIM、Provider、Duo OIDC 没有迁移；`domain/sso/verified` 仅保持 Vaultwarden 自托管兼容响应。
+2. 组织 mutation 的服务端审计事件尚未逐个覆盖 Vaultwarden 的全部副作用。
+3. Master Password、Remove Individual Vault、Organization Data Ownership 等策略仍需逐端点业务回归。
+4. D1 跨批次的大型导入不是单一事务，需要部署环境中的失败恢复测试。
+5. Duo/YubiKey 的协议与签名已有单元测试，但真实外部服务测试需要部署方 Secrets 和设备。
+
+## 验证结果
+
 - `cargo check --target wasm32-unknown-unknown`：通过。
-- D1 基线加 `0001_organization_core.sql`：本地迁移成功，外键检查无错误。
-- D1 权限样例：普通成员加入 `groups.access_all=1` 的组后，可以读取组织全部集合，并得到可写和可查看密码权限。
-- D1 Owner 保护样例：删除唯一 confirmed Owner 的条件写影响 0 行，Owner 记录保持不变。
+- `cargo clippy --all-targets -- -D warnings`：通过。
+- `cargo test --lib`：76 passed、0 failed。
+- `node --test tests/*.test.mjs`：22 passed、0 failed。
+- D1 `schema.sql` + `0001` 至 `0005`：本地完整迁移通过。
+- `PRAGMA foreign_key_check`：无异常。
+- Vaultwarden 参考仓库仍为 `2629bcbe...`，工作树为空。
 
-## 启用顺序
+## 建议启用顺序
 
-1. 备份 D1/R2。
-2. 执行 `wrangler d1 migrations apply vaultsql --remote`。
-3. 配置并验证 Webhook/Telegram 注册与邀请链接投递。
-4. 在测试环境设置 `ORGANIZATIONS_ENABLED=true`，完成双用户创建、邀请、确认、同步和共享密码项回归。
-5. 核心流程稳定后再分别启用 `ORG_GROUPS_ENABLED` 与 `ORG_EVENTS_ENABLED`。
+1. 备份 D1 与 R2，远端执行全部 migration。
+2. 验证注册、组织邀请和紧急访问邀请均能通过现有通知通道送达。
+3. 测试环境开启 `ORGANIZATIONS_ENABLED=true`，完成双用户组织、集合、共享密码项与附件回归。
+4. 再分别开启 Groups、Events；配置外部服务 Secrets 后开启 Duo/YubiKey 的 Web Vault 入口。

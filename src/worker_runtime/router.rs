@@ -9,7 +9,10 @@ use std::sync::Arc;
 use worker::{Context, Env};
 
 use crate::api::{
-    core::{self, accounts, ciphers, events, folders, organizations, sends, two_factor},
+    core::{
+        self, accounts, ciphers, emergency_access, events, folders, organizations, public, sends,
+        two_factor,
+    },
     icons, identity, web as css,
 };
 use crate::extensions::usage;
@@ -248,6 +251,20 @@ pub fn api_router_with_keys(
             post(two_factor::authenticator_disable),
         )
         .route("/api/two-factor/get-email", post(two_factor::get_email))
+        .route("/api/two-factor/get-duo", post(two_factor::duo::get_duo))
+        .route(
+            "/api/two-factor/duo",
+            post(two_factor::duo::activate_duo).put(two_factor::duo::activate_duo_put),
+        )
+        .route(
+            "/api/two-factor/get-yubikey",
+            post(two_factor::yubikey::generate_yubikey),
+        )
+        .route(
+            "/api/two-factor/yubikey",
+            post(two_factor::yubikey::activate_yubikey)
+                .put(two_factor::yubikey::activate_yubikey_put),
+        )
         .route(
             "/api/two-factor/get-webauthn",
             post(two_factor::webauthn::two_factor_get_webauthn),
@@ -280,6 +297,69 @@ pub fn api_router_with_keys(
         .route(
             "/api/two-factor/send-email-login",
             post(two_factor::send_email_login),
+        )
+        .route(
+            "/api/emergency-access/trusted",
+            get(emergency_access::get_contacts),
+        )
+        .route(
+            "/api/emergency-access/granted",
+            get(emergency_access::get_grantees),
+        )
+        .route(
+            "/api/emergency-access/invite",
+            post(emergency_access::send_invite),
+        )
+        .route(
+            "/api/emergency-access/{id}",
+            get(emergency_access::get_emergency_access)
+                .post(emergency_access::post_emergency_access)
+                .put(emergency_access::put_emergency_access)
+                .delete(emergency_access::delete_emergency_access),
+        )
+        .route(
+            "/api/emergency-access/{id}/delete",
+            post(emergency_access::post_delete_emergency_access),
+        )
+        .route(
+            "/api/emergency-access/{id}/reinvite",
+            post(emergency_access::resend_invite),
+        )
+        .route(
+            "/api/emergency-access/{id}/accept",
+            post(emergency_access::accept_invite),
+        )
+        .route(
+            "/api/emergency-access/{id}/confirm",
+            post(emergency_access::confirm_emergency_access),
+        )
+        .route(
+            "/api/emergency-access/{id}/initiate",
+            post(emergency_access::initiate_emergency_access),
+        )
+        .route(
+            "/api/emergency-access/{id}/approve",
+            post(emergency_access::approve_emergency_access),
+        )
+        .route(
+            "/api/emergency-access/{id}/reject",
+            post(emergency_access::reject_emergency_access),
+        )
+        .route(
+            "/api/emergency-access/{id}/view",
+            post(emergency_access::view_emergency_access),
+        )
+        .route(
+            "/api/emergency-access/{id}/takeover",
+            post(emergency_access::takeover_emergency_access),
+        )
+        .route(
+            "/api/emergency-access/{id}/password",
+            post(emergency_access::password_emergency_access),
+        )
+        .route(
+            "/api/emergency-access/{id}/policies",
+            get(emergency_access::policies_emergency_access),
         )
         .route("/api/sends", get(sends::get_sends).post(sends::post_send))
         .route(
@@ -325,6 +405,10 @@ pub fn api_router_with_keys(
         .route("/api/collections", get(organizations::get_collections))
         .route("/api/policies", get(organizations::get_policies))
         .route(
+            "/api/public/organization/import",
+            post(public::import_organization_directory),
+        )
+        .route(
             "/api/organizations",
             get(organizations::get_organizations).post(organizations::create_organization),
         )
@@ -351,6 +435,18 @@ pub fn api_router_with_keys(
         .route(
             "/api/organizations/{org_id}/public-key",
             get(organizations::get_organization_public_key),
+        )
+        .route(
+            "/api/organizations/domain/sso/verified",
+            post(organizations::get_org_domain_sso_verified),
+        )
+        .route(
+            "/api/organizations/{org_id}/api-key",
+            post(organizations::post_organization_api_key),
+        )
+        .route(
+            "/api/organizations/{org_id}/rotate-api-key",
+            post(organizations::rotate_organization_api_key),
         )
         .route(
             "/api/organizations/{identifier}/auto-enroll-status",
@@ -564,6 +660,11 @@ pub fn api_router_with_keys(
                 .layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT_BYTES)),
         )
         .route(
+            "/api/ciphers/{cipher_id}/attachment-admin",
+            post(ciphers::create_attachment_legacy)
+                .layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT_BYTES)),
+        )
+        .route(
             "/api/ciphers/{cipher_id}/attachment/{attachment_id}",
             get(ciphers::attachment_metadata)
                 .post(ciphers::upload_attachment_v2)
@@ -573,6 +674,18 @@ pub fn api_router_with_keys(
         .route(
             "/api/ciphers/{cipher_id}/attachment/{attachment_id}/delete",
             post(ciphers::delete_attachment_post),
+        )
+        .route(
+            "/api/ciphers/{cipher_id}/attachment/{attachment_id}/delete-admin",
+            post(ciphers::delete_attachment_post),
+        )
+        .route(
+            "/api/ciphers/{cipher_id}/attachment/{attachment_id}/admin",
+            delete(ciphers::delete_attachment),
+        )
+        .route(
+            "/api/ciphers/{cipher_id}/attachment/{attachment_id}/share",
+            post(ciphers::share_attachment).layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT_BYTES)),
         )
         .route(
             "/ciphers/{cipher_id}/attachment/{attachment_id}",
@@ -589,6 +702,11 @@ pub fn api_router_with_keys(
                 .post(ciphers::post_ciphers)
                 .delete(ciphers::hard_delete_ciphers_delete),
         )
+        .route(
+            "/api/ciphers/admin",
+            post(ciphers::create_cipher).delete(ciphers::hard_delete_ciphers_delete),
+        )
+        .route("/api/ciphers/share", put(ciphers::share_ciphers))
         .route("/api/ciphers/import", post(ciphers::import_data))
         .route(
             "/api/ciphers/import-organization",
@@ -612,6 +730,17 @@ pub fn api_router_with_keys(
                 .post(ciphers::post_cipher)
                 .put(ciphers::update_cipher)
                 .delete(ciphers::hard_delete_cipher),
+        )
+        .route(
+            "/api/ciphers/{id}/admin",
+            get(ciphers::get_cipher)
+                .post(ciphers::post_cipher)
+                .put(ciphers::update_cipher)
+                .delete(ciphers::hard_delete_cipher),
+        )
+        .route(
+            "/api/ciphers/{id}/share",
+            post(ciphers::share_cipher).put(ciphers::share_cipher),
         )
         .route(
             "/api/ciphers/{id}/details",
@@ -640,6 +769,14 @@ pub fn api_router_with_keys(
             put(ciphers::soft_delete_cipher).post(ciphers::hard_delete_cipher_post),
         )
         .route("/api/ciphers/{id}/restore", put(ciphers::restore_cipher))
+        .route(
+            "/api/ciphers/{id}/restore-admin",
+            put(ciphers::restore_cipher),
+        )
+        .route(
+            "/api/ciphers/{id}/delete-admin",
+            put(ciphers::soft_delete_cipher).post(ciphers::hard_delete_cipher_post),
+        )
         .route("/api/ciphers/{id}/archive", put(ciphers::archive_cipher))
         .route(
             "/api/ciphers/{id}/unarchive",
@@ -649,7 +786,12 @@ pub fn api_router_with_keys(
             "/api/ciphers/delete",
             put(ciphers::soft_delete_ciphers).post(ciphers::hard_delete_ciphers),
         )
+        .route(
+            "/api/ciphers/delete-admin",
+            put(ciphers::soft_delete_ciphers).post(ciphers::hard_delete_ciphers),
+        )
         .route("/api/ciphers/restore", put(ciphers::restore_ciphers))
+        .route("/api/ciphers/restore-admin", put(ciphers::restore_ciphers))
         .route("/api/ciphers/archive", put(ciphers::archive_ciphers))
         .route("/api/ciphers/unarchive", put(ciphers::unarchive_ciphers))
         // Folders CRUD

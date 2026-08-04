@@ -1,4 +1,6 @@
+pub mod duo;
 pub mod webauthn;
+pub mod yubikey;
 
 use axum::http::HeaderMap;
 use axum::{Json, extract::State};
@@ -44,7 +46,11 @@ pub struct PasswordOrOtpData {
 }
 
 impl PasswordOrOtpData {
-    async fn validate(&self, db: &worker::D1Database, user_id: &str) -> Result<(), AppError> {
+    pub(crate) async fn validate(
+        &self,
+        db: &worker::D1Database,
+        user_id: &str,
+    ) -> Result<(), AppError> {
         match (&self.master_password_hash, &self.otp) {
             (Some(master_password_hash), None) => {
                 if !password::verify_user_password(db, user_id, master_password_hash).await? {
@@ -131,6 +137,34 @@ pub async fn two_factor_status(
         providers.push(json!({
             "enabled": true,
             "type": two_factor::TWO_FACTOR_PROVIDER_EMAIL,
+            "object": "twoFactorProvider"
+        }));
+    }
+
+    if two_factor::is_external_two_factor_enabled(
+        &db,
+        &claims.sub,
+        two_factor::TWO_FACTOR_PROVIDER_DUO,
+    )
+    .await?
+    {
+        providers.push(json!({
+            "enabled": true,
+            "type": two_factor::TWO_FACTOR_PROVIDER_DUO,
+            "object": "twoFactorProvider"
+        }));
+    }
+
+    if two_factor::is_external_two_factor_enabled(
+        &db,
+        &claims.sub,
+        two_factor::TWO_FACTOR_PROVIDER_YUBIKEY,
+    )
+    .await?
+    {
+        providers.push(json!({
+            "enabled": true,
+            "type": two_factor::TWO_FACTOR_PROVIDER_YUBIKEY,
             "object": "twoFactorProvider"
         }));
     }
@@ -1050,6 +1084,9 @@ pub async fn disable_twofactor(
                 claims.sub
             );
         }
+        two_factor::TWO_FACTOR_PROVIDER_DUO | two_factor::TWO_FACTOR_PROVIDER_YUBIKEY => {
+            two_factor::delete_external_two_factor(&db, &claims.sub, Some(type_)).await?;
+        }
         webauthn_runtime::TWO_FACTOR_PROVIDER_WEBAUTHN => {
             webauthn_runtime::disable_webauthn(&db, &claims.sub).await?;
             log::info!(
@@ -1076,6 +1113,8 @@ pub async fn disable_twofactor(
     let provider_name = match type_ {
         two_factor::TWO_FACTOR_PROVIDER_AUTHENTICATOR => "authenticator",
         two_factor::TWO_FACTOR_PROVIDER_EMAIL => "email",
+        two_factor::TWO_FACTOR_PROVIDER_DUO => "duo",
+        two_factor::TWO_FACTOR_PROVIDER_YUBIKEY => "yubikey",
         webauthn_runtime::TWO_FACTOR_PROVIDER_WEBAUTHN => "webauthn",
         _ => "unknown",
     };

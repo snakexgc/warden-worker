@@ -4,6 +4,7 @@ use base64::{Engine as _, engine::general_purpose};
 use constant_time_eq::constant_time_eq;
 #[cfg(target_arch = "wasm32")]
 use js_sys::Uint8Array;
+use rand::{Rng, distributions::Alphanumeric};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsValue};
 
@@ -18,6 +19,16 @@ pub const ARGON2ID_MEMORY_DEFAULT_MB: i32 = 64;
 pub const ARGON2ID_PARALLELISM_DEFAULT: i32 = 4;
 pub const PASSWORD_ITERATIONS_DEFAULT: i32 = 600_000;
 const PASSWORD_SALT_LEN: usize = 64;
+
+/// Generates the 30-character API key used by Vaultwarden for user and
+/// organization client-credential logins.
+pub fn generate_api_key() -> String {
+    rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(30)
+        .map(char::from)
+        .collect()
+}
 
 /// 使用 PBKDF2-HMAC-SHA256 哈希密码
 ///
@@ -324,5 +335,12 @@ mod tests {
             .decode(salt)
             .expect("password salt should be valid base64");
         assert_eq!(decoded.len(), 64);
+    }
+
+    #[test]
+    fn api_key_matches_vaultwarden_length_and_alphabet() {
+        let api_key = generate_api_key();
+        assert_eq!(api_key.len(), 30);
+        assert!(api_key.bytes().all(|byte| byte.is_ascii_alphanumeric()));
     }
 }

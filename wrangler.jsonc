@@ -37,6 +37,9 @@
 		"INVITATION_EXPIRATION_HOURS": "120",
 		"ORG_GROUPS_ENABLED": "false",
 		"ORG_EVENTS_ENABLED": "false",
+		// Vaultwarden defaults emergency access to enabled. Set false to make all
+		// mutating emergency-access endpoints reject requests.
+		"EMERGENCY_ACCESS_ALLOWED": "true",
 		// ===============================
 		// 动态 vaultwarden.css 配置（参考 Vaultwarden 设计）
 		// 说明：
@@ -69,7 +72,7 @@
 		// 是否启用 DUO 2FA（false=隐藏 DUO 2FA 入口）
 		"VW_CSS_DUO_ENABLED": "false",
 		// 是否显示 Emergency Access 入口（false=隐藏）
-		"VW_CSS_EMERGENCY_ACCESS_ALLOWED": "false",
+		"VW_CSS_EMERGENCY_ACCESS_ALLOWED": "true",
 		// 是否加载用户自定义 CSS（配合 VW_CSS_USER 使用）
 		"VW_CSS_LOAD_USER_CSS": "true",
 		// 用户自定义 CSS 

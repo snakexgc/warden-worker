@@ -87,6 +87,13 @@ pub async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
         Ok(_) => {}
         Err(err) => log::error!("scheduled notification retry failed: {err}"),
     }
+    match api::core::emergency_access::process_recovery_timeouts(&env).await {
+        Ok(count) if count > 0 => {
+            log::info!("scheduled emergency access approved {count} timed-out requests")
+        }
+        Ok(_) => {}
+        Err(err) => log::error!("scheduled emergency access timeout job failed: {err}"),
+    }
     if event.cron() == "0 3 * * *" {
         match api::core::sends::purge_expired_sends(&env).await {
             Ok(count) => log::info!("scheduled cleanup purged {count} expired Sends"),

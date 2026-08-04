@@ -38,6 +38,30 @@ pub struct RegisterVerifyClaims {
     pub verified: bool,
 }
 
+/// Access-token contract used by Vaultwarden's organization Public API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrgApiKeyClaims {
+    pub nbf: usize,
+    pub exp: usize,
+    pub iss: String,
+    pub sub: String,
+    pub client_id: String,
+    pub client_sub: String,
+    pub scope: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmergencyAccessInviteClaims {
+    pub nbf: usize,
+    pub exp: usize,
+    pub iss: String,
+    pub sub: String,
+    pub email: String,
+    pub emer_id: String,
+    pub grantor_name: String,
+    pub grantor_email: String,
+}
+
 /// Returns the edge-authenticated client address used for security decisions.
 ///
 /// Cloudflare Workers do not expose a peer socket address, so production
@@ -67,7 +91,7 @@ pub(crate) fn client_ip_from_headers(headers: &HeaderMap) -> String {
         .unwrap_or_else(|| "0.0.0.0".to_string())
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,
     pub exp: usize,

@@ -1,6 +1,6 @@
 # Warden Worker 与 Vaultwarden 端点实现审计
 
-> 历史基线说明：本报告记录组织功能迁移开始前的仓库状态。组织功能已在同一工作树中开始实现，当前进度与剩余差异请以 `organization-migration-status-2026-08-04.md` 为准；下文“组织端点未实现”等结论不代表当前工作树。
+> 历史基线说明：本报告记录组织功能迁移开始前的仓库状态。当前实现请以 `organization-migration-status-2026-08-04.md` 和 `vaultwarden-file-alignment-2026-08-04.md` 为准；下文“组织端点未实现”等结论不代表当前工作树。
 
 审计日期：2026-08-04
 

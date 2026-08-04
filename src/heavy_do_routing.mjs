@@ -35,8 +35,10 @@ const HEAVY_DO_PREFIXES = [
   "/api/ciphers",
   "/api/folders",
   "/api/organizations",
+  "/api/public/organization/import",
   "/api/collections",
   "/api/policies",
+  "/api/emergency-access",
 ];
 
 export function normalizePathname(pathname) {

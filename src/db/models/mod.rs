@@ -4,6 +4,7 @@ pub mod auth_request;
 pub mod cipher;
 pub mod collection;
 pub mod device;
+pub mod emergency_access;
 pub mod event;
 pub mod folder;
 pub mod group;
@@ -15,10 +16,12 @@ pub mod user;
 
 pub use attachment::Attachment;
 pub use collection::Collection;
+pub use emergency_access::EmergencyAccess;
 pub use event::Event;
 pub use group::Group;
 pub use org_policy::OrgPolicy;
 pub use organization::{
     MEMBER_STATUS_ACCEPTED, MEMBER_STATUS_CONFIRMED, MEMBER_STATUS_INVITED, MEMBER_TYPE_ADMIN,
     MEMBER_TYPE_MANAGER, MEMBER_TYPE_OWNER, MEMBER_TYPE_USER, Membership, Organization,
+    OrganizationApiKey,
 };

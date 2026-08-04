@@ -10,3 +10,4 @@ docs
 API端点一致性比对报告.md
 Vaultwarden-API修复报告.md
 .workbuddy/
+.compat-worktrees/

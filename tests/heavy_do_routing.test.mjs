@@ -19,6 +19,7 @@ const PASSWORD_ENDPOINTS = [
   "/api/accounts/delete",
   "/api/accounts",
   "/api/accounts/set-password",
+  "/api/emergency-access/emergency-id/password",
   "/api/two-factor/authenticator/disable",
   "/api/webauthn/credential-id/delete",
 ];
@@ -62,5 +63,14 @@ test("heavy routes are deterministically sharded without exposing identity", asy
 test("organization routes are offloaded to HeavyDo", () => {
   assert.equal(shouldOffloadToHeavyDo("/api/organizations"), true);
   assert.equal(shouldOffloadToHeavyDo("/api/organizations/org-id/users"), true);
+  assert.equal(shouldOffloadToHeavyDo("/api/public/organization/import"), true);
   assert.equal(shouldOffloadToHeavyDo("/api/collections"), true);
+});
+
+test("emergency access state changes are offloaded to HeavyDo", () => {
+  assert.equal(shouldOffloadToHeavyDo("/api/emergency-access/trusted"), true);
+  assert.equal(
+    shouldOffloadToHeavyDo("/api/emergency-access/emergency-id/password"),
+    true,
+  );
 });

@@ -23,7 +23,7 @@ use crate::{
     auth::Claims,
     crypto::{self, password},
     db,
-    db::models::{auth_request, device, two_factor, user::User},
+    db::models::{OrganizationApiKey, auth_request, device, two_factor, user::User},
     error::AppError,
     worker_runtime::{jwt, logging::targets, webauthn},
 };
@@ -456,6 +456,42 @@ async fn generate_api_key_tokens_response(
     }))
 }
 
+fn organization_api_key_issuer(state: &AppState) -> String {
+    format!(
+        "{}|api.organization",
+        state.public_url("").trim_end_matches('/')
+    )
+}
+
+async fn generate_organization_api_key_tokens_response(
+    api_key: &OrganizationApiKey,
+    state: &AppState,
+) -> Result<Value, AppError> {
+    let now = Utc::now();
+    let expires_in = Duration::hours(1);
+    let claims = crate::auth::OrgApiKeyClaims {
+        nbf: now.timestamp() as usize,
+        exp: (now + expires_in).timestamp() as usize,
+        iss: organization_api_key_issuer(state),
+        sub: api_key.id.clone(),
+        client_id: format!("organization.{}", api_key.organization_id),
+        client_sub: api_key.organization_id.clone(),
+        scope: vec!["api.organization".to_string()],
+    };
+    let access_token = encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(state.jwt_keys.access_secret.as_ref()),
+    )?;
+
+    Ok(json!({
+        "access_token": access_token,
+        "expires_in": expires_in.num_seconds(),
+        "token_type": "Bearer",
+        "scope": "api.organization"
+    }))
+}
+
 fn sha256_hex(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
@@ -664,11 +700,22 @@ fn invalid_grant_response(error_description: &str) -> Response {
         .into_response()
 }
 
+async fn load_user_by_id(db: &worker::D1Database, user_id: &str) -> Result<User, AppError> {
+    db.prepare("SELECT * FROM users WHERE id = ?1")
+        .bind(&[user_id.into()])?
+        .first::<Value>(None)
+        .await
+        .map_err(|_| AppError::Database)?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))
+        .and_then(|value| serde_json::from_value(value).map_err(|_| AppError::Internal))
+}
+
 async fn two_factor_required_response(
     providers: &[i32],
     user_id: &str,
     email_2fa_data: Option<(String, String)>,
     headers: &HeaderMap,
+    state: &Arc<AppState>,
     db: &worker::D1Database,
 ) -> Response {
     let mut response_providers: Vec<String> = Vec::new();
@@ -685,6 +732,30 @@ async fn two_factor_required_response(
                 );
             } else {
                 providers2.insert(p.to_string(), Value::Null);
+            }
+        } else if p == two_factor::TWO_FACTOR_PROVIDER_DUO {
+            if let Ok(user) = load_user_by_id(db, user_id).await
+                && let Ok((signature, host)) = two_factor_api::duo::generate_duo_signature(
+                    &user.email,
+                    user_id,
+                    db,
+                    &state.env,
+                )
+                .await
+            {
+                response_providers.push(p.to_string());
+                providers2.insert(
+                    p.to_string(),
+                    json!({ "Host": host, "Signature": signature }),
+                );
+            }
+        } else if p == two_factor::TWO_FACTOR_PROVIDER_YUBIKEY {
+            if let Ok(Some(data)) = two_factor::get_external_two_factor(db, user_id, p).await
+                && let Ok(metadata) =
+                    serde_json::from_str::<two_factor_api::yubikey::YubikeyMetadata>(&data)
+            {
+                response_providers.push(p.to_string());
+                providers2.insert(p.to_string(), json!({ "Nfc": metadata.nfc }));
             }
         } else if p == two_factor::TWO_FACTOR_PROVIDER_WEBAUTHN {
             if webauthn::is_webauthn_2fa_supported(headers) {
@@ -744,6 +815,30 @@ async fn invalid_two_factor_response(
                 );
             } else {
                 providers2.insert(p.to_string(), Value::Null);
+            }
+        } else if p == two_factor::TWO_FACTOR_PROVIDER_DUO {
+            if let Ok(user) = load_user_by_id(db, user_id).await
+                && let Ok((signature, host)) = two_factor_api::duo::generate_duo_signature(
+                    &user.email,
+                    user_id,
+                    db,
+                    &state.env,
+                )
+                .await
+            {
+                response_providers.push(p.to_string());
+                providers2.insert(
+                    p.to_string(),
+                    json!({ "Host": host, "Signature": signature }),
+                );
+            }
+        } else if p == two_factor::TWO_FACTOR_PROVIDER_YUBIKEY {
+            if let Ok(Some(data)) = two_factor::get_external_two_factor(db, user_id, p).await
+                && let Ok(metadata) =
+                    serde_json::from_str::<two_factor_api::yubikey::YubikeyMetadata>(&data)
+            {
+                response_providers.push(p.to_string());
+                providers2.insert(p.to_string(), json!({ "Nfc": metadata.nfc }));
             }
         } else if p == two_factor::TWO_FACTOR_PROVIDER_WEBAUTHN {
             if webauthn::is_webauthn_2fa_supported(headers) {
@@ -826,13 +921,6 @@ pub async fn token(
                 .as_deref()
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| AppError::BadRequest("client_secret cannot be blank".to_string()))?;
-            if payload.scope.as_deref() != Some("api") {
-                return Err(AppError::BadRequest("Scope not supported".to_string()));
-            }
-            let user_id = client_id
-                .strip_prefix("user.")
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| AppError::BadRequest("Malformed client_id".to_string()))?;
             let device_identifier = payload
                 .device_identifier
                 .clone()
@@ -850,6 +938,39 @@ pub async fn token(
                 .ok_or_else(|| AppError::BadRequest("device_type cannot be blank".to_string()))?;
 
             enforce_login_rate_limit(&state, &headers, client_id).await?;
+            if payload.scope.as_deref() == Some("api.organization") {
+                let organization_id = client_id
+                    .strip_prefix("organization.")
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| AppError::BadRequest("Malformed client_id".to_string()))?;
+                let api_key: OrganizationApiKey = db
+                    .prepare(
+                        "SELECT id, organization_id, type, api_key, revision_date FROM organization_api_key WHERE organization_id = ?1",
+                    )
+                    .bind(&[organization_id.into()])?
+                    .first::<Value>(None)
+                    .await
+                    .map_err(|_| AppError::Database)?
+                    .ok_or_else(|| AppError::Unauthorized("Invalid client_id".to_string()))
+                    .and_then(|value| {
+                        serde_json::from_value(value).map_err(|_| AppError::Internal)
+                    })?;
+                if !constant_time_eq(api_key.api_key.as_bytes(), client_secret.as_bytes()) {
+                    return Err(AppError::Unauthorized(
+                        "Incorrect client_secret".to_string(),
+                    ));
+                }
+                let response =
+                    generate_organization_api_key_tokens_response(&api_key, &state).await?;
+                return Ok(Json(response).into_response());
+            }
+            if payload.scope.as_deref() != Some("api") {
+                return Err(AppError::BadRequest("Scope not supported".to_string()));
+            }
+            let user_id = client_id
+                .strip_prefix("user.")
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| AppError::BadRequest("Malformed client_id".to_string()))?;
             let user: User = db
                 .prepare("SELECT * FROM users WHERE id = ?1")
                 .bind(&[user_id.into()])?
@@ -1136,9 +1257,36 @@ pub async fn token(
             let email_2fa_enabled = two_factor::is_email_2fa_enabled(&db, &user.id).await?;
             let email_2fa_usable =
                 email_2fa_enabled && notify::is_email_webhook_configured(&state.env);
+            let duo_enabled = two_factor::is_external_two_factor_enabled(
+                &db,
+                &user.id,
+                two_factor::TWO_FACTOR_PROVIDER_DUO,
+            )
+            .await?;
+            let duo_usable = duo_enabled
+                && two_factor_api::duo::generate_duo_signature(
+                    &user.email,
+                    &user.id,
+                    &db,
+                    &state.env,
+                )
+                .await
+                .is_ok();
+            let yubikey_enabled = two_factor::is_external_two_factor_enabled(
+                &db,
+                &user.id,
+                two_factor::TWO_FACTOR_PROVIDER_YUBIKEY,
+            )
+            .await?;
+            let yubikey_usable =
+                yubikey_enabled && two_factor_api::yubikey::is_configured(&state.env);
             let webauthn_enabled = webauthn::is_webauthn_enabled(&db, &user.id).await?;
             let webauthn_usable = webauthn_enabled && webauthn::is_webauthn_2fa_supported(&headers);
-            let two_factor_enabled = authenticator_enabled || email_2fa_enabled || webauthn_enabled;
+            let two_factor_enabled = authenticator_enabled
+                || email_2fa_enabled
+                || duo_enabled
+                || yubikey_enabled
+                || webauthn_enabled;
 
             let mut providers: Vec<i32> = Vec::new();
             if authenticator_enabled {
@@ -1146,6 +1294,12 @@ pub async fn token(
             }
             if email_2fa_usable {
                 providers.push(two_factor::TWO_FACTOR_PROVIDER_EMAIL);
+            }
+            if duo_usable {
+                providers.push(two_factor::TWO_FACTOR_PROVIDER_DUO);
+            }
+            if yubikey_usable {
+                providers.push(two_factor::TWO_FACTOR_PROVIDER_YUBIKEY);
             }
             if webauthn_usable {
                 providers.push(two_factor::TWO_FACTOR_PROVIDER_WEBAUTHN);
@@ -1171,7 +1325,7 @@ pub async fn token(
                         let email_data =
                             get_email_2fa_display_info(&providers, &user.id, &state).await;
                         return Ok(two_factor_required_response(
-                            &providers, &user.id, email_data, &headers, &db,
+                            &providers, &user.id, email_data, &headers, &state, &db,
                         )
                         .await);
                     };
@@ -1183,7 +1337,7 @@ pub async fn token(
                         let email_data =
                             get_email_2fa_display_info(&providers, &user.id, &state).await;
                         return Ok(two_factor_required_response(
-                            &providers, &user.id, email_data, &headers, &db,
+                            &providers, &user.id, email_data, &headers, &state, &db,
                         )
                         .await);
                     };
@@ -1201,7 +1355,7 @@ pub async fn token(
                         let email_data =
                             get_email_2fa_display_info(&providers, &user.id, &state).await;
                         return Ok(two_factor_required_response(
-                            &providers, &user.id, email_data, &headers, &db,
+                            &providers, &user.id, email_data, &headers, &state, &db,
                         )
                         .await);
                     }
@@ -1221,7 +1375,7 @@ pub async fn token(
                         let email_data =
                             get_email_2fa_display_info(&providers, &user.id, &state).await;
                         return Ok(two_factor_required_response(
-                            &providers, &user.id, email_data, &headers, &db,
+                            &providers, &user.id, email_data, &headers, &state, &db,
                         )
                         .await);
                     };
@@ -1229,7 +1383,7 @@ pub async fn token(
                         let email_data =
                             get_email_2fa_display_info(&providers, &user.id, &state).await;
                         return Ok(two_factor_required_response(
-                            &providers, &user.id, email_data, &headers, &db,
+                            &providers, &user.id, email_data, &headers, &state, &db,
                         )
                         .await);
                     };
@@ -1245,7 +1399,7 @@ pub async fn token(
                         let email_data =
                             get_email_2fa_display_info(&providers, &user.id, &state).await;
                         return Ok(two_factor_required_response(
-                            &providers, &user.id, email_data, &headers, &db,
+                            &providers, &user.id, email_data, &headers, &state, &db,
                         )
                         .await);
                     }
@@ -1256,7 +1410,7 @@ pub async fn token(
                         let email_data =
                             get_email_2fa_display_info(&providers, &user.id, &state).await;
                         return Ok(two_factor_required_response(
-                            &providers, &user.id, email_data, &headers, &db,
+                            &providers, &user.id, email_data, &headers, &state, &db,
                         )
                         .await);
                     };
@@ -1309,7 +1463,7 @@ pub async fn token(
                         let email_data =
                             get_email_2fa_display_info(&providers, &user.id, &state).await;
                         return Ok(two_factor_required_response(
-                            &providers, &user.id, email_data, &headers, &db,
+                            &providers, &user.id, email_data, &headers, &state, &db,
                         )
                         .await);
                     };
@@ -1420,12 +1574,113 @@ pub async fn token(
                             .await?,
                         );
                     }
+                } else if provider == Some(two_factor::TWO_FACTOR_PROVIDER_DUO) && duo_usable {
+                    let Some(token) = token.as_deref() else {
+                        let email_data =
+                            get_email_2fa_display_info(&providers, &user.id, &state).await;
+                        return Ok(two_factor_required_response(
+                            &providers, &user.id, email_data, &headers, &state, &db,
+                        )
+                        .await);
+                    };
+                    if two_factor_api::duo::validate_duo_login(
+                        &user.email,
+                        &user.id,
+                        token,
+                        &db,
+                        &state.env,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        notify::notify_background(
+                            &state.ctx,
+                            state.env.clone(),
+                            NotifyEvent::LoginFailed,
+                            NotifyContext {
+                                user_id: Some(user.id.clone()),
+                                user_email: Some(user.email.clone()),
+                                detail: Some("2FA Duo Verification Failed".to_string()),
+                                device_identifier: payload.device_identifier.clone(),
+                                device_name: payload.device_name.clone(),
+                                device_type: payload.device_type,
+                                meta: notify::extract_request_meta(&headers),
+                                ..Default::default()
+                            },
+                        );
+                        return Ok(invalid_two_factor_response(
+                            &providers, &user.id, &headers, &state, &db,
+                        )
+                        .await);
+                    }
+                    if wants_remember && payload.device_identifier.is_some() {
+                        remember_token_to_return = Some(
+                            generate_remember_token_async(
+                                payload.device_identifier.as_deref().unwrap(),
+                                &user.id,
+                                &state,
+                            )
+                            .await?,
+                        );
+                    }
+                } else if provider == Some(two_factor::TWO_FACTOR_PROVIDER_YUBIKEY)
+                    && yubikey_usable
+                {
+                    let Some(token) = token.as_deref() else {
+                        let email_data =
+                            get_email_2fa_display_info(&providers, &user.id, &state).await;
+                        return Ok(two_factor_required_response(
+                            &providers, &user.id, email_data, &headers, &state, &db,
+                        )
+                        .await);
+                    };
+                    let data = two_factor::get_external_two_factor(
+                        &db,
+                        &user.id,
+                        two_factor::TWO_FACTOR_PROVIDER_YUBIKEY,
+                    )
+                    .await?
+                    .ok_or_else(|| AppError::Internal)?;
+                    if two_factor_api::yubikey::validate_yubikey_login(&state.env, token, &data)
+                        .await
+                        .is_err()
+                    {
+                        notify::notify_background(
+                            &state.ctx,
+                            state.env.clone(),
+                            NotifyEvent::LoginFailed,
+                            NotifyContext {
+                                user_id: Some(user.id.clone()),
+                                user_email: Some(user.email.clone()),
+                                detail: Some("2FA YubiKey Verification Failed".to_string()),
+                                device_identifier: payload.device_identifier.clone(),
+                                device_name: payload.device_name.clone(),
+                                device_type: payload.device_type,
+                                meta: notify::extract_request_meta(&headers),
+                                ..Default::default()
+                            },
+                        );
+                        return Ok(invalid_two_factor_response(
+                            &providers, &user.id, &headers, &state, &db,
+                        )
+                        .await);
+                    }
+                    if wants_remember && payload.device_identifier.is_some() {
+                        remember_token_to_return = Some(
+                            generate_remember_token_async(
+                                payload.device_identifier.as_deref().unwrap(),
+                                &user.id,
+                                &state,
+                            )
+                            .await?,
+                        );
+                    }
                 } else if provider == Some(two_factor::TWO_FACTOR_PROVIDER_RECOVERY_CODE) {
                     let Some(token) = token.as_deref() else {
                         let email_data =
                             get_email_2fa_display_info(&providers, &user.id, &state).await;
                         return Ok(two_factor_required_response(
-                            &providers, &user.id, email_data, &headers, &db,
+                            &providers, &user.id, email_data, &headers, &state, &db,
                         )
                         .await);
                     };
@@ -1493,7 +1748,7 @@ pub async fn token(
                         let email_data =
                             get_email_2fa_display_info(&providers, &user.id, &state).await;
                         return Ok(two_factor_required_response(
-                            &providers, &user.id, email_data, &headers, &db,
+                            &providers, &user.id, email_data, &headers, &state, &db,
                         )
                         .await);
                     };
@@ -1541,7 +1796,7 @@ pub async fn token(
                 } else {
                     let email_data = get_email_2fa_display_info(&providers, &user.id, &state).await;
                     return Ok(two_factor_required_response(
-                        &providers, &user.id, email_data, &headers, &db,
+                        &providers, &user.id, email_data, &headers, &state, &db,
                     )
                     .await);
                 }

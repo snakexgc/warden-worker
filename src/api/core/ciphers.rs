@@ -4,7 +4,7 @@ mod sync;
 pub use super::imports::import_data;
 pub use attachments::{
     attachment_metadata, create_attachment_legacy, create_attachment_v2, delete_attachment,
-    delete_attachment_post, download_attachment, upload_attachment_v2,
+    delete_attachment_post, download_attachment, share_attachment, upload_attachment_v2,
 };
 pub use sync::sync;
 
@@ -64,6 +64,13 @@ pub struct BulkCollectionsData {
 #[serde(rename_all = "camelCase")]
 pub struct OrganizationIdQuery {
     organization_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareSelectedCipherData {
+    ciphers: Vec<CipherRequestData>,
+    collection_ids: Vec<String>,
 }
 
 fn accessible_cipher_sql(single: bool) -> String {
@@ -533,7 +540,7 @@ async fn update_cipher_collections_inner(
 pub(crate) async fn update_attachment_keys(
     db: &D1Database,
     cipher_id: &str,
-    user_id: &str,
+    _user_id: &str,
     attachments: Option<&Value>,
 ) -> Result<(), AppError> {
     let Some(attachments) = attachments else {
@@ -552,8 +559,8 @@ pub(crate) async fn update_attachment_keys(
             .and_then(Value::as_str)
             .ok_or_else(|| AppError::BadRequest("Missing attachment key".to_string()))?;
         let owner_cipher_id: Option<String> = db
-            .prepare("SELECT cipher_id FROM cipher_attachments WHERE id = ?1 AND user_id = ?2")
-            .bind(&[attachment_id.into(), user_id.into()])?
+            .prepare("SELECT cipher_id FROM cipher_attachments WHERE id = ?1")
+            .bind(&[attachment_id.into()])?
             .first(Some("cipher_id"))
             .await
             .map_err(|_| AppError::Database)?;
@@ -565,28 +572,19 @@ pub(crate) async fn update_attachment_keys(
             log::warn!("attachment {attachment_id} does not belong to cipher {cipher_id}");
             break;
         }
-        db.prepare("UPDATE cipher_attachments SET file_name = ?1, key = ?2, updated_at = ?3 WHERE id = ?4 AND cipher_id = ?5 AND user_id = ?6")
+        db.prepare("UPDATE cipher_attachments SET file_name = ?1, key = ?2, updated_at = ?3 WHERE id = ?4 AND cipher_id = ?5")
             .bind(&[
                 file_name.into(),
                 key.into(),
                 db::now_rfc3339_millis().into(),
                 attachment_id.into(),
                 cipher_id.into(),
-                user_id.into(),
             ])?
             .run()
             .await
             .map_err(|_| AppError::Database)?;
     }
     Ok(())
-}
-
-pub(crate) async fn get_cipher_dbmodel_from_db(
-    db: &D1Database,
-    cipher_id: &str,
-    user_id: &str,
-) -> Result<crate::db::models::cipher::CipherDBModel, AppError> {
-    get_cipher_dbmodel_with_access(db, cipher_id, user_id, false).await
 }
 
 pub(crate) async fn get_cipher_dbmodel_with_access(
@@ -759,6 +757,236 @@ async fn create_cipher_inner(
     Ok(cipher)
 }
 
+async fn share_cipher_inner(
+    claims: &Claims,
+    state: &Arc<AppState>,
+    cipher_id: &str,
+    cipher_data_req: CipherRequestData,
+    collection_ids: Vec<String>,
+) -> Result<Cipher, AppError> {
+    let db = db::get_db(&state.env)?;
+    claims.verify_security_stamp(&db).await?;
+    archive::ensure_table(&db).await?;
+    cipher_data_req
+        .validate_for_vault(&claims.sub)
+        .map_err(|message| AppError::BadRequest(message.to_string()))?;
+    let organization_id = cipher_data_req
+        .organization_id
+        .clone()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::BadRequest("An organizationId is required when sharing a cipher".to_string())
+        })?;
+    if !super::organizations::organizations_enabled(&state.env) {
+        return Err(AppError::NotFound(
+            "Organization support is disabled".to_string(),
+        ));
+    }
+
+    let existing = get_cipher_dbmodel_with_access(&db, cipher_id, &claims.sub, true).await?;
+    require_cipher_write(&existing)?;
+    if existing
+        .organization_id
+        .as_deref()
+        .is_some_and(|existing_org| existing_org != organization_id)
+    {
+        return Err(AppError::BadRequest(
+            "Organization mismatch. Please resync the client before updating the cipher"
+                .to_string(),
+        ));
+    }
+    if client_revision_is_stale(
+        &existing.updated_at,
+        cipher_data_req.last_known_revision_date.as_deref(),
+    ) {
+        return Err(AppError::BadRequest(
+            "The client copy of this cipher is out of date. Resync the client and try again."
+                .to_string(),
+        ));
+    }
+    let collection_ids =
+        validate_organization_collections(&db, &claims.sub, &organization_id, collection_ids)
+            .await?;
+    validate_folder(&db, cipher_data_req.folder_id.as_deref(), &claims.sub).await?;
+
+    let now = now_string();
+    let requested_archived_at =
+        normalize_optional_rfc3339(cipher_data_req.archived_date.as_deref());
+    let archived_at = requested_archived_at
+        .clone()
+        .or_else(|| existing.archived_at.clone());
+    let cipher_data = CipherData::from_request(&cipher_data_req);
+    let data_value = serde_json::to_value(&cipher_data).map_err(|_| AppError::Internal)?;
+    let data = serde_json::to_string(&data_value).map_err(|_| AppError::Internal)?;
+
+    let mut statements = vec![
+        db.prepare(
+            "UPDATE ciphers
+             SET user_id = NULL, organization_id = ?1, type = ?2, data = ?3, key = ?4,
+                 favorite = 0, folder_id = NULL, updated_at = ?5
+             WHERE id = ?6",
+        )
+        .bind(&[
+            organization_id.clone().into(),
+            cipher_data_req.r#type.into(),
+            data.into(),
+            cipher_data_req.key.clone().into(),
+            now.clone().into(),
+            cipher_id.into(),
+        ])?,
+    ];
+    statements.push(
+        db.prepare("DELETE FROM favorites WHERE user_id = ?1 AND cipher_id = ?2")
+            .bind(&[claims.sub.clone().into(), cipher_id.into()])?,
+    );
+    statements.push(
+        db.prepare("UPDATE cipher_attachments SET user_id = NULL WHERE cipher_id = ?1")
+            .bind(&[cipher_id.into()])?,
+    );
+    statements.push(
+        db.prepare(
+            "DELETE FROM folders_ciphers WHERE cipher_id = ?1 AND folder_id IN
+             (SELECT id FROM folders WHERE user_id = ?2)",
+        )
+        .bind(&[cipher_id.into(), claims.sub.clone().into()])?,
+    );
+    for collection_id in &collection_ids {
+        statements.push(
+            db.prepare(
+                "INSERT OR IGNORE INTO ciphers_collections (cipher_id, collection_id)
+                 VALUES (?1, ?2)",
+            )
+            .bind(&[cipher_id.into(), collection_id.clone().into()])?,
+        );
+    }
+    if cipher_data_req.favorite {
+        statements.push(
+            db.prepare("INSERT INTO favorites (user_id, cipher_id) VALUES (?1, ?2)")
+                .bind(&[claims.sub.clone().into(), cipher_id.into()])?,
+        );
+    }
+    if let Some(folder_id) = &cipher_data_req.folder_id {
+        statements.push(
+            db.prepare("INSERT INTO folders_ciphers (folder_id, cipher_id) VALUES (?1, ?2)")
+                .bind(&[folder_id.clone().into(), cipher_id.into()])?,
+        );
+    }
+    db.batch(statements).await.map_err(|_| AppError::Database)?;
+
+    update_attachment_keys(
+        &db,
+        cipher_id,
+        &claims.sub,
+        cipher_data_req.attachments2.as_ref(),
+    )
+    .await?;
+
+    if let Some(archived_at) = &requested_archived_at {
+        archive::save(&db, &claims.sub, cipher_id, archived_at).await?;
+    }
+    let refreshed = get_cipher_dbmodel_with_access(&db, cipher_id, &claims.sub, true).await?;
+    let mut cipher: Cipher = refreshed.into();
+    cipher.archived_at = archived_at;
+    populate_collection_ids(&db, std::slice::from_mut(&mut cipher), &claims.sub).await?;
+    attachments::enrich_cipher(&db, state, &mut cipher).await?;
+    finish_organization_cipher_mutation(
+        &db,
+        state,
+        &organization_id,
+        &claims.sub,
+        cipher_id,
+        claims.device.as_deref(),
+        UpdateType::SyncCipherUpdate,
+    )
+    .await?;
+    Ok(cipher)
+}
+
+#[worker::send]
+pub async fn share_cipher(
+    claims: Claims,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(cipher_id): Path<String>,
+    Json(payload): Json<CreateCipherRequest>,
+) -> Result<Json<Cipher>, AppError> {
+    let cipher = share_cipher_inner(
+        &claims,
+        &state,
+        &cipher_id,
+        payload.cipher,
+        payload.collection_ids,
+    )
+    .await?;
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
+        NotifyEvent::CipherUpdate,
+        NotifyContext {
+            user_id: Some(claims.sub),
+            user_email: Some(claims.email),
+            cipher_id: Some(cipher_id),
+            detail: Some("Action: Share Cipher".to_string()),
+            meta: notify::extract_request_meta(&headers),
+            ..Default::default()
+        },
+    );
+    Ok(Json(cipher))
+}
+
+#[worker::send]
+pub async fn share_ciphers(
+    claims: Claims,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<ShareSelectedCipherData>,
+) -> Result<Json<()>, AppError> {
+    if payload.ciphers.is_empty() {
+        return Err(AppError::BadRequest(
+            "You must select at least one cipher.".to_string(),
+        ));
+    }
+    if payload.collection_ids.is_empty() {
+        return Err(AppError::BadRequest(
+            "You must select at least one collection.".to_string(),
+        ));
+    }
+    if payload.ciphers.len() > 40 {
+        return Err(AppError::BadRequest(
+            "At most 40 ciphers can be shared in one request".to_string(),
+        ));
+    }
+    let count = payload.ciphers.len();
+    for cipher in payload.ciphers {
+        let cipher_id = cipher
+            .id
+            .clone()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| AppError::BadRequest("Request missing ids field".to_string()))?;
+        share_cipher_inner(
+            &claims,
+            &state,
+            &cipher_id,
+            cipher,
+            payload.collection_ids.clone(),
+        )
+        .await?;
+    }
+    notify::notify_background(
+        &state.ctx,
+        state.env.clone(),
+        NotifyEvent::CipherUpdate,
+        NotifyContext {
+            user_id: Some(claims.sub),
+            user_email: Some(claims.email),
+            detail: Some(format!("Action: Batch Share ({count} items)")),
+            meta: notify::extract_request_meta(&headers),
+            ..Default::default()
+        },
+    );
+    Ok(Json(()))
+}
+
 #[worker::send]
 pub async fn create_cipher(
     claims: Claims,
@@ -851,11 +1079,6 @@ pub async fn update_cipher(
                 .to_string(),
         ));
     }
-    if existing_cipher.organization_id.is_some() && cipher_data_req.attachments2.is_some() {
-        return Err(AppError::BadRequest(
-            "Organization cipher attachment key rotation is not supported yet".to_string(),
-        ));
-    }
     if client_revision_is_stale(
         &existing_cipher.updated_at,
         cipher_data_req.last_known_revision_date.as_deref(),
@@ -935,6 +1158,8 @@ pub async fn update_cipher(
             );
         }
         db.batch(statements).await.map_err(|_| AppError::Database)?;
+        update_attachment_keys(&db, &id, &claims.sub, cipher_data_req.attachments2.as_ref())
+            .await?;
     } else {
         query!(
             &db,
@@ -1459,9 +1684,7 @@ pub async fn hard_delete_cipher(
     let existing = get_cipher_dbmodel(&state, &id, &claims.sub).await?;
     require_cipher_write(&existing)?;
     let organization_id = existing.organization_id.clone();
-    if organization_id.is_none() {
-        attachments::delete_cipher_attachments_from_r2(&state.env, &db, &id, &claims.sub).await?;
-    }
+    attachments::delete_cipher_attachments_from_r2(&state.env, &db, &id).await?;
     archive::delete(&db, &claims.sub, &id).await?;
 
     if let Some(organization_id) = organization_id.as_deref() {
@@ -1719,10 +1942,7 @@ pub async fn hard_delete_ciphers(
     for id in payload.ids {
         let existing = get_cipher_dbmodel(&state, &id, &claims.sub).await?;
         require_cipher_write(&existing)?;
-        if existing.organization_id.is_none() {
-            attachments::delete_cipher_attachments_from_r2(&state.env, &db, &id, &claims.sub)
-                .await?;
-        }
+        attachments::delete_cipher_attachments_from_r2(&state.env, &db, &id).await?;
         archive::delete(&db, &claims.sub, &id).await?;
         if let Some(organization_id) = existing.organization_id {
             db.prepare("DELETE FROM ciphers WHERE id = ?1 AND organization_id = ?2")

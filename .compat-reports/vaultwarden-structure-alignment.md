@@ -20,14 +20,16 @@ src/
       ciphers/attachments.rs
       ciphers/sync.rs
       ciphers/sync/models.rs
+      emergency_access.rs
       events.rs
       folders.rs
       imports.rs
       imports/models.rs
       meta/{mod.rs,config.rs,hibp.rs,settings.rs}
       organizations.rs
+      public.rs
       sends.rs
-      two_factor/{mod.rs,webauthn.rs}
+      two_factor/{mod.rs,duo.rs,webauthn.rs,yubikey.rs}
     icons.rs
     identity.rs
     notifications.rs
@@ -41,6 +43,7 @@ src/
       cipher.rs
       collection.rs
       device.rs
+      emergency_access.rs
       event.rs
       folder.rs
       group.rs
@@ -74,11 +77,15 @@ src/
 | `api/core/accounts.rs` | `api/core/accounts.rs` | `accounts/devices.rs` | 设备与 AuthRequest 端点由 accounts 对外暴露 |
 | `api/core/ciphers.rs` | `api/core/ciphers.rs` | `ciphers/attachments.rs`、`ciphers/sync.rs` | 附件、同步、个人导入由 ciphers 对外暴露 |
 | `api/core/events.rs` | `api/core/events.rs` | 无 | 同名职责 |
+| `api/core/emergency_access.rs` | `api/core/emergency_access.rs` | `lib.rs` Cron | 邀请、状态机、查看与接管职责同名 |
 | `api/core/folders.rs` | `api/core/folders.rs` | 无 | 同名职责 |
 | `api/core/organizations.rs` | `api/core/organizations.rs` | `imports.rs` 中的共享 D1 批处理 | 组织导入由 organizations 对外暴露 |
+| `api/core/public.rs` | `api/core/public.rs` | `extensions/notify/*` | Directory Connector 导入与邀请投递分离 |
 | `api/core/sends.rs` | `api/core/sends.rs` | `worker_runtime/r2_file.rs` | 同名业务职责，R2 流式存储已隔离 |
 | `api/core/two_factor/mod.rs` | `api/core/two_factor/mod.rs` | `worker_runtime/webauthn.rs` | 2FA 模块层级一致 |
 | `api/core/two_factor/webauthn.rs` | `api/core/two_factor/webauthn.rs` | `worker_runtime/webauthn.rs` | 端点与 Workers 协议实现分离 |
+| `api/core/two_factor/duo.rs` | `api/core/two_factor/duo.rs` | 无 | Auth API 与旧版签名流程使用 Workers fetch |
+| `api/core/two_factor/yubikey.rs` | `api/core/two_factor/yubikey.rs` | 无 | Yubico OTP 2.0 请求和响应签名校验 |
 | `api/core/mod.rs` | `api/core/mod.rs` | `meta/*` | config、domains、HIBP、alive 等由 core 统一导出 |
 | `api/identity.rs` | `api/identity.rs` | `worker_runtime/jwt.rs` | 身份端点保持同名，边缘 JWT 实现隔离 |
 | `api/icons.rs` | `api/icons.rs` | 无 | 同名职责 |
@@ -104,7 +111,7 @@ src/
 
 - Vaultwarden 使用 Rocket、SQLite/MySQL/PostgreSQL 和文件系统；本项目使用 Axum、D1、R2 和 Durable Objects，框架装配不能逐行复用。
 - `imports.rs`、`meta/*` 以及 accounts/ciphers 的子文件用于控制 Workers 单文件体积，但其公开职责由 Vaultwarden 对应主模块统一暴露。
-- 尚未支持的 Vaultwarden 模块不会创建空实现，例如 `emergency_access.rs`、`public.rs`、SSO、SMTP 和 Push。
+- `emergency_access.rs`、`public.rs`、`two_factor/duo.rs` 和 `two_factor/yubikey.rs` 已按上游文件职责补入；SSO、SCIM、Provider、SMTP 和 Push 仍不创建空实现。
 - 后续同步上游时，优先比较同名主文件；任何平台差异必须进入 `extensions`、`worker_runtime` 或对应主文件的补充子模块。
 
 ## 维护约束
@@ -117,9 +124,9 @@ src/
 ## 本次验证
 
 - `cargo check --target wasm32-unknown-unknown`：通过。
-- `cargo test --lib`：67 passed、0 failed。
+- `cargo test --lib`：76 passed、0 failed。
 - `cargo clippy --all-targets -- -D warnings`：通过。
-- `node --test tests/*.test.mjs`：21 passed、0 failed。
+- `node --test tests/*.test.mjs`：22 passed、0 failed。
 - `worker-build --release`：通过，生成 release Wasm 产物。
 - `cargo fmt --all -- --check` 与 `git diff --check`：通过。
 - 对齐前后 `D:\gitrepo\vaultwarden` 均保持提交 `2629bcbe1380c894e3a7f52cafcac3988edb8fbb`，工作树为空。

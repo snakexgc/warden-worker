@@ -22,6 +22,17 @@ pub struct Organization {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct OrganizationApiKey {
+    pub id: String,
+    pub organization_id: String,
+    #[serde(rename = "type")]
+    pub key_type: i32,
+    pub api_key: String,
+    pub revision_date: String,
+}
+
 impl Organization {
     pub fn to_json(&self, events_enabled: bool, groups_enabled: bool) -> Value {
         json!({

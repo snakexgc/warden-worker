@@ -47,6 +47,7 @@ pub async fn enqueue_action_link(
         match link_type {
             ActionLinkType::Registration => "registration",
             ActionLinkType::OrganizationInvite => "organization_invite",
+            ActionLinkType::EmergencyAccessInvite => "emergency_access_invite",
         },
         hex::encode(sha2::Sha256::digest(url.as_bytes()))
     );

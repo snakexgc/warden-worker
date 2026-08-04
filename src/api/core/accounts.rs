@@ -5,7 +5,7 @@ pub use devices::*;
 use axum::http::{HeaderMap, StatusCode};
 use axum::{Json, extract::State};
 use chrono::Utc;
-use rand::{Rng, distributions::Alphanumeric};
+use rand::Rng;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -2067,11 +2067,7 @@ async fn update_api_key(
         .await
         .map_err(|_| AppError::Database)?;
     let api_key = if rotate || existing.as_deref().unwrap_or_default().is_empty() {
-        rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(30)
-            .map(char::from)
-            .collect::<String>()
+        crypto::generate_api_key()
     } else {
         existing.unwrap_or_default()
     };

@@ -5,6 +5,7 @@ fn title(kind: ActionLinkType) -> &'static str {
     match kind {
         ActionLinkType::Registration => "用户注册验证",
         ActionLinkType::OrganizationInvite => "组织邀请",
+        ActionLinkType::EmergencyAccessInvite => "紧急访问邀请",
     }
 }
 
