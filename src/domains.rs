@@ -5,7 +5,7 @@ use std::sync::RwLock;
 use worker::{D1Database, Fetch, Method, Request};
 
 use crate::error::AppError;
-use crate::logging::targets;
+use crate::worker_runtime::logging::targets;
 
 const GLOBAL_DOMAINS_URL: &str =
     "https://raw.githubusercontent.com/dani-garcia/vaultwarden/main/src/static/global_domains.json";

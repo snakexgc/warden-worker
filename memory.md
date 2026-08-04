@@ -67,31 +67,31 @@ Warden Worker 将个人密码库服务部署到 Cloudflare 边缘环境，提供
   - HeavyDo 路由白名单和固定实例名规则。
 - `src/lib.rs`
   - Rust Worker 的 `fetch`、`scheduled` 入口；初始化日志、D1/JWT/2FA 密钥、通知代理、CF 地理请求头、CORS 与 Axum Router。
-- `src/router.rs`
+- `src/api/router.rs`
   - Bitwarden/Vaultwarden 兼容 HTTP 路由总表和共享 `AppState`。
-- `src/heavy_do.rs`
+- `src/worker_runtime/heavy_do.rs`
   - `HeavyDo` 实现；复用同一套 Router，在 DO CPU 预算内执行密码验证等重计算请求。
-- `src/notifications.rs`
+- `src/api/notifications.rs`
   - `NotificationsHub` Durable Object、SignalR/WebSocket 协议处理，以及密码项、文件夹、Send、用户和认证请求的实时更新发布。
-- `src/background.rs`
+- `src/worker_runtime/background.rs`
   - 统一封装入口 Worker 的 `wait_until` 与 DO 内的异步后台任务。
-- `src/handlers/`
+- `src/api/core/`
   - HTTP 业务处理层，涵盖账户、身份令牌、同步、密码项、附件、文件夹、Send、导入、设备、设置、事件、兼容端点、2FA、WebAuthn、图标、CSS 与用量统计。
-- `src/models/`
+- `src/db/models/`
   - 用户、密码项、文件夹、Send、同步、导入和归档的数据结构、兼容反序列化及 API 序列化。
-- `src/auth.rs`、`src/jwt.rs`、`src/jwt_manager.rs`
+- `src/auth.rs`、`src/jwt.rs`、`src/worker_runtime/jwt_manager.rs`
   - Bearer/JWT 鉴权、令牌签发与 D1 中的 JWT 密钥管理。
 - `src/password.rs`、`src/crypto.rs`
   - 服务端密码哈希、验证、旧哈希升级与客户端 KDF 参数校验。
-- `src/r2_file.rs`
+- `src/worker_runtime/r2_file.rs`
   - 附件与 Send 共用的 95 MiB 限制、约 8 MiB 分片、R2 multipart abort/complete 和声明大小校验。
-- `src/two_factor.rs`、`src/two_factor_key_manager.rs`
+- `src/db/models/two_factor.rs`、`src/worker_runtime/two_factor_key_manager.rs`
   - TOTP/2FA 核心逻辑和 D1 加密密钥管理。
 - `src/webauthn.rs`
   - WebAuthn/Passkey 凭据、挑战、登录验证与 PRF 支持。
-- `src/notify/`
+- `src/extensions/notify/`
   - 企业微信、Telegram 通道、事件类型、模板、配置、上下文与分发器。
-- `src/db.rs`
+- `src/db/mod.rs`
   - D1 获取、统一毫秒时间戳和用户 vault revision 更新/读取。
 
 ### `sql`
@@ -108,7 +108,7 @@ Warden Worker 将个人密码库服务部署到 Cloudflare 边缘环境，提供
 1. Wrangler Assets 根据 `run_worker_first` 决定 API/动态路径先进入 Worker。
 2. `src/entry.js` 规范化 URL；匹配 `src/heavy_do_routing.mjs` 的路径进入固定 `personal-vault` HeavyDo，其余进入 Rust Worker。
 3. Rust 入口对 `/notifications/*` 直接代理到 `NotificationsHub`；普通请求初始化 D1、JWT 密钥和 2FA 密钥后进入 Axum Router。
-4. `src/router.rs` 将请求分派到 `src/handlers/`；处理器调用模型、鉴权/密码/WebAuthn/2FA 模块并读写 D1 或 R2。
+4. `src/api/router.rs` 将请求分派到 `src/api/core/`；处理器调用模型、鉴权/密码/WebAuthn/2FA 模块并读写 D1 或 R2。
 5. 成功的 vault 变更需同步更新用户 revision，并按业务需要发布实时通知。
 
 ### 高 CPU 密码路径
@@ -377,8 +377,8 @@ Warden Worker 将个人密码库服务部署到 Cloudflare 边缘环境，提供
 
 #### 涉及文件
 
-- `src/entry.js`、`src/auth.rs`、`src/error.rs`、`src/lib.rs`、`src/router.rs`、`src/notifications.rs`、`src/two_factor.rs`、`src/r2_file.rs`、`src/webauthn.rs`
-- `src/handlers/accounts.rs`、`attachments.rs`、`config.rs`、`devices.rs`、`identity.rs`、`sends.rs`、`two_factor.rs`
+- `src/entry.js`、`src/auth.rs`、`src/error.rs`、`src/lib.rs`、`src/api/router.rs`、`src/api/notifications.rs`、`src/db/models/two_factor.rs`、`src/worker_runtime/r2_file.rs`、`src/webauthn.rs`
+- `src/api/core/accounts.rs`、`attachments.rs`、`config.rs`、`devices.rs`、`identity.rs`、`sends.rs`、`two_factor.rs`
 - `sql/schema.sql`（当时还新增过、现已删除的 TOTP 顺序迁移）
 - `wrangler.jsonc`、`README.md`、`memory.md`
 
@@ -497,13 +497,13 @@ Warden Worker 将个人密码库服务部署到 Cloudflare 边缘环境，提供
 #### 原因与修改内容
 
 - Workflow 原来安装移动的 `stable` 工具链；本地 Rust 1.96 未报告该 lint，而 CI 升到 Rust 1.97 后因 `-D warnings` 将其视为编译错误。
-- `src/models/cipher.rs` 将手写的 `Option::and_then` 空字符串筛选改为 `Option::filter`；缺失值、空字符串和非空字符串的反序列化语义保持不变。
+- `src/db/models/cipher.rs` 将手写的 `Option::and_then` 空字符串筛选改为 `Option::filter`；缺失值、空字符串和非空字符串的反序列化语义保持不变。
 - Workflow 新增 `RUST_TOOLCHAIN: 1.97.0` 并按该版本安装/设为默认，避免后续 `stable` 漂移造成未经验证的 CI 变化。
 - `tests/deployment_workflow.test.mjs` 新增固定 Rust 工具链的静态合约测试，并禁止恢复 `rustup toolchain install stable`。
 
 #### 涉及文件
 
-- `src/models/cipher.rs`
+- `src/db/models/cipher.rs`
 - `.github/workflows/push-cloudflare.yaml`
 - `tests/deployment_workflow.test.mjs`
 - `memory.md`
@@ -531,8 +531,8 @@ Warden Worker 将个人密码库服务部署到 Cloudflare 边缘环境，提供
 
 #### 修改内容
 
-- `src/handlers/css.rs`：Custom Role 两条 CSS 规则改用 `:is(bit-dialog, [bit-dialog])`，并增加同时覆盖元素式和属性式 dialog 的回归测试。
-- `src/models/cipher.rs`：删除仅用于构建旧 `data` 字段的克隆与拼装逻辑，不再序列化该字段；标准类型字段和顶层公共字段保持不变，并将既有序列化测试更新为明确断言 `data` 不存在。
+- `src/api/web.rs`：Custom Role 两条 CSS 规则改用 `:is(bit-dialog, [bit-dialog])`，并增加同时覆盖元素式和属性式 dialog 的回归测试。
+- `src/db/models/cipher.rs`：删除仅用于构建旧 `data` 字段的克隆与拼装逻辑，不再序列化该字段；标准类型字段和顶层公共字段保持不变，并将既有序列化测试更新为明确断言 `data` 不存在。
 
 #### 验证情况
 
@@ -548,6 +548,30 @@ Warden Worker 将个人密码库服务部署到 Cloudflare 边缘环境，提供
 
 - 无本次任务的阻塞遗留项；属性式 dialog 的实际 UI 行为仍可在下一次真实 Web Vault 客户端回归中一并确认。
 
+### 2026-08-04：按 Vaultwarden 结构重组源码
+
+#### 用户需求
+
+将 `agent/organization-management-migration` 分支的源码目录尽量对齐 Vaultwarden，并把 Workers、Webhook、Telegram 等项目特有实现隔离到额外文件中，降低后续上游同步成本。
+
+#### 修改内容
+
+- `src/handlers` 重组为 `src/api/core`，identity、icons、实时通知、Web 资源及 Axum 路由装配归入 `src/api`。
+- `src/db.rs`、`src/models` 和两步验证持久化模块重组为 `src/db/mod.rs` 与 `src/db/models`。
+- Attachment、Event、Collection、Group、OrgPolicy 和两步验证持久化逻辑归入 Vaultwarden 同名模型文件。
+- Webhook、Telegram、企业微信和 outbox 归入 `src/extensions/notify`。
+- Durable Object、R2、后台任务、日志及 D1 密钥管理归入 `src/worker_runtime`。
+- 结构映射、平台边界和有意保留的 Axum 差异记录在 `.compat-reports/vaultwarden-structure-alignment.md`。
+
+#### 验证情况
+
+- `cargo check --target wasm32-unknown-unknown`：通过。
+- `cargo test --lib`：67 passed、0 failed。
+- `cargo clippy --all-targets -- -D warnings`：通过。
+- `cargo fmt --all -- --check` 与 `git diff --check`：通过。
+- `node --test tests/*.test.mjs`：21 passed、0 failed。
+- 未提交、未推送，也未部署 Worker 或修改 Cloudflare 资源。
+
 ## 待处理事项
 
 - [x] 修复 `prelogin` 邮箱规范化、Email 2FA 未认证触发、密码提示账号枚举和附件/Send 全量内存缓冲。
@@ -559,6 +583,6 @@ Warden Worker 将个人密码库服务部署到 Cloudflare 边缘环境，提供
 
 ## 最近一次任务摘要
 
-- 任务：审阅 Vaultwarden 最近三次提交并同步当前仓库适用的修复。
-- 结论：三次提交中，Custom Role dialog 选择器与 Cipher 顶层旧 `data` 字段问题适用于本仓库并已修复；新版 `rust-musl` 的 Docker 编译变量问题不适用。
-- 验证结果：Rust 1.97 严格 Clippy、58 项 Rust 测试、fmt、20 项 Node 测试、release Wasm 构建和 diff check 全部通过。
+- 任务：将组织管理迁移分支的文件结构对齐 Vaultwarden，并隔离 Workers 与通知扩展。
+- 结论：核心 API 与模型已归入 `src/api`、`src/db/models`；平台和通知特性已归入 `src/worker_runtime`、`src/extensions`。Axum 路由装配及较细的 handler 拆分作为有意差异保留。
+- 验证结果：Wasm 编译、严格 Clippy、67 项 Rust 测试、fmt、21 项 Node 测试和 diff check 全部通过。

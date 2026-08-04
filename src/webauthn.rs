@@ -17,7 +17,7 @@ use uuid::Uuid;
 use worker::D1Database;
 use worker::wasm_bindgen::JsValue;
 
-use crate::{error::AppError, jwt, logging::targets};
+use crate::{error::AppError, jwt, worker_runtime::logging::targets};
 
 pub const TWO_FACTOR_PROVIDER_WEBAUTHN: i32 = 7;
 pub const WEBAUTHN_PRF_STATUS_ENABLED: i32 = 0;
