@@ -159,12 +159,33 @@ fn validate_deletion_date(deletion_date: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+async fn enforce_organization_send_policies(
+    db: &worker::D1Database,
+    user_id: &str,
+    hide_email: Option<bool>,
+) -> Result<(), AppError> {
+    if super::organizations::policy_applies_to_user(db, user_id, 6).await? {
+        return Err(AppError::Forbidden(
+            "Due to an organization policy, you may only delete an existing Send".to_string(),
+        ));
+    }
+    if hide_email.unwrap_or(false)
+        && super::organizations::hide_send_email_is_disabled(db, user_id).await?
+    {
+        return Err(AppError::Forbidden(
+            "Due to an organization policy, you cannot hide your email on a Send".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn rotate_send_data(
     db: &worker::D1Database,
     user_id: &str,
     payload: SendData,
     now: &str,
 ) -> Result<(), AppError> {
+    enforce_organization_send_policies(db, user_id, payload.hide_email).await?;
     let send_id = payload._id.clone().ok_or_else(|| {
         AppError::BadRequest("Send id is required during key rotation".to_string())
     })?;
@@ -1147,6 +1168,7 @@ pub async fn post_send(
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     reject_unsupported_email_verification(&payload)?;
+    enforce_organization_send_policies(&db, &claims.sub, payload.hide_email).await?;
 
     if payload.r#type == SEND_TYPE_FILE {
         return Err(AppError::BadRequest(
@@ -1308,6 +1330,7 @@ pub async fn post_send_file_legacy(
         let model = model.ok_or_else(|| AppError::BadRequest("Missing send model".to_string()))?;
         let payload: SendData = serde_json::from_str(&model)
             .map_err(|_| AppError::BadRequest("Invalid send model".to_string()))?;
+        enforce_organization_send_policies(&db, &claims.sub, payload.hide_email).await?;
         reject_unsupported_email_verification(&payload)?;
         if payload.r#type != SEND_TYPE_FILE {
             return Err(AppError::BadRequest(
@@ -1473,6 +1496,7 @@ pub async fn put_send(
     let payload: SendData = serde_json::from_value(raw_payload)
         .map_err(|_| AppError::BadRequest("Invalid send payload".to_string()))?;
     reject_unsupported_email_verification(&payload)?;
+    enforce_organization_send_policies(&db, &claims.sub, payload.hide_email).await?;
 
     let existing = get_send_by_id_and_user(&db, &send_id, &claims.sub)
         .await?
@@ -1683,6 +1707,7 @@ pub async fn post_send_file_v2(
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     reject_unsupported_email_verification(&payload)?;
+    enforce_organization_send_policies(&db, &claims.sub, payload.hide_email).await?;
 
     if payload.r#type != SEND_TYPE_FILE {
         return Err(AppError::BadRequest(

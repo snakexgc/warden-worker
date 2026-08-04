@@ -181,7 +181,7 @@ pub struct Cipher {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CipherDBModel {
     pub id: String,
-    pub user_id: String,
+    pub user_id: Option<String>,
     pub organization_id: Option<String>,
     pub r#type: i32,
     pub data: String,
@@ -194,13 +194,17 @@ pub struct CipherDBModel {
     pub archived_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub access_edit: Option<i32>,
+    #[serde(default)]
+    pub access_view_password: Option<i32>,
 }
 
 impl From<CipherDBModel> for Cipher {
     fn from(val: CipherDBModel) -> Self {
         Cipher {
             id: val.id,
-            user_id: Some(val.user_id),
+            user_id: val.user_id,
             organization_id: val.organization_id,
             r#type: val.r#type,
             data: serde_json::from_str(&val.data).unwrap_or_default(),
@@ -213,8 +217,8 @@ impl From<CipherDBModel> for Cipher {
             updated_at: val.updated_at,
             object: default_object(),
             organization_use_totp: true,
-            edit: true,
-            view_password: true,
+            edit: val.access_edit != Some(0),
+            view_password: val.access_view_password != Some(0),
             collection_ids: None,
             attachments: None,
         }
@@ -901,6 +905,10 @@ impl CipherRequestData {
         if self.organization_id.is_some() {
             return Err("Organization ciphers are not supported by this personal vault");
         }
+        self.validate_for_vault(user_id)
+    }
+
+    pub fn validate_for_vault(&self, user_id: &str) -> Result<(), &'static str> {
         if self
             .encrypted_for
             .as_deref()

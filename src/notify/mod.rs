@@ -2,12 +2,13 @@ pub mod channels;
 pub mod config;
 pub mod context;
 pub mod dispatcher;
+pub mod outbox;
 pub mod templates;
 pub mod types;
 
 pub use context::{NotifyContext, extract_request_meta};
 pub use dispatcher::{dispatch, dispatch_background, is_webhook_configured};
-pub use types::{CodeType, Notification, NotifyEvent, RequestMeta};
+pub use types::{ActionLinkType, CodeType, Notification, NotifyEvent, RequestMeta};
 
 use crate::background::BackgroundExecutor;
 
@@ -69,6 +70,33 @@ pub fn send_email_token_background(
         env,
         Notification::code(&email, &token, email_type.into()),
     );
+}
+
+pub async fn enqueue_action_link(
+    env: &worker::Env,
+    email: &str,
+    url: &str,
+    link_type: ActionLinkType,
+    organization_name: Option<String>,
+) -> Result<String, crate::error::AppError> {
+    outbox::enqueue_action_link(env, email, url, link_type, organization_name).await
+}
+
+pub fn deliver_outbox_background(
+    context: &BackgroundExecutor,
+    env: worker::Env,
+    outbox_id: String,
+) {
+    context.wait_until(async move {
+        if let Err(error) = outbox::deliver_one(&env, &outbox_id).await {
+            log::warn!(
+                target: crate::logging::targets::NOTIFY,
+                "outbox immediate delivery failed id={} error={}",
+                outbox_id,
+                error
+            );
+        }
+    });
 }
 
 pub fn is_email_webhook_configured(env: &worker::Env) -> bool {

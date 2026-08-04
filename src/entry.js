@@ -52,7 +52,7 @@ export default {
     request = new Request(url.toString(), request);
 
     if (env.HEAVY_DO && shouldOffloadToHeavyDo(url.pathname)) {
-      const stub = env.HEAVY_DO.getByName(getHeavyDoName());
+      const stub = env.HEAVY_DO.getByName(await getHeavyDoName(request));
       return stub.fetch(request);
     }
 

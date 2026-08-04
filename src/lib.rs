@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use tower_http::cors::{Any, CorsLayer};
 use tower_service::Service;
 use worker::*;
@@ -89,11 +91,21 @@ pub async fn main(
 }
 
 #[event(scheduled)]
-pub async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
+pub async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
     console_error_panic_hook::set_once();
     logging::init_logging(&env);
-    match handlers::sends::purge_expired_sends(&env).await {
-        Ok(count) => log::info!("scheduled cleanup purged {count} expired Sends"),
-        Err(err) => log::error!("scheduled expired Send cleanup failed: {err}"),
+    match notify::outbox::deliver_pending(&env, 40).await {
+        Ok(count) if count > 0 => log::info!("scheduled notification retry processed {count} rows"),
+        Ok(_) => {}
+        Err(err) => log::error!("scheduled notification retry failed: {err}"),
+    }
+    if event.cron() == "0 3 * * *" {
+        match handlers::sends::purge_expired_sends(&env).await {
+            Ok(count) => log::info!("scheduled cleanup purged {count} expired Sends"),
+            Err(err) => log::error!("scheduled expired Send cleanup failed: {err}"),
+        }
+        if let Err(err) = notify::outbox::purge_expired(&env).await {
+            log::error!("scheduled notification/token cleanup failed: {err}");
+        }
     }
 }

@@ -11,10 +11,9 @@ use crate::{
     auth::Claims,
     db, domains,
     error::AppError,
-    logging::targets,
     models::{
         archive,
-        cipher::{Cipher, CipherDBModel},
+        cipher::Cipher,
         folder::{Folder, FolderResponse},
         send::{SendDBModel, send_to_json},
         sync::{Profile, SyncResponse, UserDecryption},
@@ -99,32 +98,13 @@ pub async fn sync(
 
     let folders: Vec<FolderResponse> = folders_db.into_iter().map(|f| f.into()).collect();
 
-    // Fetch ciphers
-    let ciphers: Vec<Value> = db
-        .prepare(
-            "SELECT ciphers.*, archives.archived_at AS archived_at
-             FROM ciphers
-             LEFT JOIN archives ON archives.cipher_id = ciphers.id AND archives.user_id = ?2
-             WHERE ciphers.user_id = ?1",
-        )
-        .bind(&[user_id.clone().into(), user_id.clone().into()])?
-        .all()
-        .await?
-        .results()?;
-
-    let mut ciphers = ciphers
-        .into_iter()
-        .filter_map(
-            |cipher| match serde_json::from_value::<CipherDBModel>(cipher.clone()) {
-                Ok(cipher) => Some(cipher),
-                Err(err) => {
-                    log::warn!(target: targets::DB, "Cannot parse {err:?} {cipher:?}");
-                    None
-                }
-            },
-        )
-        .map(|cipher| cipher.into())
-        .collect::<Vec<Cipher>>();
+    // Fetch personal and accessible organization ciphers in one authorization-aware query.
+    let mut ciphers: Vec<Cipher> = super::ciphers::get_accessible_ciphers(
+        &db,
+        super::organizations::organizations_enabled(&state.env),
+        &user_id,
+    )
+    .await?;
     let show_ssh_keys = headers
         .get("bitwarden-client-version")
         .and_then(|value| value.to_str().ok())
@@ -213,11 +193,21 @@ pub async fn sync(
         domains::build_domains_object(&db, &user_id, true).await?
     };
 
+    let organizations =
+        super::organizations::profile_organizations(&db, &state.env, &user_id).await?;
+    let collections = super::organizations::sync_collections(&db, &state.env, &user_id).await?;
+    let policies = super::organizations::sync_policies(&db, &state.env, &user_id).await?;
+    let premium_from_organization = !organizations.is_empty();
+
+    let mut profile = profile;
+    profile.organizations = organizations;
+    profile.premium_from_organization = premium_from_organization;
+
     let response = SyncResponse {
         profile,
         folders,
-        collections: Vec::new(),
-        policies: Vec::new(),
+        collections,
+        policies,
         ciphers,
         sends,
         domains,

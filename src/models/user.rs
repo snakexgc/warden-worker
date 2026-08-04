@@ -94,6 +94,10 @@ pub struct RegisterRequest {
     pub user_asymmetric_keys: KeyData,
     #[serde(default)]
     pub email_verification_token: Option<String>,
+    #[serde(default)]
+    pub organization_user_id: Option<String>,
+    #[serde(default)]
+    pub org_invite_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -191,6 +195,10 @@ pub struct RegisterVerifyClaims {
     pub sub: String, // email
     pub name: Option<String>,
     pub exp: usize,
+    pub nbf: usize,
+    pub iss: String,
+    pub jti: String,
+    pub verified: bool,
 }
 
 #[derive(Debug, Deserialize)]

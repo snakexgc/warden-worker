@@ -250,6 +250,19 @@ Wrangler 使用 D1 的 `d1_migrations` 表记录已执行的文件，因此后�
 
 服务端 PBKDF2 使用 Rust/Wasm 实现，以避开 Workers Web Crypto 单次最多 100,000 次迭代的限制。所有创建或验证服务端密码哈希的接口（注册、登录、主密码/邮箱/KDF 修改、密码确认、账号删除、设置密码，以及可能验证主密码的双因素和 WebAuthn 接口）都由 `HEAVY_DO` 承载：Free 计划的入口 Worker 只负责轻量路由，实际 600,000 次 PBKDF2 在每次调用默认具有 30 秒 CPU 上限的 Durable Object 内执行。本项目定位为个人单用户密码库，所有重计算路由共用一个固定名称为 `personal-vault` 的 `HeavyDo` 实例，不按用户或请求创建额外实例；代价是同时发生的重计算会短暂串行，但个人使用场景下可以接受。Free 计划仍需遵守 Durable Objects 的每日请求量和 duration 配额；限制详情参见 [Durable Objects limits](https://developers.cloudflare.com/durable-objects/platform/limits/) 与 [pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/)。
 
+## 组织功能（试运行）
+
+组织核心能力可以运行在 Cloudflare Workers 上：成员、集合、组、策略、事件和共享密码项元数据存入 D1；附件继续使用 R2；密码哈希和组织管理请求由按身份稳定分片的 `HeavyDo` 承载；邀请注册链接通过内部 Webhook/Telegram outbox 投递并由 Cron 重试。
+
+组织功能默认关闭。启用前应按以下顺序操作：
+
+1. 备份 D1 和 R2，并先执行 `wrangler d1 migrations apply vaultsql --remote`。
+2. 至少配置 `WEWORK_WEBHOOK_URL`，或同时配置 `TELEGRAM_BOT_TOKEN` 与 `TELEGRAM_CHAT_ID`，验证注册和组织邀请链接能够送达。
+3. 先在测试环境把 `ORGANIZATIONS_ENABLED` 改为 `true`，完成创建组织、邀请/确认成员、集合授权、共享密码项和全量同步测试。
+4. 组和事件分别由 `ORG_GROUPS_ENABLED`、`ORG_EVENTS_ENABLED` 控制；核心组织流程稳定后再分别开启。
+
+Workers/D1 没有阻碍核心组织功能，但存在平台边界：导入和批量接口按 40 条 D1 语句分批，组织导入最多 500 个密码项和 500 个集合，跨批导入不是单个数据库事务。当前仍不支持组织密码项附件、组织 API Key/客户端凭据、SSO/SCIM、Provider，以及完整的服务端组织操作事件审计；在这些能力补齐前不要把本实现视为 Vaultwarden 企业功能的完全替代。
+
 ## 客户端使用建议
 
 - 官方安卓如果之前指向过其它自托管地址，建议“删除账号/清缓存后重新添加服务器”，避免 remember token 跨服务端复用导致登录失败。

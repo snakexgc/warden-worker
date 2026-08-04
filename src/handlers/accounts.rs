@@ -4,6 +4,7 @@ use chrono::Utc;
 use rand::{Rng, distributions::Alphanumeric};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{collections::HashSet, sync::Arc};
 use uuid::Uuid;
 use wasm_bindgen::JsValue;
@@ -16,6 +17,7 @@ use crate::{
     error::AppError,
     models::{
         cipher::{CipherData, CipherRequestData},
+        organization::InviteClaims,
         send::SendData,
         user::{
             KeyData, PreloginKdfSettings, PreloginResponse, RegisterRequest, RegisterVerifyClaims,
@@ -30,9 +32,8 @@ use crate::{
 
 const PROTECTED_ACTION_OTP_SIZE: u8 = 6;
 const PROTECTED_ACTION_OTP_REQUEST_COOLDOWN_SECONDS: i64 = 30;
-const SINGLE_USER_REGISTRATION_MESSAGE: &str =
-    "Registration is closed because this vault already has an account";
-const SINGLE_USER_TRIGGER_ERROR: &str = "single-user vault already has an account";
+const REGISTER_ISSUER: &str = "warden-worker.register";
+const INVITE_ISSUER: &str = "warden-worker.org-invite";
 
 fn clean_password_hint(password_hint: Option<String>) -> Option<String> {
     match password_hint {
@@ -328,7 +329,13 @@ pub async fn profile(
         .await?
         .ok_or(AppError::NotFound("User not found".to_string()))?;
 
-    Ok(Json(profile_json(user, two_factor_enabled)))
+    let user_id = user.id.clone();
+    let mut response = profile_json(user, two_factor_enabled);
+    let organizations =
+        super::organizations::profile_organizations(&db, &state.env, &user_id).await?;
+    response["premiumFromOrganization"] = json!(!organizations.is_empty());
+    response["organizations"] = Value::Array(organizations);
+    Ok(Json(response))
 }
 
 #[worker::send]
@@ -556,7 +563,6 @@ pub async fn register(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<Value>, AppError> {
-    // Debug log
     log::info!(
         "Register payload: name={:?}, email={}",
         payload.name,
@@ -564,13 +570,47 @@ pub async fn register(
     );
 
     let db = db::get_db(&state.env)?;
-
-    reject_registration_if_user_exists(&db).await?;
-
     let email = crate::auth::normalize_email(&payload.email);
+    if email.is_empty() {
+        return Err(AppError::BadRequest("Missing email".to_string()));
+    }
     if !payload.current_format_is_valid(&email) {
         return Err(AppError::UnprocessableEntity(
             "Unexpected RegisterData format".to_string(),
+        ));
+    }
+
+    let existing: Option<Value> = db
+        .prepare("SELECT id, master_password_hash FROM users WHERE email = ?1")
+        .bind(&[email.clone().into()])?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?;
+    if existing
+        .as_ref()
+        .and_then(|row| row.get("master_password_hash"))
+        .and_then(Value::as_str)
+        .is_some_and(|hash| !hash.is_empty())
+    {
+        return Err(AppError::BadRequest(
+            "Registration not allowed or user already exists".to_string(),
+        ));
+    }
+
+    let invite_claims = validate_org_invite_registration(&state, &db, &payload, &email).await?;
+    let verification = validate_registration_token(&state, &db, &payload, &email).await?;
+
+    if invite_claims.is_none() {
+        if !env_bool(&state.env, "SIGNUPS_ALLOWED", true) {
+            return Err(AppError::BadRequest("Registration is disabled".to_string()));
+        }
+        ensure_email_allowed(&state.env, &email)?;
+    }
+
+    let signup_verification_required = env_bool(&state.env, "SIGNUPS_VERIFY", true);
+    if signup_verification_required && invite_claims.is_none() && verification.is_none() {
+        return Err(AppError::Unauthorized(
+            "Email verification token is required".to_string(),
         ));
     }
 
@@ -582,38 +622,12 @@ pub async fn register(
     let master_password_hash = payload.master_password_hash().to_string();
     let user_symmetric_key = payload.user_symmetric_key().to_string();
 
-    // Check if email is in ALLOWED_EMAILS list
-    let allowed_emails = state
-        .env
-        .secret("ALLOWED_EMAILS")
-        .map_err(|_| AppError::Internal)?;
-    let allowed_emails = allowed_emails
-        .as_ref()
-        .as_string()
-        .ok_or_else(|| AppError::Internal)?;
-    if allowed_emails
-        .split(",")
-        .all(|allowed| allowed.trim().to_lowercase() != email)
-    {
-        return Err(AppError::Unauthorized("Not allowed to signup".to_string()));
-    }
     let now = Utc::now().to_rfc3339();
 
-    let jwt_keys = state.jwt_keys.clone();
-    let name_from_token = if let Some(token) = payload.email_verification_token.as_ref() {
-        use jsonwebtoken::{DecodingKey, Validation, decode};
-        let decoding_key = DecodingKey::from_secret(jwt_keys.access_secret.as_ref());
-        match decode::<RegisterVerifyClaims>(token, &decoding_key, &Validation::default()) {
-            Ok(token_data) if token_data.claims.sub == email => {
-                token_data.claims.name.filter(|n| !n.trim().is_empty())
-            }
-            _ => None,
-        }
-    } else {
-        None
-    };
-
-    let name = name_from_token
+    let name = verification
+        .as_ref()
+        .and_then(|(_, claims)| claims.name.clone())
+        .filter(|name| !name.trim().is_empty())
         .or_else(|| payload.name.filter(|n| !n.trim().is_empty()))
         .unwrap_or_else(|| email.clone());
 
@@ -624,10 +638,17 @@ pub async fn register(
     let master_password_hint = clean_password_hint(payload.master_password_hint);
 
     let user = User {
-        id: Uuid::new_v4().to_string(),
+        id: existing
+            .as_ref()
+            .and_then(|row| row.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
         name: Some(name),
         email,
-        email_verified: true,
+        email_verified: verification.is_some()
+            || invite_claims.is_some()
+            || !signup_verification_required,
         avatar_color: None,
         master_password_hash: server_password.hash,
         master_password_hint,
@@ -649,41 +670,65 @@ pub async fn register(
         updated_at: now,
     };
 
-    query!(
-        &db,
-        "INSERT INTO users (id, name, email, email_verified, avatar_color, master_password_hash, master_password_hint, key, private_key, public_key, kdf_type, kdf_iterations, kdf_memory, kdf_parallelism, security_stamp, password_salt, password_iterations, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
-         user.id,
-         user.name,
-         user.email,
-         user.email_verified,
-         user.avatar_color,
-         user.master_password_hash,
-         user.master_password_hint,
-         user.key,
-         user.private_key,
-         user.public_key,
-         user.kdf_type,
-         user.kdf_iterations,
-         user.kdf_memory,
-         user.kdf_parallelism,
-         user.security_stamp,
-         user.password_salt,
-         user.password_iterations,
-         user.created_at,
-         user.updated_at
-    )
-    .map_err(|error| {
-        log::error!("Failed to prepare user registration insert: {error:?}");
-        AppError::Database
-    })?
-    .run()
-    .await
-    .map_err(|error| {
-        let error_message = error.to_string();
-        log::error!("Failed to insert registered user: {error:?}");
-        if is_single_user_registration_conflict(&error_message) {
-            AppError::BadRequest(SINGLE_USER_REGISTRATION_MESSAGE.to_string())
+    let values = [
+        user.id.clone().into(),
+        to_js_val(user.name.clone()),
+        user.email.clone().into(),
+        user.email_verified.into(),
+        to_js_val(user.avatar_color.clone()),
+        user.master_password_hash.clone().into(),
+        to_js_val(user.master_password_hint.clone()),
+        user.key.clone().into(),
+        user.private_key.clone().into(),
+        user.public_key.clone().into(),
+        user.kdf_type.into(),
+        user.kdf_iterations.into(),
+        to_js_val(user.kdf_memory),
+        to_js_val(user.kdf_parallelism),
+        user.security_stamp.clone().into(),
+        to_js_val(user.password_salt.clone()),
+        to_js_val(user.password_iterations),
+        user.created_at.clone().into(),
+        user.updated_at.clone().into(),
+    ];
+
+    let write_user = if existing.is_some() {
+        db.prepare(
+            "UPDATE users SET name = ?2, email = ?3, email_verified = ?4, avatar_color = ?5,
+             master_password_hash = ?6, master_password_hint = ?7, key = ?8, private_key = ?9,
+             public_key = ?10, kdf_type = ?11, kdf_iterations = ?12, kdf_memory = ?13,
+             kdf_parallelism = ?14, security_stamp = ?15, password_salt = ?16,
+             password_iterations = ?17, created_at = ?18, updated_at = ?19
+             WHERE id = ?1 AND master_password_hash = ''",
+        )
+        .bind(&values)?
+    } else {
+        db.prepare(
+            "INSERT INTO users (id, name, email, email_verified, avatar_color, master_password_hash,
+             master_password_hint, key, private_key, public_key, kdf_type, kdf_iterations, kdf_memory,
+             kdf_parallelism, security_stamp, password_salt, password_iterations, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+        )
+        .bind(&values)?
+    };
+
+    let mut statements = vec![write_user];
+    if let Some((token_hash, _)) = verification {
+        statements.push(
+            db.prepare(
+                "UPDATE registration_tokens SET consumed_at = ?1
+                 WHERE token_hash = ?2 AND consumed_at IS NULL",
+            )
+            .bind(&[user.updated_at.clone().into(), token_hash.into()])?,
+        );
+    }
+    db.batch(statements).await.map_err(|error| {
+        log::error!("Failed to register user: {error:?}");
+        if error
+            .to_string()
+            .contains("UNIQUE constraint failed: users.email")
+        {
+            AppError::BadRequest("Registration not allowed or user already exists".to_string())
         } else {
             AppError::Database
         }
@@ -695,28 +740,144 @@ pub async fn register(
     })))
 }
 
-async fn reject_registration_if_user_exists(db: &worker::D1Database) -> Result<(), AppError> {
-    let existing_user: Option<Value> = db
-        .prepare("SELECT 1 AS user_exists FROM users LIMIT 1")
-        .first(None)
-        .await
-        .map_err(|error| {
-            log::error!("Failed to check whether registration is available: {error:?}");
-            AppError::Database
-        })?;
-
-    if existing_user.is_some() {
-        return Err(AppError::BadRequest(
-            SINGLE_USER_REGISTRATION_MESSAGE.to_string(),
-        ));
+fn env_bool(env: &worker::Env, name: &str, default: bool) -> bool {
+    let value = env
+        .var(name)
+        .ok()
+        .map(|value| value.to_string())
+        .or_else(|| env.secret(name).ok().map(|value| value.to_string()));
+    match value.as_deref().map(str::trim).map(str::to_ascii_lowercase) {
+        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on") => true,
+        Some(value) if matches!(value.as_str(), "0" | "false" | "no" | "off") => false,
+        _ => default,
     }
-
-    Ok(())
 }
 
-fn is_single_user_registration_conflict(error: &str) -> bool {
-    error.contains(SINGLE_USER_TRIGGER_ERROR)
-        || error.contains("UNIQUE constraint failed: users.email")
+fn ensure_email_allowed(env: &worker::Env, email: &str) -> Result<(), AppError> {
+    let allowed = env
+        .secret("ALLOWED_EMAILS")
+        .ok()
+        .map(|value| value.to_string())
+        .or_else(|| {
+            env.var("ALLOWED_EMAILS")
+                .ok()
+                .map(|value| value.to_string())
+        });
+    let Some(allowed) = allowed.filter(|value| !value.trim().is_empty()) else {
+        return Ok(());
+    };
+    if allowed
+        .split(',')
+        .any(|candidate| crate::auth::normalize_email(candidate) == email)
+    {
+        Ok(())
+    } else {
+        Err(AppError::Unauthorized("Not allowed to signup".to_string()))
+    }
+}
+
+fn token_hash(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+async fn validate_registration_token(
+    state: &AppState,
+    db: &worker::D1Database,
+    payload: &RegisterRequest,
+    email: &str,
+) -> Result<Option<(String, RegisterVerifyClaims)>, AppError> {
+    use jsonwebtoken::{DecodingKey, Validation, decode};
+
+    let Some(token) = payload.email_verification_token.as_deref() else {
+        return Ok(None);
+    };
+    let claims = decode::<RegisterVerifyClaims>(
+        token,
+        &DecodingKey::from_secret(state.jwt_keys.access_secret.as_ref()),
+        &Validation::default(),
+    )
+    .map_err(|_| AppError::Unauthorized("Invalid email verification token".to_string()))?
+    .claims;
+    if claims.iss != REGISTER_ISSUER || !claims.verified || claims.sub != email {
+        return Err(AppError::Unauthorized(
+            "Email verification token does not match email".to_string(),
+        ));
+    }
+    let hash = token_hash(token);
+    let now = Utc::now().to_rfc3339();
+    let stored: Option<Value> = db
+        .prepare(
+            "SELECT id FROM registration_tokens
+             WHERE token_hash = ?1 AND email = ?2 AND consumed_at IS NULL AND expires_at > ?3",
+        )
+        .bind(&[hash.clone().into(), email.into(), now.into()])?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?;
+    if stored.is_none() {
+        return Err(AppError::Unauthorized(
+            "Email verification token is expired or already used".to_string(),
+        ));
+    }
+    Ok(Some((hash, claims)))
+}
+
+async fn validate_org_invite_registration(
+    state: &AppState,
+    db: &worker::D1Database,
+    payload: &RegisterRequest,
+    email: &str,
+) -> Result<Option<InviteClaims>, AppError> {
+    use jsonwebtoken::{DecodingKey, Validation, decode};
+
+    let (membership_id, token) = match (
+        payload.organization_user_id.as_deref(),
+        payload.org_invite_token.as_deref(),
+    ) {
+        (None, None) => return Ok(None),
+        (Some(membership_id), Some(token)) => (membership_id, token),
+        _ => {
+            return Err(AppError::BadRequest(
+                "Organization invitation is missing required parameters".to_string(),
+            ));
+        }
+    };
+    let claims = decode::<InviteClaims>(
+        token,
+        &DecodingKey::from_secret(state.jwt_keys.access_secret.as_ref()),
+        &Validation::default(),
+    )
+    .map_err(|_| AppError::Unauthorized("Invalid organization invitation".to_string()))?
+    .claims;
+    if claims.iss != INVITE_ISSUER || claims.email != email || claims.member_id != membership_id {
+        return Err(AppError::Unauthorized(
+            "Organization invitation does not match registration".to_string(),
+        ));
+    }
+    let membership: Option<Value> = db
+        .prepare(
+            "SELECT u.email FROM users_organizations m
+             JOIN users u ON u.id = m.user_id
+             WHERE m.id = ?1 AND m.organization_id = ?2 AND m.status = 0",
+        )
+        .bind(&[
+            claims.member_id.clone().into(),
+            claims.org_id.clone().into(),
+        ])?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?;
+    if membership
+        .as_ref()
+        .and_then(|row| row.get("email"))
+        .and_then(Value::as_str)
+        != Some(email)
+    {
+        return Err(AppError::Unauthorized(
+            "Organization invitation is no longer valid".to_string(),
+        ));
+    }
+    Ok(Some(claims))
 }
 
 #[worker::send]
@@ -1515,16 +1676,50 @@ pub async fn send_verification_email(
         payload.email
     );
 
+    let email = crate::auth::normalize_email(&payload.email);
+    if email.is_empty() {
+        return Err(AppError::BadRequest("Missing email".to_string()));
+    }
+    if !env_bool(&state.env, "SIGNUPS_ALLOWED", true) {
+        return Err(AppError::BadRequest("Registration is disabled".to_string()));
+    }
+    ensure_email_allowed(&state.env, &email)?;
+    if !notify::is_email_webhook_configured(&state.env) {
+        return Err(AppError::BadRequest(
+            "Registration notification channel is not configured".to_string(),
+        ));
+    }
+
+    let db = db::get_db(&state.env)?;
+    let active_user: Option<Value> = db
+        .prepare(
+            "SELECT 1 AS exists_user FROM users WHERE email = ?1 AND master_password_hash <> ''",
+        )
+        .bind(&[email.clone().into()])?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?;
+    if active_user.is_some() {
+        // Do not disclose whether an account exists.
+        return Ok(Json(json!({})));
+    }
+
     let jwt_keys = state.jwt_keys.clone();
 
     // Generate a token containing the name
     let now = Utc::now();
-    let exp = (now + Duration::hours(24)).timestamp() as usize;
+    let expires_at = now + Duration::hours(24);
+    let exp = expires_at.timestamp() as usize;
+    let token_id = Uuid::new_v4().to_string();
 
     let claims = RegisterVerifyClaims {
-        sub: payload.email.to_lowercase(),
+        sub: email.clone(),
         name: payload.name.filter(|n| !n.trim().is_empty()),
         exp,
+        nbf: now.timestamp() as usize,
+        iss: REGISTER_ISSUER.to_string(),
+        jti: token_id.clone(),
+        verified: true,
     };
 
     let token = encode(
@@ -1534,9 +1729,46 @@ pub async fn send_verification_email(
     )
     .map_err(|_| AppError::Internal)?;
 
-    // Return token as JSON to skip email verification
-    // This makes the client go directly to password entry instead of "check your email" screen
-    Ok(Json(json!(token)))
+    let token_hash = token_hash(&token);
+    let now_text = now.to_rfc3339();
+    db.batch(vec![
+        db.prepare(
+            "DELETE FROM registration_tokens
+             WHERE email = ?1 AND (consumed_at IS NOT NULL OR expires_at <= ?2)",
+        )
+        .bind(&[email.clone().into(), now_text.clone().into()])?,
+        db.prepare(
+            "INSERT INTO registration_tokens
+             (id, email, token_hash, expires_at, consumed_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
+        )
+        .bind(&[
+            token_id.into(),
+            email.clone().into(),
+            token_hash.into(),
+            expires_at.to_rfc3339().into(),
+            now_text.into(),
+        ])?,
+    ])
+    .await
+    .map_err(|_| AppError::Database)?;
+
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("email", &email)
+        .append_pair("token", &token)
+        .finish();
+    let link = state.public_url(&format!("/#/finish-signup/?{query}"));
+    let outbox_id = notify::enqueue_action_link(
+        &state.env,
+        &email,
+        &link,
+        notify::ActionLinkType::Registration,
+        None,
+    )
+    .await?;
+    notify::deliver_outbox_background(&state.ctx, state.env.clone(), outbox_id);
+
+    Ok(Json(json!({})))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1559,8 +1791,28 @@ pub async fn registration_verification_clicked(
         &Validation::default(),
     )
     .map_err(|_| AppError::Unauthorized("Invalid email verification token".to_string()))?;
-    if !token.claims.sub.eq_ignore_ascii_case(payload.email.trim()) {
+    let email = crate::auth::normalize_email(&payload.email);
+    if token.claims.iss != REGISTER_ISSUER || !token.claims.verified || token.claims.sub != email {
         return Err(AppError::Unauthorized("Email does not match".to_string()));
+    }
+    let db = db::get_db(&state.env)?;
+    let valid: Option<Value> = db
+        .prepare(
+            "SELECT id FROM registration_tokens
+             WHERE token_hash = ?1 AND email = ?2 AND consumed_at IS NULL AND expires_at > ?3",
+        )
+        .bind(&[
+            token_hash(&payload.email_verification_token).into(),
+            email.into(),
+            Utc::now().to_rfc3339().into(),
+        ])?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?;
+    if valid.is_none() {
+        return Err(AppError::Unauthorized(
+            "Email verification token is expired or already used".to_string(),
+        ));
     }
     Ok(Json(json!({})))
 }
@@ -2154,17 +2406,6 @@ mod tests {
         let (m, p) = normalize_kdf_for_response(crypto::KDF_TYPE_ARGON2ID, 3, None, None);
         assert_eq!(m, Some(crypto::ARGON2ID_MEMORY_DEFAULT_MB));
         assert_eq!(p, Some(crypto::ARGON2ID_PARALLELISM_DEFAULT));
-    }
-
-    #[test]
-    fn detects_single_user_registration_conflicts() {
-        assert!(is_single_user_registration_conflict(
-            "D1_ERROR: single-user vault already has an account"
-        ));
-        assert!(is_single_user_registration_conflict(
-            "UNIQUE constraint failed: users.email"
-        ));
-        assert!(!is_single_user_registration_conflict("database is locked"));
     }
 
     #[test]

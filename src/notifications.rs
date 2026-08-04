@@ -69,6 +69,10 @@ enum VaultPayloadKind {
 struct VaultEventPayload {
     user_id: String,
     item_id: Option<String>,
+    #[serde(default)]
+    organization_id: Option<String>,
+    #[serde(default)]
+    collection_ids: Option<Vec<String>>,
     revision_date: String,
     update_type: i32,
     acting_device_id: Option<String>,
@@ -426,6 +430,33 @@ pub async fn publish_cipher_update(
         revision_date,
         acting_device_id,
         VaultPayloadKind::Cipher,
+        None,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn publish_organization_cipher_update(
+    env: &Env,
+    update_type: UpdateType,
+    user_id: &str,
+    cipher_id: &str,
+    organization_id: &str,
+    collection_ids: Option<Vec<String>>,
+    revision_date: &str,
+    acting_device_id: Option<&str>,
+) -> Result<()> {
+    publish_vault_update(
+        env,
+        update_type,
+        user_id,
+        Some(cipher_id),
+        revision_date,
+        acting_device_id,
+        VaultPayloadKind::Cipher,
+        Some(organization_id),
+        collection_ids,
     )
     .await
 }
@@ -446,6 +477,8 @@ pub async fn publish_folder_update(
         revision_date,
         acting_device_id,
         VaultPayloadKind::Folder,
+        None,
+        None,
     )
     .await
 }
@@ -465,6 +498,8 @@ pub async fn publish_send_update(
         revision_date,
         None,
         VaultPayloadKind::Send,
+        None,
+        None,
     )
     .await
 }
@@ -484,6 +519,8 @@ pub async fn publish_user_update(
         revision_date,
         acting_device_id,
         VaultPayloadKind::User,
+        None,
+        None,
     )
     .await
 }
@@ -509,6 +546,36 @@ pub fn publish_cipher_update_background(
         .await
         {
             log::warn!("failed to publish cipher update: {err}");
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn publish_organization_cipher_update_background(
+    context: &BackgroundExecutor,
+    env: Env,
+    update_type: UpdateType,
+    user_id: String,
+    cipher_id: String,
+    organization_id: String,
+    collection_ids: Option<Vec<String>>,
+    revision_date: String,
+    acting_device_id: Option<String>,
+) {
+    context.wait_until(async move {
+        if let Err(err) = publish_organization_cipher_update(
+            &env,
+            update_type,
+            &user_id,
+            &cipher_id,
+            &organization_id,
+            collection_ids,
+            &revision_date,
+            acting_device_id.as_deref(),
+        )
+        .await
+        {
+            log::warn!("failed to publish organization cipher update: {err}");
         }
     });
 }
@@ -578,6 +645,7 @@ pub fn publish_user_update_background(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn publish_vault_update(
     env: &Env,
     update_type: UpdateType,
@@ -586,6 +654,8 @@ async fn publish_vault_update(
     revision_date: &str,
     acting_device_id: Option<&str>,
     kind: VaultPayloadKind,
+    organization_id: Option<&str>,
+    collection_ids: Option<Vec<String>>,
 ) -> Result<()> {
     dispatch_internal(
         env,
@@ -593,6 +663,8 @@ async fn publish_vault_update(
         &VaultEventPayload {
             user_id: user_id.to_string(),
             item_id: item_id.map(str::to_string),
+            organization_id: organization_id.map(str::to_string),
+            collection_ids,
             revision_date: revision_date.to_string(),
             update_type: update_type as i32,
             acting_device_id: acting_device_id.map(str::to_string),
@@ -786,11 +858,22 @@ fn encode_vault_update(event: &VaultEventPayload) -> Vec<u8> {
             write_str(&mut payload, "Id");
             write_optional_str(&mut payload, event.item_id.as_deref());
             write_str(&mut payload, "UserId");
-            write_str(&mut payload, &event.user_id);
+            if event.organization_id.is_some() {
+                write_nil(&mut payload);
+            } else {
+                write_str(&mut payload, &event.user_id);
+            }
             write_str(&mut payload, "OrganizationId");
-            write_nil(&mut payload);
+            write_optional_str(&mut payload, event.organization_id.as_deref());
             write_str(&mut payload, "CollectionIds");
-            write_nil(&mut payload);
+            if let Some(collection_ids) = &event.collection_ids {
+                write_array_len(&mut payload, collection_ids.len());
+                for collection_id in collection_ids {
+                    write_str(&mut payload, collection_id);
+                }
+            } else {
+                write_nil(&mut payload);
+            }
             write_str(&mut payload, "RevisionDate");
             write_timestamp(&mut payload, &event.revision_date);
         }

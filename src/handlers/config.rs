@@ -14,12 +14,7 @@ pub async fn config(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&state.env)?;
-    let user_exists: Option<i64> = db
-        .prepare("SELECT 1 AS ok FROM users LIMIT 1")
-        .first(Some("ok"))
-        .await
-        .map_err(|_| AppError::Database)?;
+    let signups_allowed = env_bool(&state.env, "SIGNUPS_ALLOWED", true);
     let host = headers
         .get("host")
         .and_then(|v| v.to_str().ok())
@@ -37,7 +32,7 @@ pub async fn config(
           "url": "https://github.com/dani-garcia/vaultwarden"
         },
         "settings": {
-            "disableUserRegistration": user_exists.is_some(),
+            "disableUserRegistration": !signups_allowed,
             "suppressOnboardingInterstitials": false,
         },
         "environment": {
@@ -58,6 +53,19 @@ pub async fn config(
         "communication": null,
         "object": "config",
     })))
+}
+
+fn env_bool(env: &worker::Env, name: &str, default: bool) -> bool {
+    let value = env
+        .var(name)
+        .ok()
+        .map(|value| value.to_string())
+        .or_else(|| env.secret(name).ok().map(|value| value.to_string()));
+    match value.as_deref().map(str::trim).map(str::to_ascii_lowercase) {
+        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on") => true,
+        Some(value) if matches!(value.as_str(), "0" | "false" | "no" | "off") => false,
+        _ => default,
+    }
 }
 
 #[worker::send]

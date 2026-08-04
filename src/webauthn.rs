@@ -1019,6 +1019,7 @@ pub async fn verify_passwordless_login_assertion(
             AppError::BadRequest(msg) => msg,
             AppError::UnprocessableEntity(msg) => msg,
             AppError::Unauthorized(msg) => msg,
+            AppError::Forbidden(msg) => msg,
             AppError::NotFound(msg) => msg,
             AppError::Database => "database error".to_string(),
             AppError::Worker(e) => format!("worker error: {e}"),

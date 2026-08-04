@@ -5,7 +5,7 @@
 	"compatibility_date": "2026-02-28",
 	"workers_dev": true,
 	"triggers": {
-		"crons": ["0 3 * * *"]
+		"crons": ["*/5 * * * *", "0 3 * * *"]
 	},
 	// 环境变量配置
 	"vars": {
@@ -28,6 +28,15 @@
 		// - WEWORK_WEBHOOK_URL: 企业微信机器人 Webhook
 		// - TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID: Telegram Bot
 		"NOTIFY_EVENTS": "all",
+		// Public registration is verified through the configured Webhook/Telegram admin channel.
+		"SIGNUPS_ALLOWED": "true",
+		"SIGNUPS_VERIFY": "true",
+		// Organization endpoints stay dark until the migration and compatibility tests pass.
+		"ORGANIZATIONS_ENABLED": "false",
+		"INVITATIONS_ALLOWED": "true",
+		"INVITATION_EXPIRATION_HOURS": "120",
+		"ORG_GROUPS_ENABLED": "false",
+		"ORG_EVENTS_ENABLED": "false",
 		// ===============================
 		// 动态 vaultwarden.css 配置（参考 Vaultwarden 设计）
 		// 说明：

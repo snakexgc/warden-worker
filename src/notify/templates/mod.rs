@@ -1,5 +1,6 @@
 mod code;
 mod event;
+mod link;
 
 use chrono::Utc;
 
@@ -31,6 +32,7 @@ pub fn format_for_wework(notification: &Notification) -> String {
     match notification.kind {
         super::types::NotificationKind::Event => event::format_markdown(notification),
         super::types::NotificationKind::VerificationCode => code::format_markdown(notification),
+        super::types::NotificationKind::ActionLink => link::format_markdown(notification),
     }
 }
 
@@ -38,5 +40,6 @@ pub fn format_for_telegram(notification: &Notification) -> String {
     match notification.kind {
         super::types::NotificationKind::Event => event::format_html(notification),
         super::types::NotificationKind::VerificationCode => code::format_html(notification),
+        super::types::NotificationKind::ActionLink => link::format_html(notification),
     }
 }

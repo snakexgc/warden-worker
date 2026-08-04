@@ -260,6 +260,22 @@ impl CodeType {
 pub enum NotificationKind {
     Event,
     VerificationCode,
+    ActionLink,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionLinkType {
+    Registration,
+    OrganizationInvite,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActionLinkData {
+    pub email: String,
+    pub url: String,
+    pub link_type: ActionLinkType,
+    pub organization_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -309,6 +325,7 @@ pub struct Notification {
     pub event: Option<NotifyEvent>,
     pub context: Option<super::context::NotifyContext>,
     pub verification_code: Option<VerificationCodeData>,
+    pub action_link: Option<ActionLinkData>,
 }
 
 impl Notification {
@@ -318,6 +335,7 @@ impl Notification {
             event: Some(event),
             context: Some(context),
             verification_code: None,
+            action_link: None,
         }
     }
 
@@ -330,6 +348,27 @@ impl Notification {
                 email: email.to_string(),
                 code: code.to_string(),
                 code_type,
+            }),
+            action_link: None,
+        }
+    }
+
+    pub fn action_link(
+        email: &str,
+        url: &str,
+        link_type: ActionLinkType,
+        organization_name: Option<String>,
+    ) -> Self {
+        Self {
+            kind: NotificationKind::ActionLink,
+            event: None,
+            context: None,
+            verification_code: None,
+            action_link: Some(ActionLinkData {
+                email: email.to_string(),
+                url: url.to_string(),
+                link_type,
+                organization_name,
             }),
         }
     }

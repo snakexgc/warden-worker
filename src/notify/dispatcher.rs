@@ -67,6 +67,9 @@ impl Dispatcher {
             NotificationKind::VerificationCode => {
                 return true;
             }
+            NotificationKind::ActionLink => {
+                return true;
+            }
         }
 
         true

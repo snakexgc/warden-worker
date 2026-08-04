@@ -11,6 +11,7 @@ pub mod hibp;
 pub mod icons;
 pub mod identity;
 pub mod import;
+pub mod organizations;
 pub mod sends;
 pub mod settings;
 pub mod sync;
