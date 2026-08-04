@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 pub const MEMBER_STATUS_INVITED: i32 = 0;
@@ -208,18 +208,6 @@ impl Membership {
             "object": "profileOrganization"
         })
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InviteClaims {
-    pub nbf: usize,
-    pub exp: usize,
-    pub iss: String,
-    pub sub: String,
-    pub email: String,
-    pub org_id: String,
-    pub member_id: String,
-    pub invited_by_email: Option<String>,
 }
 
 #[cfg(test)]

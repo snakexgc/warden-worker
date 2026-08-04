@@ -1,8 +1,12 @@
-# Vaultwarden 文件结构对齐规则
+# Vaultwarden 文件级结构对齐
 
-对比基线：`D:\gitrepo\vaultwarden`。
+参考仓库：`D:\gitrepo\vaultwarden`
 
-## 目标结构
+参考提交：`2629bcbe1380c894e3a7f52cafcac3988edb8fbb`
+
+参考仓库在本次工作中只读使用；所有移动、重构和测试均在 `D:\gitrepo\warden-worker` 完成。
+
+## 当前结构
 
 ```text
 src/
@@ -11,91 +15,111 @@ src/
     core/
       mod.rs
       accounts.rs
-      attachments.rs
+      accounts/devices.rs
       ciphers.rs
-      devices.rs
+      ciphers/attachments.rs
+      ciphers/sync.rs
+      ciphers/sync/models.rs
       events.rs
       folders.rs
-      import.rs
+      imports.rs
+      imports/models.rs
+      meta/{mod.rs,config.rs,hibp.rs,settings.rs}
       organizations.rs
       sends.rs
-      two_factor.rs
-      ...
+      two_factor/{mod.rs,webauthn.rs}
     icons.rs
     identity.rs
     notifications.rs
-    router.rs
     web.rs
   db/
     mod.rs
     models/
-      mod.rs
       archive.rs
       attachment.rs
+      auth_request.rs
       cipher.rs
       collection.rs
+      device.rs
       event.rs
       folder.rs
       group.rs
-      organization.rs
       org_policy.rs
+      organization.rs
       send.rs
       two_factor.rs
       user.rs
-      ...
+  crypto/
+    password.rs
   extensions/
     notify/
-      ...
+    usage.rs
   worker_runtime/
-    ...
+    background.rs
+    domains.rs
+    heavy_do.rs
+    jwt.rs
+    jwt_manager.rs
+    logging.rs
+    r2_file.rs
+    router.rs
+    two_factor_key_manager.rs
+    webauthn.rs
 ```
 
-## 映射原则
+## 文件职责映射
 
-1. Vaultwarden `src/api/core/*.rs` 对应客户端业务端点；原 `src/handlers` 不再作为长期目录存在。
-2. Vaultwarden `src/db/models/*.rs` 对应 D1 实体与关系；原 `src/models` 不再作为长期目录存在。
-3. `identity`、`icons`、`notifications` 保持在 `src/api` 顶层，与 Vaultwarden 一致。
-4. Axum 路由装配保留为 `src/api/router.rs`，因为 Vaultwarden 使用 Rocket route 列表，而 Workers 需要单一 Router。
-5. Webhook/Telegram/outbox 属于本项目扩展，放入 `src/extensions/notify`，不混入 Vaultwarden 的实时通知模块。
-6. HeavyDo、Workers 入口、R2、D1 密钥管理和后台执行器属于平台适配层，放入 `src/worker_runtime`。
-7. 与 Vaultwarden 同名的业务文件优先保持端点、DTO 和权限逻辑在相同位置；平台适配通过独立模块调用。
-8. 每次结构迁移必须保持 `cargo check --target wasm32-unknown-unknown` 通过，再进入下一层拆分。
+| Vaultwarden 文件 | Warden Worker 主文件 | Workers 补充文件 | 状态 |
+| --- | --- | --- | --- |
+| `api/core/accounts.rs` | `api/core/accounts.rs` | `accounts/devices.rs` | 设备与 AuthRequest 端点由 accounts 对外暴露 |
+| `api/core/ciphers.rs` | `api/core/ciphers.rs` | `ciphers/attachments.rs`、`ciphers/sync.rs` | 附件、同步、个人导入由 ciphers 对外暴露 |
+| `api/core/events.rs` | `api/core/events.rs` | 无 | 同名职责 |
+| `api/core/folders.rs` | `api/core/folders.rs` | 无 | 同名职责 |
+| `api/core/organizations.rs` | `api/core/organizations.rs` | `imports.rs` 中的共享 D1 批处理 | 组织导入由 organizations 对外暴露 |
+| `api/core/sends.rs` | `api/core/sends.rs` | `worker_runtime/r2_file.rs` | 同名业务职责，R2 流式存储已隔离 |
+| `api/core/two_factor/mod.rs` | `api/core/two_factor/mod.rs` | `worker_runtime/webauthn.rs` | 2FA 模块层级一致 |
+| `api/core/two_factor/webauthn.rs` | `api/core/two_factor/webauthn.rs` | `worker_runtime/webauthn.rs` | 端点与 Workers 协议实现分离 |
+| `api/core/mod.rs` | `api/core/mod.rs` | `meta/*` | config、domains、HIBP、alive 等由 core 统一导出 |
+| `api/identity.rs` | `api/identity.rs` | `worker_runtime/jwt.rs` | 身份端点保持同名，边缘 JWT 实现隔离 |
+| `api/icons.rs` | `api/icons.rs` | 无 | 同名职责 |
+| `api/notifications.rs` | `api/notifications.rs` | `extensions/notify/*` | 实时通知与 Webhook/Telegram 分离 |
+| `api/web.rs` | `api/web.rs` | `entry.js`、Workers Assets | 静态资源由 Cloudflare Assets 接管 |
 
-## 第一阶段文件映射
+## 模型边界
 
-| 当前文件 | 目标文件 |
-| --- | --- |
-| `src/handlers/accounts.rs` | `src/api/core/accounts.rs` |
-| `src/handlers/ciphers.rs` | `src/api/core/ciphers.rs` |
-| `src/handlers/events.rs` | `src/api/core/events.rs` |
-| `src/handlers/folders.rs` | `src/api/core/folders.rs` |
-| `src/handlers/organizations.rs` | `src/api/core/organizations.rs` |
-| `src/handlers/sends.rs` | `src/api/core/sends.rs` |
-| `src/handlers/two_factor.rs` | `src/api/core/two_factor.rs` |
-| 其余业务 handler | `src/api/core/<name>.rs` |
-| `src/handlers/identity.rs` | `src/api/identity.rs` |
-| `src/handlers/icons.rs` | `src/api/icons.rs` |
-| `src/notifications.rs` | `src/api/notifications.rs` |
-| `src/router.rs` | `src/api/router.rs` |
-| `src/db.rs` | `src/db/mod.rs` |
-| `src/models/*` | `src/db/models/*` |
+- `Attachment`、`AuthRequest`、`Device`、`Event`、`Collection`、`Group`、`OrgPolicy`、`TwoFactor` 均有 Vaultwarden 同名模型文件。
+- 导入请求和同步响应是 API DTO，已从 `db/models` 移至对应 API 辅助文件。
+- 邀请令牌与注册验证令牌声明已从数据库模型移至 `auth.rs`，与 Vaultwarden 的 JWT claims 归属一致。
+- `db/models` 只保留实体、关系、持久化数据和与实体紧密相关的序列化逻辑。
 
-## 执行结果
+## 项目特有功能边界
 
-本轮以 Vaultwarden `2629bcbe1380c894e3a7f52cafcac3988edb8fbb` 为结构参照，已完成：
+- `src/extensions/notify`：Webhook、Telegram、企业微信、模板和 outbox。
+- `src/extensions/usage.rs`：Cloudflare D1/R2 使用量接口。
+- `src/worker_runtime`：Axum Router、Durable Object、R2、Workers 后台任务、远程 domains、边缘 JWT/WebAuthn 和 D1 密钥管理。
+- `src/crypto/password.rs`：在 HeavyDo CPU 环境执行的服务端密码验证适配。
+- `src/entry.js`、`src/heavy_do_routing.mjs`：Wrangler JavaScript 入口及 HeavyDo 路由规则。
 
-- HTTP 业务代码迁移到 `src/api/core`，API 顶层模块迁移到 `src/api`。
-- D1 入口迁移到 `src/db/mod.rs`，数据模型及两步验证持久化操作迁移到 `src/db/models`。
-- `Attachment`、`Event`、`Collection`、`Group`、`OrgPolicy` 和两步验证持久化逻辑归入 Vaultwarden 同名模型文件。
-- Webhook、Telegram、企业微信及 outbox 迁移到 `src/extensions/notify`。
-- Durable Object、后台任务、R2、日志以及 D1 密钥管理迁移到 `src/worker_runtime`。
-- 历史审计文档和维护记录中的源码路径已同步更新。
+## 有意保留的差异
 
-## 有意保留的结构差异
+- Vaultwarden 使用 Rocket、SQLite/MySQL/PostgreSQL 和文件系统；本项目使用 Axum、D1、R2 和 Durable Objects，框架装配不能逐行复用。
+- `imports.rs`、`meta/*` 以及 accounts/ciphers 的子文件用于控制 Workers 单文件体积，但其公开职责由 Vaultwarden 对应主模块统一暴露。
+- 尚未支持的 Vaultwarden 模块不会创建空实现，例如 `emergency_access.rs`、`public.rs`、SSO、SMTP 和 Push。
+- 后续同步上游时，优先比较同名主文件；任何平台差异必须进入 `extensions`、`worker_runtime` 或对应主文件的补充子模块。
 
-- `src/api/router.rs`：Vaultwarden 使用 Rocket route 列表，本项目使用 Axum，因此保留独立装配文件。
-- `src/api/core/attachments.rs`、`devices.rs`、`import.rs`、`settings.rs`、`sync.rs` 等：这些端点在 Vaultwarden 中分布于较大的模块；本项目继续按 Axum handler 边界拆分，防止为了文件名一致而合并无关实现。
-- `src/entry.js` 与 `src/heavy_do_routing.mjs`：Wrangler 直接使用的 JavaScript 入口和路由规则，必须保留在可独立测试的位置。
-- `src/extensions` 和 `src/worker_runtime`：仅承载本项目特有功能；后续同步 Vaultwarden 时不应把这些实现反向混入同名核心模块。
+## 维护约束
 
-后续迁移应优先比较 `src/api` 与 `src/db/models` 中的同名文件；平台差异只通过 `src/extensions` 或 `src/worker_runtime` 暴露的窄接口接入。
+1. 不在 `D:\gitrepo\vaultwarden` 执行写操作。
+2. 每个 Vaultwarden 端点优先归入相同主模块，不为 Axum 路由单独创建平级业务文件。
+3. API DTO 不放入 `db/models`；JWT claims 不放入数据库实体。
+4. 每次迁移先运行 `cargo check --target wasm32-unknown-unknown`，完成后运行全部 Rust、Node 和 Clippy 检查。
+
+## 本次验证
+
+- `cargo check --target wasm32-unknown-unknown`：通过。
+- `cargo test --lib`：67 passed、0 failed。
+- `cargo clippy --all-targets -- -D warnings`：通过。
+- `node --test tests/*.test.mjs`：21 passed、0 failed。
+- `worker-build --release`：通过，生成 release Wasm 产物。
+- `cargo fmt --all -- --check` 与 `git diff --check`：通过。
+- 对齐前后 `D:\gitrepo\vaultwarden` 均保持提交 `2629bcbe1380c894e3a7f52cafcac3988edb8fbb`，工作树为空。

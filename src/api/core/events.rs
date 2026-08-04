@@ -10,7 +10,7 @@ use std::{collections::HashMap, sync::Arc};
 use uuid::Uuid;
 use worker::D1Database;
 
-use crate::{api::router::AppState, auth::Claims, db, db::models::Event, error::AppError};
+use crate::{api::AppState, auth::Claims, db, db::models::Event, error::AppError};
 
 const EVENT_PAGE_SIZE: usize = 30;
 

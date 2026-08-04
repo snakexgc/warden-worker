@@ -4,8 +4,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 use worker::query;
 
+use crate::api::AppState;
 use crate::api::notifications::{self, UpdateType};
-use crate::api::router::AppState;
 use crate::auth::Claims;
 use crate::db;
 use crate::db::models::folder::{CreateFolderRequest, Folder, FolderResponse};

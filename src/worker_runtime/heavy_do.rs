@@ -93,13 +93,9 @@ impl HeavyDo {
             .allow_headers(Any)
             .allow_origin(Any);
 
-        let router = crate::api::router::api_router_with_keys(
-            self.env.clone(),
-            None,
-            jwt_keys,
-            two_factor_key,
-        )
-        .layer(cors);
+        let router =
+            crate::api::api_router_with_keys(self.env.clone(), None, jwt_keys, two_factor_key)
+                .layer(cors);
 
         let state = HeavyDoState { router };
 

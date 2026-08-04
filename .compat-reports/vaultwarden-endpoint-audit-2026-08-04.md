@@ -8,7 +8,7 @@
 
 - Warden Worker：`d89466593dd4c799cb9a311ff65211fb7f927dc8`
 - Vaultwarden：`2629bcbe1380c894e3a7f52cafcac3988edb8fbb`
-- Warden Worker 路由入口：[src/api/router.rs](../src/api/router.rs)
+- Warden Worker 路由入口：[src/worker_runtime/router.rs](../src/worker_runtime/router.rs)
 - Vaultwarden core 路由入口：[src/api/core/mod.rs](../../vaultwarden/src/api/core/mod.rs)
 - Vaultwarden 组织实现：[src/api/core/organizations.rs](../../vaultwarden/src/api/core/organizations.rs)
 
@@ -22,7 +22,7 @@
 
 | 指标 | 数量 | 说明 |
 | --- | ---: | --- |
-| Worker 路径模板 | 135 | `src/api/router.rs` 中的 `.route(...)` |
+| Worker 路径模板 | 135 | `src/worker_runtime/router.rs` 中的 `.route(...)` |
 | Worker 方法-路径注册 | 175 | 包含 `/api`、`/identity`、Web、上传和扩展端点 |
 | Worker `/api` 注册 | 149 | 包含尾斜杠别名等重复注册 |
 | Worker `/api` 规范化唯一注册 | 142 | 参数名和尾斜杠归一化后 |
@@ -71,7 +71,7 @@ Vaultwarden 组织操作不是统一的“已登录即可”，而是根据 Memb
 
 ### 3.3 sync/profile 是明确的个人库裁剪
 
-[src/api/core/sync.rs](../src/api/core/sync.rs) 固定返回：
+[src/api/core/ciphers/sync.rs](../src/api/core/ciphers/sync.rs) 固定返回：
 
 - `profile.organizations = []`
 - `profile.providers = []`
@@ -131,7 +131,7 @@ Worker Cron 只清理过期 Send。Vaultwarden 还包含 trash cipher、auth req
 
 ## 4. Worker 现有端点逐项核对
 
-下表覆盖 `src/api/router.rs` 的全部路由。共享同一 handler 的方法或兼容别名合并在一行。
+下表覆盖 `src/worker_runtime/router.rs` 的全部路由。共享同一 handler 的方法或兼容别名合并在一行。
 
 ### 4.1 Web、静态与公共入口
 

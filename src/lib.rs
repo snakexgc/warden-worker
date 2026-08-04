@@ -8,12 +8,8 @@ mod api;
 mod auth;
 mod crypto;
 mod db;
-mod domains;
 mod error;
 mod extensions;
-mod jwt;
-mod password;
-mod webauthn;
 mod worker_runtime;
 
 pub use api::notifications::NotificationsHub;
@@ -77,8 +73,7 @@ pub async fn main(
         .allow_headers(Any)
         .allow_origin(Any);
 
-    let mut app =
-        api::router::api_router_with_keys(env, Some(ctx), jwt_keys, two_factor_key).layer(cors);
+    let mut app = api::api_router_with_keys(env, Some(ctx), jwt_keys, two_factor_key).layer(cors);
 
     Ok(Service::call(&mut app, http_req).await?)
 }

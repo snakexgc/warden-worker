@@ -1,3 +1,5 @@
+mod models;
+
 use axum::http::HeaderMap;
 use axum::{
     Json,
@@ -11,18 +13,18 @@ use uuid::Uuid;
 use wasm_bindgen::JsValue;
 use worker::{D1Database, D1PreparedStatement};
 
+use crate::api::AppState;
 use crate::api::notifications::{self, UpdateType};
-use crate::api::router::AppState;
 use crate::auth::Claims;
 use crate::db;
 use crate::db::models::folder::Folder;
-use crate::db::models::import::ImportRequest;
 use crate::db::models::{
     Collection, archive,
     cipher::{CipherData, normalize_optional_rfc3339},
 };
 use crate::error::AppError;
 use crate::extensions::notify::{self, NotifyContext, NotifyEvent};
+use models::ImportRequest;
 
 // Keep each D1 batch below the practical Workers free-plan statement envelope.
 const IMPORT_BATCH_SIZE: usize = 40;

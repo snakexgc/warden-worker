@@ -1,3 +1,5 @@
+pub mod password;
+
 use base64::{Engine as _, engine::general_purpose};
 use constant_time_eq::constant_time_eq;
 #[cfg(target_arch = "wasm32")]

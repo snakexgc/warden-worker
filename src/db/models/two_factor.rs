@@ -535,7 +535,7 @@ pub async fn is_any_enabled(db: &D1Database, user_id: &str) -> Result<bool, AppE
     if is_authenticator_enabled(db, user_id).await? || is_email_2fa_enabled(db, user_id).await? {
         return Ok(true);
     }
-    crate::webauthn::is_webauthn_enabled(db, user_id).await
+    crate::worker_runtime::webauthn::is_webauthn_enabled(db, user_id).await
 }
 
 pub async fn upsert_email_2fa(
@@ -680,7 +680,7 @@ pub async fn clear_recovery_code(db: &D1Database, user_id: &str) -> Result<(), A
 pub async fn delete_all_two_factors(db: &D1Database, user_id: &str) -> Result<(), AppError> {
     disable_authenticator(db, user_id).await?;
     delete_email_2fa(db, user_id).await?;
-    crate::webauthn::disable_webauthn(db, user_id).await?;
+    crate::worker_runtime::webauthn::disable_webauthn(db, user_id).await?;
     Ok(())
 }
 

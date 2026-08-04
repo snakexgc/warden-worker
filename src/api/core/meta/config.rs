@@ -7,7 +7,7 @@ use chrono::Utc;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-use crate::{api::router::AppState, db, error::AppError};
+use crate::{api::AppState, db, error::AppError};
 
 #[worker::send]
 pub async fn config(

@@ -10,8 +10,14 @@ use std::sync::Arc;
 use crate::extensions::notify::{NotifyContext, NotifyEvent, extract_request_meta};
 use crate::worker_runtime::logging::targets;
 use crate::{
-    api::router::AppState, auth::Claims, db, db::models::two_factor, error::AppError,
-    extensions::notify, jwt, password, webauthn,
+    api::AppState,
+    auth::Claims,
+    crypto::password,
+    db,
+    db::models::two_factor,
+    error::AppError,
+    extensions::notify,
+    worker_runtime::{jwt, webauthn},
 };
 
 #[derive(Debug, Deserialize, Clone)]

@@ -1,3 +1,7 @@
+pub mod devices;
+
+pub use devices::*;
+
 use axum::http::{HeaderMap, StatusCode};
 use axum::{Json, extract::State};
 use chrono::Utc;
@@ -11,23 +15,18 @@ use wasm_bindgen::JsValue;
 use worker::{Delay, query};
 
 use crate::{
-    api::router::AppState,
-    auth::Claims,
-    crypto::{self, KDF_TYPE_ARGON2ID},
+    api::AppState,
+    auth::{Claims, InviteClaims, RegisterVerifyClaims},
+    crypto::{self, KDF_TYPE_ARGON2ID, password},
     db,
     db::models::{
         cipher::{CipherData, CipherRequestData},
-        organization::InviteClaims,
         send::SendData,
         two_factor,
-        user::{
-            KeyData, PreloginKdfSettings, PreloginResponse, RegisterRequest, RegisterVerifyClaims,
-            User,
-        },
+        user::{KeyData, PreloginKdfSettings, PreloginResponse, RegisterRequest, User},
     },
     error::AppError,
     extensions::notify::{self, NotifyContext, NotifyEvent},
-    password,
 };
 
 const PROTECTED_ACTION_OTP_SIZE: u8 = 6;
@@ -1664,7 +1663,7 @@ pub async fn send_verification_email(
     headers: HeaderMap,
     Json(payload): Json<SendVerificationEmailRequest>,
 ) -> Result<Json<Value>, AppError> {
-    use crate::db::models::user::RegisterVerifyClaims;
+    use crate::auth::RegisterVerifyClaims;
     use chrono::{Duration, Utc};
     use jsonwebtoken::{EncodingKey, Header, encode};
 
@@ -1951,7 +1950,8 @@ async fn cascade_delete_user_data(
     user_id: &str,
 ) -> Result<(), AppError> {
     crate::api::core::sends::delete_user_send_files_from_r2(env, db, user_id).await?;
-    crate::api::core::attachments::delete_user_attachments_from_r2(env, db, user_id).await?;
+    crate::api::core::ciphers::attachments::delete_user_attachments_from_r2(env, db, user_id)
+        .await?;
     db.prepare("DELETE FROM users WHERE id = ?1")
         .bind(&[user_id.into()])?
         .run()

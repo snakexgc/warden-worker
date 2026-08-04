@@ -1,3 +1,13 @@
+pub(crate) mod attachments;
+mod sync;
+
+pub use super::imports::import_data;
+pub use attachments::{
+    attachment_metadata, create_attachment_legacy, create_attachment_v2, delete_attachment,
+    delete_attachment_post, download_attachment, upload_attachment_v2,
+};
+pub use sync::sync;
+
 use axum::http::HeaderMap;
 use axum::{
     Json,
@@ -12,8 +22,8 @@ use std::{
 use uuid::Uuid;
 use worker::{D1Database, query};
 
+use crate::api::AppState;
 use crate::api::notifications::{self, UpdateType};
-use crate::api::router::AppState;
 use crate::auth::Claims;
 use crate::db;
 use crate::db::models::{
@@ -233,7 +243,7 @@ pub async fn purge_personal_vault(
     claims.verify_security_stamp(&db).await?;
     super::accounts::validate_password_or_otp(&db, &claims.sub, &payload).await?;
 
-    super::attachments::delete_user_attachments_from_r2(&state.env, &db, &claims.sub).await?;
+    attachments::delete_user_attachments_from_r2(&state.env, &db, &claims.sub).await?;
     db.prepare("DELETE FROM ciphers WHERE user_id = ?1")
         .bind(&[claims.sub.clone().into()])?
         .run()
@@ -744,7 +754,7 @@ async fn create_cipher_inner(
         )
         .await?;
     }
-    super::attachments::enrich_cipher(&db, state, &mut cipher).await?;
+    attachments::enrich_cipher(&db, state, &mut cipher).await?;
 
     Ok(cipher)
 }
@@ -973,7 +983,7 @@ pub async fn update_cipher(
         )
         .await?;
     }
-    super::attachments::enrich_cipher(&db, &state, &mut cipher).await?;
+    attachments::enrich_cipher(&db, &state, &mut cipher).await?;
 
     let meta = notify::extract_request_meta(&headers);
     notify::notify_background(
@@ -1040,7 +1050,7 @@ pub async fn soft_delete_cipher(
     cipher.deleted_at = Some(now.clone());
     cipher.updated_at = now;
     populate_collection_ids(&db, std::slice::from_mut(&mut cipher), &claims.sub).await?;
-    super::attachments::enrich_cipher(&db, &state, &mut cipher).await?;
+    attachments::enrich_cipher(&db, &state, &mut cipher).await?;
 
     if let Some(organization_id) = organization_id.as_deref() {
         finish_organization_cipher_mutation(
@@ -1129,7 +1139,7 @@ pub async fn restore_cipher(
     cipher.deleted_at = None;
     cipher.updated_at = now;
     populate_collection_ids(&db, std::slice::from_mut(&mut cipher), &claims.sub).await?;
-    super::attachments::enrich_cipher(&db, &state, &mut cipher).await?;
+    attachments::enrich_cipher(&db, &state, &mut cipher).await?;
 
     if let Some(organization_id) = organization_id.as_deref() {
         finish_organization_cipher_mutation(
@@ -1257,7 +1267,7 @@ pub async fn archive_cipher(
         now_string(),
     )
     .await?;
-    super::attachments::enrich_cipher(&db, &state, &mut cipher).await?;
+    attachments::enrich_cipher(&db, &state, &mut cipher).await?;
 
     finish_cipher_mutation(
         &db,
@@ -1306,7 +1316,7 @@ pub async fn unarchive_cipher(
         now_string(),
     )
     .await?;
-    super::attachments::enrich_cipher(&db, &state, &mut cipher).await?;
+    attachments::enrich_cipher(&db, &state, &mut cipher).await?;
 
     finish_cipher_mutation(
         &db,
@@ -1362,7 +1372,7 @@ pub async fn archive_ciphers(
         .await?;
         ciphers.push(cipher);
     }
-    super::attachments::enrich_ciphers(&db, &state, &mut ciphers).await?;
+    attachments::enrich_ciphers(&db, &state, &mut ciphers).await?;
 
     finish_cipher_batch_mutation(&db, &state, &user_id, claims.device.as_deref()).await?;
 
@@ -1412,7 +1422,7 @@ pub async fn unarchive_ciphers(
         .await?;
         ciphers.push(cipher);
     }
-    super::attachments::enrich_ciphers(&db, &state, &mut ciphers).await?;
+    attachments::enrich_ciphers(&db, &state, &mut ciphers).await?;
 
     finish_cipher_batch_mutation(&db, &state, &user_id, claims.device.as_deref()).await?;
 
@@ -1450,8 +1460,7 @@ pub async fn hard_delete_cipher(
     require_cipher_write(&existing)?;
     let organization_id = existing.organization_id.clone();
     if organization_id.is_none() {
-        super::attachments::delete_cipher_attachments_from_r2(&state.env, &db, &id, &claims.sub)
-            .await?;
+        attachments::delete_cipher_attachments_from_r2(&state.env, &db, &id, &claims.sub).await?;
     }
     archive::delete(&db, &claims.sub, &id).await?;
 
@@ -1657,7 +1666,7 @@ pub async fn restore_ciphers(
         ciphers.push(cipher);
     }
     populate_collection_ids(&db, &mut ciphers, &claims.sub).await?;
-    super::attachments::enrich_ciphers(&db, &state, &mut ciphers).await?;
+    attachments::enrich_ciphers(&db, &state, &mut ciphers).await?;
 
     if changed_personal {
         finish_cipher_batch_mutation(&db, &state, &claims.sub, claims.device.as_deref()).await?;
@@ -1711,13 +1720,8 @@ pub async fn hard_delete_ciphers(
         let existing = get_cipher_dbmodel(&state, &id, &claims.sub).await?;
         require_cipher_write(&existing)?;
         if existing.organization_id.is_none() {
-            super::attachments::delete_cipher_attachments_from_r2(
-                &state.env,
-                &db,
-                &id,
-                &claims.sub,
-            )
-            .await?;
+            attachments::delete_cipher_attachments_from_r2(&state.env, &db, &id, &claims.sub)
+                .await?;
         }
         archive::delete(&db, &claims.sub, &id).await?;
         if let Some(organization_id) = existing.organization_id {
@@ -1915,7 +1919,7 @@ pub async fn get_ciphers(
         &claims.sub,
     )
     .await?;
-    super::attachments::enrich_ciphers(&db, &state, &mut ciphers).await?;
+    attachments::enrich_ciphers(&db, &state, &mut ciphers).await?;
 
     Ok(Json(json!({
         "data": ciphers,
@@ -2038,7 +2042,7 @@ pub async fn get_cipher(
     .await?;
     let mut cipher: Cipher = cipher.into();
     populate_collection_ids(&db, std::slice::from_mut(&mut cipher), &claims.sub).await?;
-    super::attachments::enrich_cipher(&db, &state, &mut cipher).await?;
+    attachments::enrich_cipher(&db, &state, &mut cipher).await?;
     Ok(Json(cipher))
 }
 
@@ -2183,7 +2187,7 @@ pub async fn put_cipher_partial(
         cipher.updated_at = now;
     }
     populate_collection_ids(&db, std::slice::from_mut(&mut cipher), &claims.sub).await?;
-    super::attachments::enrich_cipher(&db, &state, &mut cipher).await?;
+    attachments::enrich_cipher(&db, &state, &mut cipher).await?;
 
     finish_cipher_mutation(
         &db,

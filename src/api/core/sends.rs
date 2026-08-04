@@ -17,8 +17,8 @@ use uuid::Uuid;
 use worker::query;
 
 use crate::{
+    api::AppState,
     api::notifications::{self, UpdateType},
-    api::router::AppState,
     auth::Claims,
     db,
     db::models::send::{

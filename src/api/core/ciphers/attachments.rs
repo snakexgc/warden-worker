@@ -11,8 +11,8 @@ use std::{collections::HashMap, sync::Arc};
 use uuid::Uuid;
 
 use crate::{
+    api::AppState,
     api::notifications::{self, UpdateType},
-    api::router::AppState,
     auth::Claims,
     db,
     db::models::{Attachment, cipher::Cipher},
@@ -191,8 +191,7 @@ pub async fn create_attachment_v2(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    let cipher_db =
-        super::ciphers::get_cipher_dbmodel_from_db(&db, &cipher_id, &claims.sub).await?;
+    let cipher_db = super::get_cipher_dbmodel_from_db(&db, &cipher_id, &claims.sub).await?;
 
     let file_size = payload.file_size.into_i64()?;
     r2_file::validate_declared_size(file_size, "Attachment")?;
@@ -251,7 +250,7 @@ pub async fn create_attachment_legacy(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    super::ciphers::get_cipher_dbmodel_from_db(&db, &cipher_id, &claims.sub).await?;
+    super::get_cipher_dbmodel_from_db(&db, &cipher_id, &claims.sub).await?;
 
     let attachment_id = Uuid::new_v4().to_string();
     let object_key = format!("attachments/{}/{}/{}", claims.sub, cipher_id, attachment_id);
@@ -349,10 +348,9 @@ pub async fn create_attachment_legacy(
         .map_err(|_| AppError::Database)?;
     finish_attachment_mutation(&db, &state, &claims, &cipher_id, &now).await?;
 
-    let mut cipher: Cipher =
-        super::ciphers::get_cipher_dbmodel_from_db(&db, &cipher_id, &claims.sub)
-            .await?
-            .into();
+    let mut cipher: Cipher = super::get_cipher_dbmodel_from_db(&db, &cipher_id, &claims.sub)
+        .await?
+        .into();
     enrich_cipher(&db, &state, &mut cipher).await?;
     Ok(Json(
         serde_json::to_value(cipher).map_err(|_| AppError::Internal)?,
@@ -368,7 +366,7 @@ pub async fn upload_attachment_v2(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    super::ciphers::get_cipher_dbmodel_from_db(&db, &cipher_id, &claims.sub).await?;
+    super::get_cipher_dbmodel_from_db(&db, &cipher_id, &claims.sub).await?;
     let attachment = get_attachment(&db, &cipher_id, &attachment_id, &claims.sub).await?;
     r2_file::validate_declared_size(attachment.size, "Attachment")?;
 
@@ -450,7 +448,7 @@ pub async fn attachment_metadata(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    super::ciphers::get_cipher_dbmodel_from_db(&db, &cipher_id, &claims.sub).await?;
+    super::get_cipher_dbmodel_from_db(&db, &cipher_id, &claims.sub).await?;
     let attachment = get_attachment(&db, &cipher_id, &attachment_id, &claims.sub).await?;
     Ok(Json(attachment_to_json(&state, &attachment)?))
 }
@@ -463,7 +461,7 @@ pub async fn delete_attachment(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    super::ciphers::get_cipher_dbmodel_from_db(&db, &cipher_id, &claims.sub).await?;
+    super::get_cipher_dbmodel_from_db(&db, &cipher_id, &claims.sub).await?;
     let attachment = get_attachment(&db, &cipher_id, &attachment_id, &claims.sub).await?;
     let bucket = state
         .env
@@ -494,10 +492,9 @@ pub async fn delete_attachment(
         .map_err(|_| AppError::Database)?;
     finish_attachment_mutation(&db, &state, &claims, &cipher_id, &now).await?;
 
-    let mut cipher: Cipher =
-        super::ciphers::get_cipher_dbmodel_from_db(&db, &cipher_id, &claims.sub)
-            .await?
-            .into();
+    let mut cipher: Cipher = super::get_cipher_dbmodel_from_db(&db, &cipher_id, &claims.sub)
+        .await?
+        .into();
     enrich_cipher(&db, &state, &mut cipher).await?;
     Ok(Json(json!({ "cipher": cipher })))
 }

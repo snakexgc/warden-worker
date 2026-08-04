@@ -8,13 +8,11 @@ use axum::{
 use std::sync::Arc;
 use worker::{Context, Env};
 
-use super::{
-    core::{
-        accounts, attachments, ciphers, compat, config, devices, events, folders, hibp, import,
-        organizations, sends, settings, sync, two_factor, usage, webauthn,
-    },
+use crate::api::{
+    core::{self, accounts, ciphers, events, folders, organizations, sends, two_factor},
     icons, identity, web as css,
 };
+use crate::extensions::usage;
 use crate::worker_runtime::background::BackgroundExecutor;
 use crate::worker_runtime::jwt_manager::JwtKeys;
 use crate::worker_runtime::r2_file::REQUEST_BODY_LIMIT_BYTES;
@@ -66,7 +64,7 @@ pub fn api_router_with_keys(
         .route("/demo.html", get(demo_html))
         .route(
             "/.well-known/apple-app-site-association",
-            get(config::apple_app_site_association),
+            get(core::apple_app_site_association),
         )
         .route("/css/vaultwarden.css", get(css::vaultwarden_css))
         .route("/icons/{*path}", get(icons::get_icon))
@@ -120,59 +118,59 @@ pub fn api_router_with_keys(
             post(accounts::verify_password),
         )
         .route("/accounts/verify-password", post(accounts::verify_password))
-        .route("/api/devices", get(devices::get_devices))
+        .route("/api/devices", get(accounts::get_devices))
         .route(
             "/api/devices/identifier/{id}",
-            get(devices::get_device_by_identifier),
+            get(accounts::get_device_by_identifier),
         )
-        .route("/api/devices/knowndevice", get(devices::knowndevice))
+        .route("/api/devices/knowndevice", get(accounts::knowndevice))
         .route(
             "/api/devices/identifier/{id}/token",
-            put(devices::device_token).post(devices::device_token),
+            put(accounts::device_token).post(accounts::device_token),
         )
         .route(
             "/api/devices/identifier/{id}/clear-token",
-            put(devices::clear_device_token).post(devices::clear_device_token),
+            put(accounts::clear_device_token).post(accounts::clear_device_token),
         )
         .route(
             "/api/auth-requests",
-            get(devices::get_auth_requests).post(devices::post_auth_request),
+            get(accounts::get_auth_requests).post(accounts::post_auth_request),
         )
         .route(
             "/api/auth-requests/admin-request",
-            post(devices::post_auth_request),
+            post(accounts::post_auth_request),
         )
         .route(
             "/api/auth-requests/",
-            get(devices::get_auth_requests).post(devices::post_auth_request),
+            get(accounts::get_auth_requests).post(accounts::post_auth_request),
         )
         .route(
             "/api/auth-requests/admin-request/",
-            post(devices::post_auth_request),
+            post(accounts::post_auth_request),
         )
         .route(
             "/api/auth-requests/pending",
-            get(devices::get_auth_requests_pending),
+            get(accounts::get_auth_requests_pending),
         )
         .route(
             "/api/auth-requests/pending/",
-            get(devices::get_auth_requests_pending),
+            get(accounts::get_auth_requests_pending),
         )
         .route(
             "/api/auth-requests/{id}",
-            get(devices::get_auth_request).put(devices::put_auth_request),
+            get(accounts::get_auth_request).put(accounts::put_auth_request),
         )
         .route(
             "/api/auth-requests/{id}/",
-            get(devices::get_auth_request).put(devices::put_auth_request),
+            get(accounts::get_auth_request).put(accounts::put_auth_request),
         )
         .route(
             "/api/auth-requests/{id}/response",
-            get(devices::get_auth_request_response),
+            get(accounts::get_auth_request_response),
         )
         .route(
             "/api/auth-requests/{id}/response/",
-            get(devices::get_auth_request_response),
+            get(accounts::get_auth_request_response),
         )
         .route(
             "/api/accounts/password",
@@ -252,17 +250,17 @@ pub fn api_router_with_keys(
         .route("/api/two-factor/get-email", post(two_factor::get_email))
         .route(
             "/api/two-factor/get-webauthn",
-            post(webauthn::two_factor_get_webauthn),
+            post(two_factor::webauthn::two_factor_get_webauthn),
         )
         .route(
             "/api/two-factor/get-webauthn-challenge",
-            post(webauthn::two_factor_get_webauthn_challenge),
+            post(two_factor::webauthn::two_factor_get_webauthn_challenge),
         )
         .route(
             "/api/two-factor/webauthn",
-            post(webauthn::two_factor_put_webauthn)
-                .put(webauthn::two_factor_put_webauthn)
-                .delete(webauthn::two_factor_delete_webauthn),
+            post(two_factor::webauthn::two_factor_put_webauthn)
+                .put(two_factor::webauthn::two_factor_put_webauthn)
+                .delete(two_factor::webauthn::two_factor_delete_webauthn),
         )
         .route("/api/two-factor/send-email", post(two_factor::send_email))
         .route(
@@ -325,7 +323,7 @@ pub fn api_router_with_keys(
                 .layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT_BYTES)),
         )
         .route("/api/collections", get(organizations::get_collections))
-        .route("/api/policies", get(compat::get_policies))
+        .route("/api/policies", get(organizations::get_policies))
         .route(
             "/api/organizations",
             get(organizations::get_organizations).post(organizations::create_organization),
@@ -552,38 +550,38 @@ pub fn api_router_with_keys(
             get(events::get_member_events),
         )
         // Main data sync route
-        .route("/api/sync", get(sync::sync))
+        .route("/api/sync", get(ciphers::sync))
         // Ciphers CRUD
         .route("/api/ciphers/create", post(ciphers::create_cipher))
         .route("/api/ciphers/purge", post(ciphers::purge_personal_vault))
         .route(
             "/api/ciphers/{cipher_id}/attachment/v2",
-            post(attachments::create_attachment_v2),
+            post(ciphers::create_attachment_v2),
         )
         .route(
             "/api/ciphers/{cipher_id}/attachment",
-            post(attachments::create_attachment_legacy)
+            post(ciphers::create_attachment_legacy)
                 .layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT_BYTES)),
         )
         .route(
             "/api/ciphers/{cipher_id}/attachment/{attachment_id}",
-            get(attachments::attachment_metadata)
-                .post(attachments::upload_attachment_v2)
-                .delete(attachments::delete_attachment)
+            get(ciphers::attachment_metadata)
+                .post(ciphers::upload_attachment_v2)
+                .delete(ciphers::delete_attachment)
                 .layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT_BYTES)),
         )
         .route(
             "/api/ciphers/{cipher_id}/attachment/{attachment_id}/delete",
-            post(attachments::delete_attachment_post),
+            post(ciphers::delete_attachment_post),
         )
         .route(
             "/ciphers/{cipher_id}/attachment/{attachment_id}",
-            post(attachments::upload_attachment_v2)
+            post(ciphers::upload_attachment_v2)
                 .layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT_BYTES)),
         )
         .route(
             "/attachments/{cipher_id}/{attachment_id}",
-            get(attachments::download_attachment),
+            get(ciphers::download_attachment),
         )
         .route(
             "/api/ciphers",
@@ -591,10 +589,10 @@ pub fn api_router_with_keys(
                 .post(ciphers::post_ciphers)
                 .delete(ciphers::hard_delete_ciphers_delete),
         )
-        .route("/api/ciphers/import", post(import::import_data))
+        .route("/api/ciphers/import", post(ciphers::import_data))
         .route(
             "/api/ciphers/import-organization",
-            post(import::import_organization),
+            post(organizations::import_organization),
         )
         .route(
             "/api/ciphers/organization-details",
@@ -672,49 +670,52 @@ pub fn api_router_with_keys(
         )
         .route(
             "/api/settings/domains",
-            get(settings::get_domains)
-                .post(settings::post_domains)
-                .put(settings::put_domains),
+            get(core::get_domains)
+                .post(core::post_domains)
+                .put(core::put_domains),
         )
-        .route("/api/config", get(config::config))
+        .route("/api/config", get(core::config))
         .route("/api/plans", get(organizations::get_plans))
-        .route("/alive", get(config::alive).head(config::alive_head))
-        .route("/api/alive", get(config::alive).head(config::alive_head))
-        .route("/api/now", get(config::now))
-        .route("/api/version", get(config::version))
-        .route("/api/hibp/breach", get(hibp::hibp_breach))
+        .route("/alive", get(core::alive).head(core::alive_head))
+        .route("/api/alive", get(core::alive).head(core::alive_head))
+        .route("/api/now", get(core::now))
+        .route("/api/version", get(core::version))
+        .route("/api/hibp/breach", get(core::hibp_breach))
         .route("/events/collect", post(events::post_events_collect))
         .route(
             "/accounts/webauthn/assertion-options",
-            get(webauthn::identity_assertion_options).post(webauthn::identity_assertion_options),
+            get(two_factor::webauthn::identity_assertion_options)
+                .post(two_factor::webauthn::identity_assertion_options),
         )
         .route(
             "/identity/accounts/webauthn/assertion-options",
-            get(webauthn::identity_assertion_options).post(webauthn::identity_assertion_options),
+            get(two_factor::webauthn::identity_assertion_options)
+                .post(two_factor::webauthn::identity_assertion_options),
         )
         .route(
             "/api/webauthn",
-            get(webauthn::list_credentials).post(webauthn::create_credential),
+            get(two_factor::webauthn::list_credentials)
+                .post(two_factor::webauthn::create_credential),
         )
         .route(
             "/api/webauthn/attestation-options",
-            post(webauthn::attestation_options),
+            post(two_factor::webauthn::attestation_options),
         )
         .route(
             "/api/webauthn/prf-probe",
-            post(webauthn::webauthn_prf_probe),
+            post(two_factor::webauthn::webauthn_prf_probe),
         )
         .route(
             "/api/webauthn/assertion-options",
-            post(webauthn::assertion_options),
+            post(two_factor::webauthn::assertion_options),
         )
         .route(
             "/api/webauthn/{credential_id}",
-            put(webauthn::update_credential),
+            put(two_factor::webauthn::update_credential),
         )
         .route(
             "/api/webauthn/{credential_id}/delete",
-            post(webauthn::delete_credential),
+            post(two_factor::webauthn::delete_credential),
         )
         .route("/api/d1/usage", get(usage::d1_usage))
         .with_state(app_state)

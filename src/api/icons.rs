@@ -5,7 +5,7 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::api::router::AppState;
+use crate::api::AppState;
 use crate::error::AppError;
 use crate::worker_runtime::logging::targets;
 

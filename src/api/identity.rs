@@ -16,16 +16,16 @@ use uuid::Uuid;
 use worker::wasm_bindgen::JsValue;
 
 use super::core::{sends, two_factor as two_factor_api};
-use crate::api::router::AppState;
+use crate::api::AppState;
 use crate::extensions::notify::{self, NotifyContext, NotifyEvent};
 use crate::worker_runtime::background::BackgroundExecutor;
 use crate::{
     auth::Claims,
-    crypto, db,
-    db::models::{two_factor, user::User},
+    crypto::{self, password},
+    db,
+    db::models::{auth_request, device, two_factor, user::User},
     error::AppError,
-    jwt, password, webauthn,
-    worker_runtime::logging::targets,
+    worker_runtime::{jwt, logging::targets, webauthn},
 };
 
 const LOGIN_RATE_LIMITER_BINDING: &str = "LOGIN_LIMITER";
@@ -62,7 +62,7 @@ fn update_device_background(
             }
         };
 
-        if let Err(e) = ensure_devices_table(&db).await {
+        if let Err(e) = device::ensure_table(&db).await {
             log::warn!(
                 target: targets::DB,
                 "background device update failed: cannot ensure devices table user_id={} error={:?}",
@@ -454,33 +454,6 @@ async fn generate_api_key_tokens_response(
             "Object": "userDecryptionOptions"
         }
     }))
-}
-
-async fn ensure_devices_table(db: &worker::D1Database) -> Result<(), AppError> {
-    db.prepare(
-        "CREATE TABLE IF NOT EXISTS devices (
-            id TEXT PRIMARY KEY NOT NULL,
-            user_id TEXT NOT NULL,
-            device_identifier TEXT NOT NULL,
-            device_name TEXT,
-            device_type INTEGER,
-            remember_token_hash TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE(user_id, device_identifier),
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        )",
-    )
-    .run()
-    .await
-    .map_err(|_| AppError::Database)?;
-
-    let _ = db
-        .prepare("ALTER TABLE devices ADD COLUMN remember_token_hash TEXT")
-        .run()
-        .await;
-
-    Ok(())
 }
 
 fn sha256_hex(input: &str) -> String {
@@ -1009,9 +982,8 @@ pub async fn token(
             // If this is an auth-request login (trusted device), skip master password check
             // and verify the auth-request access code instead.
             if let Some(auth_request_id) = payload.auth_request.as_deref() {
-                use crate::api::core::devices as dev;
-                dev::ensure_auth_requests_table(&db).await?;
-                dev::purge_expired_auth_requests(&db).await?;
+                auth_request::ensure_table(&db).await?;
+                auth_request::purge_expired(&db).await?;
 
                 let ar_row: Option<Value> = db
                     .prepare("SELECT * FROM auth_requests WHERE id = ?1 AND user_id = ?2 LIMIT 1")
@@ -1914,7 +1886,7 @@ pub async fn token(
             .await?;
 
             if let Some(device_identifier) = device_identifier.as_deref() {
-                ensure_devices_table(&db).await?;
+                device::ensure_table(&db).await?;
 
                 let now = chrono::Utc::now().to_rfc3339();
                 if let Ok(stmt) = db

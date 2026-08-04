@@ -6,13 +6,36 @@ use jsonwebtoken::{DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::api::router::AppState;
+use crate::api::AppState;
 use crate::error::AppError;
 use serde_json::Value;
 use worker::D1Database;
 
 pub(crate) fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InviteClaims {
+    pub nbf: usize,
+    pub exp: usize,
+    pub iss: String,
+    pub sub: String,
+    pub email: String,
+    pub org_id: String,
+    pub member_id: String,
+    pub invited_by_email: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegisterVerifyClaims {
+    pub sub: String,
+    pub name: Option<String>,
+    pub exp: usize,
+    pub nbf: usize,
+    pub iss: String,
+    pub jti: String,
+    pub verified: bool,
 }
 
 /// Returns the edge-authenticated client address used for security decisions.

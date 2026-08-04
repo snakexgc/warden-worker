@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-use crate::{api::router::AppState, auth::Claims, db, error::AppError};
+use crate::{api::AppState, auth::Claims, db, error::AppError};
 
 const D1_MAX_BYTES: i64 = 500 * 1024 * 1024;
 

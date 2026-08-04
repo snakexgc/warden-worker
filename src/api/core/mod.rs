@@ -1,17 +1,11 @@
 pub mod accounts;
-pub mod attachments;
 pub mod ciphers;
-pub mod compat;
-pub mod config;
-pub mod devices;
 pub mod events;
 pub mod folders;
-pub mod hibp;
-pub mod import;
+mod imports;
+mod meta;
 pub mod organizations;
 pub mod sends;
-pub mod settings;
-pub mod sync;
 pub mod two_factor;
-pub mod usage;
-pub mod webauthn;
+
+pub use meta::*;

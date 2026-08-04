@@ -1,4 +1,4 @@
-use super::{cipher::Cipher, folder::FolderResponse};
+use crate::db::models::{cipher::Cipher, folder::FolderResponse};
 use serde::Serialize;
 use serde_json::Value;
 

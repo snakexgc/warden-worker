@@ -6,7 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::{Engine as _, engine::general_purpose};
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use constant_time_eq::constant_time_eq;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -15,33 +15,13 @@ use std::sync::Arc;
 use uuid::Uuid;
 use worker::wasm_bindgen::JsValue;
 
-use crate::{api::router::AppState, auth::Claims, db, error::AppError};
-
-async fn ensure_devices_table(db: &worker::D1Database) -> Result<(), AppError> {
-    db.prepare(
-        "CREATE TABLE IF NOT EXISTS devices (
-            id TEXT PRIMARY KEY NOT NULL,
-            user_id TEXT NOT NULL,
-            device_identifier TEXT NOT NULL,
-            device_name TEXT,
-            device_type INTEGER,
-            remember_token_hash TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE(user_id, device_identifier),
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        )",
-    )
-    .run()
-    .await
-    .map_err(|_| AppError::Database)?;
-
-    let _ = db
-        .prepare("ALTER TABLE devices ADD COLUMN remember_token_hash TEXT")
-        .run()
-        .await;
-    Ok(())
-}
+use crate::{
+    api::AppState,
+    auth::Claims,
+    db,
+    db::models::{auth_request, device},
+    error::AppError,
+};
 
 fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
@@ -108,7 +88,7 @@ pub async fn knowndevice(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = db::get_db(&state.env)?;
-    ensure_devices_table(&db).await?;
+    device::ensure_table(&db).await?;
 
     let email_b64 = headers
         .get("x-request-email")
@@ -163,7 +143,7 @@ pub async fn device_token(
 ) -> Result<Json<()>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    ensure_devices_table(&db).await?;
+    device::ensure_table(&db).await?;
 
     let inferred_name = infer_device_name(&headers);
     let inferred_type = infer_device_type(&headers);
@@ -210,8 +190,8 @@ pub async fn get_devices(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    ensure_device_management_tables(&db).await?;
-    purge_expired_auth_requests(&db).await?;
+    auth_request::ensure_management_tables(&db).await?;
+    auth_request::purge_expired(&db).await?;
 
     let rows: Vec<Value> = db
         .prepare(
@@ -326,7 +306,7 @@ pub async fn get_device_by_identifier(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    ensure_devices_table(&db).await?;
+    device::ensure_table(&db).await?;
 
     let inferred_name = infer_device_name(&headers);
     let inferred_type = infer_device_type(&headers);
@@ -414,57 +394,6 @@ pub async fn get_device_by_identifier(
         "isTrusted": trusted,
         "object": "device"
     })))
-}
-
-pub(crate) async fn ensure_auth_requests_table(db: &worker::D1Database) -> Result<(), AppError> {
-    db.prepare(
-        "CREATE TABLE IF NOT EXISTS auth_requests (
-            id TEXT PRIMARY KEY NOT NULL,
-            user_id TEXT NOT NULL,
-            request_device_identifier TEXT NOT NULL,
-            device_type INTEGER NOT NULL,
-            request_ip TEXT NOT NULL,
-            response_device_identifier TEXT,
-            access_code_hash TEXT NOT NULL,
-            public_key TEXT NOT NULL,
-            enc_key TEXT,
-            master_password_hash TEXT,
-            approved INTEGER,
-            creation_date TEXT NOT NULL,
-            response_date TEXT,
-            authentication_date TEXT,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        )",
-    )
-    .run()
-    .await
-    .map_err(|_| AppError::Database)?;
-
-    db.prepare("CREATE INDEX IF NOT EXISTS idx_auth_requests_user_id ON auth_requests(user_id)")
-        .run()
-        .await
-        .map_err(|_| AppError::Database)?;
-
-    Ok(())
-}
-
-pub(crate) async fn ensure_device_management_tables(
-    db: &worker::D1Database,
-) -> Result<(), AppError> {
-    ensure_devices_table(db).await?;
-    ensure_auth_requests_table(db).await?;
-    Ok(())
-}
-
-pub(crate) async fn purge_expired_auth_requests(db: &worker::D1Database) -> Result<(), AppError> {
-    let cutoff =
-        (Utc::now() - Duration::minutes(15)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    db.prepare("DELETE FROM auth_requests WHERE creation_date < ?1")
-        .bind(&[cutoff.into()])?
-        .run()
-        .await
-        .map_err(|_| AppError::Database)?;
-    Ok(())
 }
 
 fn client_ip_from_headers(headers: &HeaderMap) -> String {
@@ -601,8 +530,8 @@ pub async fn post_auth_request(
     Json(payload): Json<AuthRequestRequest>,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
-    ensure_device_management_tables(&db).await?;
-    purge_expired_auth_requests(&db).await?;
+    auth_request::ensure_management_tables(&db).await?;
+    auth_request::purge_expired(&db).await?;
 
     let email = payload.email.trim().to_lowercase();
     let user_id: Option<String> = db
@@ -711,8 +640,8 @@ pub async fn get_auth_request(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    ensure_auth_requests_table(&db).await?;
-    purge_expired_auth_requests(&db).await?;
+    auth_request::ensure_table(&db).await?;
+    auth_request::purge_expired(&db).await?;
 
     let row: Option<Value> = db
         .prepare("SELECT * FROM auth_requests WHERE id = ?1 AND user_id = ?2 LIMIT 1")
@@ -751,8 +680,8 @@ pub async fn put_auth_request(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    ensure_device_management_tables(&db).await?;
-    purge_expired_auth_requests(&db).await?;
+    auth_request::ensure_management_tables(&db).await?;
+    auth_request::purge_expired(&db).await?;
     let user_id = claims.sub.clone();
 
     let row: Option<Value> = db
@@ -941,8 +870,8 @@ pub async fn get_auth_request_response(
     Query(query): Query<AuthRequestResponseQuery>,
 ) -> Result<Response, AppError> {
     let db = db::get_db(&state.env)?;
-    ensure_auth_requests_table(&db).await?;
-    purge_expired_auth_requests(&db).await?;
+    auth_request::ensure_table(&db).await?;
+    auth_request::purge_expired(&db).await?;
 
     let row: Option<Value> = db
         .prepare("SELECT * FROM auth_requests WHERE id = ?1 LIMIT 1")
@@ -1012,8 +941,8 @@ pub async fn get_auth_requests_pending(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    ensure_auth_requests_table(&db).await?;
-    purge_expired_auth_requests(&db).await?;
+    auth_request::ensure_table(&db).await?;
+    auth_request::purge_expired(&db).await?;
 
     let rows: Vec<Value> = db
         .prepare(

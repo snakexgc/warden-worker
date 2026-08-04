@@ -1,3 +1,5 @@
+pub mod webauthn;
+
 use axum::http::HeaderMap;
 use axum::{Json, extract::State};
 use chrono::Utc;
@@ -8,15 +10,18 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use totp_rs::{Algorithm, Secret, TOTP};
 
-use crate::api::router::AppState;
+use crate::api::AppState;
 use crate::auth::Claims;
+use crate::crypto::password;
 use crate::db;
-use crate::db::models::two_factor::{self, EmailTokenData};
+use crate::db::models::{
+    auth_request,
+    two_factor::{self, EmailTokenData},
+};
 use crate::error::AppError;
 use crate::extensions::notify::{self, EmailType, NotifyContext, NotifyEvent};
-use crate::password;
-use crate::webauthn;
 use crate::worker_runtime::logging::targets;
+use crate::worker_runtime::webauthn as webauthn_runtime;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -130,11 +135,11 @@ pub async fn two_factor_status(
         }));
     }
 
-    let webauthn_enabled = webauthn::is_webauthn_enabled(&db, &claims.sub).await?;
-    if webauthn_enabled && webauthn::is_webauthn_2fa_supported(&headers) {
+    let webauthn_enabled = webauthn_runtime::is_webauthn_enabled(&db, &claims.sub).await?;
+    if webauthn_enabled && webauthn_runtime::is_webauthn_2fa_supported(&headers) {
         providers.push(json!({
             "enabled": true,
-            "type": webauthn::TWO_FACTOR_PROVIDER_WEBAUTHN,
+            "type": webauthn_runtime::TWO_FACTOR_PROVIDER_WEBAUTHN,
             "object": "twoFactorProvider"
         }));
     }
@@ -801,8 +806,8 @@ pub async fn send_email_login(
                 .as_deref()
                 .filter(|code| !code.is_empty())
                 .ok_or_else(|| AppError::Unauthorized("AuthRequest doesn't exist".to_string()))?;
-            super::devices::ensure_auth_requests_table(&db).await?;
-            super::devices::purge_expired_auth_requests(&db).await?;
+            auth_request::ensure_table(&db).await?;
+            auth_request::purge_expired(&db).await?;
             let auth_request: Value = db
                 .prepare(
                     "SELECT device_type, request_ip, access_code_hash, authentication_date
@@ -1045,8 +1050,8 @@ pub async fn disable_twofactor(
                 claims.sub
             );
         }
-        webauthn::TWO_FACTOR_PROVIDER_WEBAUTHN => {
-            webauthn::disable_webauthn(&db, &claims.sub).await?;
+        webauthn_runtime::TWO_FACTOR_PROVIDER_WEBAUTHN => {
+            webauthn_runtime::disable_webauthn(&db, &claims.sub).await?;
             log::info!(
                 target: targets::AUTH,
                 "disable_twofactor: webauthn disabled user_id={}",
@@ -1071,7 +1076,7 @@ pub async fn disable_twofactor(
     let provider_name = match type_ {
         two_factor::TWO_FACTOR_PROVIDER_AUTHENTICATOR => "authenticator",
         two_factor::TWO_FACTOR_PROVIDER_EMAIL => "email",
-        webauthn::TWO_FACTOR_PROVIDER_WEBAUTHN => "webauthn",
+        webauthn_runtime::TWO_FACTOR_PROVIDER_WEBAUTHN => "webauthn",
         _ => "unknown",
     };
 

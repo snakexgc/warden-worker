@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-pub type ImportCipher = super::cipher::CipherRequestData;
+pub type ImportCipher = crate::db::models::cipher::CipherRequestData;
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]

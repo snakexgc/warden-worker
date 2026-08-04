@@ -5,7 +5,7 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::api::router::AppState;
+use crate::api::AppState;
 
 const DEFAULT_BASE_CSS: &str = r#"/* ============================================
      Vaultwarden 自定义登录界面样式

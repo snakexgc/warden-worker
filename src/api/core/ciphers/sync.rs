@@ -1,3 +1,5 @@
+mod models;
+
 use axum::http::HeaderMap;
 use axum::{
     Json,
@@ -8,7 +10,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::{
-    api::router::AppState,
+    api::AppState,
     auth::Claims,
     db,
     db::models::{
@@ -16,14 +18,14 @@ use crate::{
         cipher::Cipher,
         folder::{Folder, FolderResponse},
         send::{SendDBModel, send_to_json},
-        sync::{Profile, SyncResponse, UserDecryption},
         two_factor,
         user::User,
     },
-    domains,
     error::AppError,
     extensions::notify::{self, NotifyContext, NotifyEvent},
+    worker_runtime::domains,
 };
+use models::{Profile, SyncResponse, UserDecryption};
 
 const KDF_TYPE_PBKDF2: i32 = 0;
 const KDF_TYPE_ARGON2ID: i32 = 1;
@@ -100,9 +102,9 @@ pub async fn sync(
     let folders: Vec<FolderResponse> = folders_db.into_iter().map(|f| f.into()).collect();
 
     // Fetch personal and accessible organization ciphers in one authorization-aware query.
-    let mut ciphers: Vec<Cipher> = super::ciphers::get_accessible_ciphers(
+    let mut ciphers: Vec<Cipher> = super::get_accessible_ciphers(
         &db,
-        super::organizations::organizations_enabled(&state.env),
+        super::super::organizations::organizations_enabled(&state.env),
         &user_id,
     )
     .await?;
@@ -195,9 +197,10 @@ pub async fn sync(
     };
 
     let organizations =
-        super::organizations::profile_organizations(&db, &state.env, &user_id).await?;
-    let collections = super::organizations::sync_collections(&db, &state.env, &user_id).await?;
-    let policies = super::organizations::sync_policies(&db, &state.env, &user_id).await?;
+        super::super::organizations::profile_organizations(&db, &state.env, &user_id).await?;
+    let collections =
+        super::super::organizations::sync_collections(&db, &state.env, &user_id).await?;
+    let policies = super::super::organizations::sync_policies(&db, &state.env, &user_id).await?;
     let premium_from_organization = !organizations.is_empty();
 
     let mut profile = profile;
