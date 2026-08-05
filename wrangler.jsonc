@@ -31,8 +31,6 @@
 		// Public registration is verified through the configured Webhook/Telegram admin channel.
 		"SIGNUPS_ALLOWED": "true",
 		"SIGNUPS_VERIFY": "true",
-		// Organization endpoints stay dark until the migration and compatibility tests pass.
-		"ORGANIZATIONS_ENABLED": "false",
 		"INVITATIONS_ALLOWED": "true",
 		"INVITATION_EXPIRATION_HOURS": "120",
 		"ORG_GROUPS_ENABLED": "false",

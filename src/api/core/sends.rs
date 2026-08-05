@@ -11,7 +11,7 @@ use constant_time_eq::constant_time_eq;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use std::sync::Arc;
 use uuid::Uuid;
 use worker::query;
@@ -516,17 +516,6 @@ fn display_size(bytes: i64) -> String {
     format!("{:.1} GB", gb)
 }
 
-fn hash_password_legacy(password: &str, salt_b64: &str) -> Result<String, AppError> {
-    let salt = general_purpose::STANDARD
-        .decode(salt_b64)
-        .map_err(|_| AppError::Internal)?;
-    let mut hasher = Sha256::new();
-    hasher.update(&salt);
-    hasher.update(password.as_bytes());
-    let out = hasher.finalize();
-    Ok(general_purpose::STANDARD.encode(out))
-}
-
 fn hash_password(password: &str, salt_b64: &str, iterations: i32) -> Result<String, AppError> {
     let salt = general_purpose::STANDARD
         .decode(salt_b64)
@@ -538,6 +527,22 @@ fn hash_password(password: &str, salt_b64: &str, iterations: i32) -> Result<Stri
     let mut out = [0_u8; 32];
     pbkdf2::pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt, iterations, &mut out);
     Ok(general_purpose::STANDARD.encode(out))
+}
+
+fn verify_password(
+    password: &str,
+    salt_b64: &str,
+    stored_hash_b64: &str,
+    iterations: Option<i32>,
+) -> Result<bool, AppError> {
+    let Some(iterations) = iterations.filter(|value| *value > 0) else {
+        return Ok(false);
+    };
+    let candidate = hash_password(password, salt_b64, iterations)?;
+    Ok(constant_time_eq(
+        stored_hash_b64.as_bytes(),
+        candidate.as_bytes(),
+    ))
 }
 
 fn new_salt_b64() -> String {
@@ -822,13 +827,12 @@ fn validate_send_password(send: &SendDBModel, password: Option<String>) -> Resul
         log::warn!(target: targets::AUTH, "send.password_check.fail send_id={} reason=password_not_provided", send.id);
         return Err(AppError::Unauthorized("Password not provided".to_string()));
     };
-    let candidate = match send.password_iter {
-        Some(iterations) if iterations > 0 => {
-            hash_password(&password, stored_salt_b64, iterations)?
-        }
-        _ => hash_password_legacy(&password, stored_salt_b64)?,
-    };
-    if !constant_time_eq(stored_hash_b64.as_bytes(), candidate.as_bytes()) {
+    if !verify_password(
+        &password,
+        stored_salt_b64,
+        stored_hash_b64,
+        send.password_iter,
+    )? {
         log::warn!(target: targets::AUTH, "send.password_check.fail send_id={} reason=password_mismatch", send.id);
         return Err(AppError::BadRequest("Invalid password".to_string()));
     }
@@ -914,13 +918,12 @@ pub async fn issue_send_access_token(
                 "Password is required",
             ));
         };
-        let candidate = match send.password_iter {
-            Some(iterations) if iterations > 0 => {
-                hash_password(&password_hash_b64, stored_salt_b64, iterations)?
-            }
-            _ => hash_password_legacy(&password_hash_b64, stored_salt_b64)?,
-        };
-        if !constant_time_eq(stored_hash_b64.as_bytes(), candidate.as_bytes()) {
+        if !verify_password(
+            &password_hash_b64,
+            stored_salt_b64,
+            stored_hash_b64,
+            send.password_iter,
+        )? {
             log::warn!(
                 target: targets::AUTH,
                 "send.token.denied send_id={} reason=password_mismatch ip={}",
@@ -2310,8 +2313,8 @@ pub async fn download_send(
 #[cfg(test)]
 mod tests {
     use super::{
-        hash_password, hash_password_legacy, new_salt_b64, validate_deletion_date,
-        validate_send_access, validate_send_lifetime,
+        hash_password, new_salt_b64, validate_deletion_date, validate_send_access,
+        validate_send_lifetime,
     };
     use crate::db::models::send::{SEND_TYPE_TEXT, SendDBModel};
     use base64::{Engine as _, engine::general_purpose};
@@ -2323,15 +2326,6 @@ mod tests {
         assert_eq!(
             hash_password("password", &salt, 1).expect("hash password"),
             "Eg+2z/z4syxD5yJSVsT4N6hlSMkszDVICAWYfLcL4Xs="
-        );
-    }
-
-    #[test]
-    fn legacy_send_password_hash_remains_readable() {
-        let salt = general_purpose::STANDARD.encode(b"salt");
-        assert_eq!(
-            hash_password_legacy("password", &salt).expect("hash legacy password"),
-            "E2Ab2k6njlWge5iGbSvmvgdE44ZvE8AMgRyrYIoo8yI="
         );
     }
 

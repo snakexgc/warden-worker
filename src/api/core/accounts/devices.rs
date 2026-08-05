@@ -19,7 +19,7 @@ use crate::{
     api::AppState,
     auth::Claims,
     db,
-    db::models::{auth_request, device},
+    db::models::{auth_request, device::Device},
     error::AppError,
 };
 
@@ -88,7 +88,6 @@ pub async fn knowndevice(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = db::get_db(&state.env)?;
-    device::ensure_table(&db).await?;
 
     let email_b64 = headers
         .get("x-request-email")
@@ -143,7 +142,6 @@ pub async fn device_token(
 ) -> Result<Json<()>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    device::ensure_table(&db).await?;
 
     let inferred_name = infer_device_name(&headers);
     let inferred_type = infer_device_type(&headers);
@@ -211,7 +209,6 @@ pub async fn clear_device_token(
 ) -> Result<Json<()>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    device::ensure_table(&db).await?;
     let push_uuid = db
         .prepare(
             "SELECT push_uuid FROM devices
@@ -249,7 +246,6 @@ pub async fn get_devices(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    auth_request::ensure_management_tables(&db).await?;
     auth_request::purge_expired(&db).await?;
 
     let rows: Vec<Value> = db
@@ -365,14 +361,12 @@ pub async fn get_device_by_identifier(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    device::ensure_table(&db).await?;
 
     let inferred_name = infer_device_name(&headers);
     let inferred_type = infer_device_type(&headers);
-    let row: Option<Value> = db
+    let row: Option<Device> = db
         .prepare(
-            "SELECT id, device_identifier, device_name, device_type, remember_token_hash, created_at, updated_at
-             FROM devices
+            "SELECT * FROM devices
              WHERE user_id = ?1 AND device_identifier = ?2
              LIMIT 1",
         )
@@ -384,26 +378,11 @@ pub async fn get_device_by_identifier(
     let row = row.ok_or_else(|| AppError::NotFound("Device not found".to_string()))?;
     let now = Utc::now().to_rfc3339();
 
-    let row_device_type = row.get("device_type").and_then(|v| v.as_i64());
-    let row_device_name = row
-        .get("device_name")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let row_id = row
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let row_created_at = row
-        .get("created_at")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let row_updated_at = row
-        .get("updated_at")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let row_device_type = row.device_type.map(i64::from);
+    let row_device_name = row.device_name.clone();
+    let row_id = row.id.clone();
+    let row_created_at = row.created_at.clone();
+    let row_updated_at = row.updated_at.clone();
 
     let should_update_type = row_device_type.is_none() && inferred_type.is_some();
     let should_update_name = row_device_name
@@ -428,19 +407,12 @@ pub async fn get_device_by_identifier(
             .await;
     }
 
-    let identifier = row
-        .get("device_identifier")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let identifier = row.device_identifier;
     let name = inferred_name.or(row_device_name).unwrap_or_default();
     let device_type = inferred_type.or(row_device_type).unwrap_or(0);
     let created_at = row_created_at;
     let updated_at = if updated { now.clone() } else { row_updated_at };
-    let trusted = row
-        .get("remember_token_hash")
-        .and_then(|v| v.as_str())
-        .is_some();
+    let trusted = row.remember_token_hash.is_some();
 
     Ok(Json(json!({
         "id": row_id,
@@ -589,7 +561,6 @@ pub async fn post_auth_request(
     Json(payload): Json<AuthRequestRequest>,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
-    auth_request::ensure_management_tables(&db).await?;
     auth_request::purge_expired(&db).await?;
 
     let email = payload.email.trim().to_lowercase();
@@ -699,7 +670,6 @@ pub async fn get_auth_request(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    auth_request::ensure_table(&db).await?;
     auth_request::purge_expired(&db).await?;
 
     let row: Option<Value> = db
@@ -739,7 +709,6 @@ pub async fn put_auth_request(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    auth_request::ensure_management_tables(&db).await?;
     auth_request::purge_expired(&db).await?;
     let user_id = claims.sub.clone();
 
@@ -929,7 +898,6 @@ pub async fn get_auth_request_response(
     Query(query): Query<AuthRequestResponseQuery>,
 ) -> Result<Response, AppError> {
     let db = db::get_db(&state.env)?;
-    auth_request::ensure_table(&db).await?;
     auth_request::purge_expired(&db).await?;
 
     let row: Option<Value> = db
@@ -1000,7 +968,6 @@ pub async fn get_auth_requests_pending(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    auth_request::ensure_table(&db).await?;
     auth_request::purge_expired(&db).await?;
 
     let rows: Vec<Value> = db

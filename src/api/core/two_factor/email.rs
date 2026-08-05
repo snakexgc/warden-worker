@@ -286,7 +286,6 @@ async fn authenticate_email_request(
         .as_deref()
         .filter(|code| !code.is_empty())
         .ok_or_else(|| AppError::Unauthorized("AuthRequest doesn't exist".to_string()))?;
-    auth_request::ensure_table(db).await?;
     auth_request::purge_expired(db).await?;
     let request: Value = db
         .prepare(

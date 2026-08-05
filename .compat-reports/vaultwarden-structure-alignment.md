@@ -128,14 +128,16 @@ src/
 1. 不在 `D:\gitrepo\vaultwarden` 执行写操作。
 2. 每个 Vaultwarden 端点优先归入相同主模块，不为 Axum 路由单独创建平级业务文件。
 3. API DTO 不放入 `db/models`；JWT claims 不放入数据库实体。
-4. 每次迁移先运行 `cargo check --target wasm32-unknown-unknown`，完成后运行全部 Rust、Node 和 Clippy 检查。
+4. 每次文件或 schema 对齐先运行 `cargo check --target wasm32-unknown-unknown`，完成后运行全部 Rust、Node 和 Clippy 检查。
+5. D1 结构只在 `sql/schema.sql` 中维护；业务代码不得运行建表、补列或旧数据回填 SQL。
 
 ## 本次验证
 
 - `cargo check --target wasm32-unknown-unknown`：通过。
-- `cargo test --lib`：76 passed、0 failed。
+- `cargo test --all-targets`：79 passed、0 failed。
 - `cargo clippy --all-targets -- -D warnings`：通过。
-- `node --test tests/*.test.mjs`：22 passed、0 failed。
+- `node --test tests/*.test.mjs`：24 passed、0 failed。
 - `worker-build --release`：通过，生成 release Wasm 产物。
 - `cargo fmt --all -- --check` 与 `git diff --check`：通过。
+- 隔离本地 D1 完整基线：118 条语句执行成功，38 张表、41 个显式索引，`PRAGMA foreign_key_check` 无错误。
 - 对齐前后 `D:\gitrepo\vaultwarden` 均保持提交 `2629bcbe1380c894e3a7f52cafcac3988edb8fbb`，工作树为空。

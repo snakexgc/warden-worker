@@ -1,6 +1,6 @@
 # Warden Worker
 
-Warden Worker 是一个运行在 Cloudflare Workers 上的轻量级 Bitwarden 兼容服务端实现，使用 Cloudflare D1（SQLite）作为数据存储，核心代码用 Rust 编写，目标是“个人可用、部署成本低、无需维护服务器”。
+Warden Worker 是一个运行在 Cloudflare Workers 上、持续向 Vaultwarden 对齐的 Bitwarden 兼容服务端实现，使用 Cloudflare D1（SQLite）与 R2 存储数据，核心代码用 Rust 编写。
 
 本项目不接触你的明文密码：Bitwarden系列客户端会在本地完成加密，服务端只保存密文数据。
 
@@ -11,7 +11,7 @@ Warden Worker 是一个运行在 Cloudflare Workers 上的轻量级 Bitwarden �
 
 - 无服务器部署：Cloudflare Workers + D1 Sql + R2 存储桶
 - 兼容多端：官方 Bitwarden（浏览器扩展 / 桌面 / 安卓）与多数第三方客户端
-- 核心能力：注册/登录、同步、密码项（Cipher）增删改、文件夹、TOTP（Authenticator）二步验证、邮箱二步验证
+- 核心能力：注册/登录、个人与组织密码库同步、组织/成员/集合管理、密码项（Cipher）、文件夹、附件、Send、紧急访问及多种二步验证
 - 官方安卓兼容：支持 `/api/devices/knowndevice` 与 remember-device 流程
 - **安全增强**：支持"踢出所有已登录设备"，增强了 Token 刷新时的安全性
 - **消息通知**：支持企业微信 Webhook 推送，覆盖登录/失败、密码库变更等 10+ 种事件，支持 GeoIP 显示 IP 归属地
@@ -20,7 +20,7 @@ Warden Worker 是一个运行在 Cloudflare Workers 上的轻量级 Bitwarden �
 
 ## 自动部署（GitHub Actions）（推荐）
 
-本项目已内置 GitHub Actions 工作流（`.github/workflows/push-cloudflare.yaml`），同时支持全新部署和后续自动升级。只要 API Token 仅授权给一个 Cloudflare 账户，配置一个 GitHub Secret 后即可无人值守完成资源创建、数据库初始化、构建、迁移、部署和健康检查。
+本项目已内置 GitHub Actions 工作流（`.github/workflows/push-cloudflare.yaml`），支持全新部署和后续代码部署。只要 API Token 仅授权给一个 Cloudflare 账户，配置一个 GitHub Secret 后即可无人值守完成资源创建、数据库初始化、构建、部署和健康检查。
 
 ### 1. Fork 本项目
 Fork 本仓库到你的 GitHub 账号。
@@ -79,7 +79,7 @@ Fork 本仓库到你的 GitHub 账号。
 - ✅ 从 API Token 自动发现并验证唯一的 Cloudflare Account ID
 - ✅ 在账户尚无 Workers 子域时创建一个确定性的 `workers.dev` 子域，避免 Wrangler 交互提示
 - ✅ 检查 D1 数据库 `vaultsql` 是否存在，不存在则自动创建
-- ✅ 自动执行 `sql/schema.sql` 初始化数据库（仅首次），随后应用 `sql/migrations` 中尚未执行的增量迁移
+- ✅ 自动执行 `sql/schema.sql` 初始化全新数据库（仅首次）
 - ✅ 检查 R2 Bucket `warden-send-files` 是否存在，不存在则自动创建
 - ✅ 将 Cloudflare 返回的真实 `database_id` 精确写入 `wrangler.jsonc` 的 `vaultsql` 绑定并再次校验
 - ✅ 完成 Rust/Node 测试、release dry-run、Durable Objects 初始化和 Worker 部署
@@ -89,17 +89,16 @@ Fork 本仓库到你的 GitHub 账号。
 
 资源查找全部使用精确名称匹配，不再从 Wrangler 的人类可读文本中 `grep` UUID；API 或权限错误也不会被当成“资源不存在”。仓库中原有的 `database_id` 只用于本地开发，Actions 每次都会用目标账户中 `vaultsql` 的真实 ID 覆盖当前 runner 的配置，不会把该临时值提交回仓库。
 
-### 4. 后续自动升级
+### 4. 后续自动部署
 
-推送到 `main`、`uat` 或 `release*` 分支会自动触发部署；也可以从 Actions 页面手动触发。所有分支共用同一部署队列，新的运行不会取消正在执行的数据库迁移：
+推送到 `main`、`uat` 或 `release*` 分支会自动触发部署；也可以从 Actions 页面手动触发。所有分支共用同一部署队列：
 
 1. 精确复用已有 D1、R2 和 Workers 子域，不执行 `schema.sql`。
 2. 先完成测试和 Worker release dry-run。
-3. 按顺序执行 `sql/migrations` 中尚未记录到 `d1_migrations` 的 SQL。
-4. 迁移成功后部署新 Worker；失败则不部署依赖新结构的代码。
-5. Wrangler 根据 `wrangler.jsonc` 原生处理 Durable Objects；工作流不会直接 PATCH 或删除 DO 绑定和数据。
+3. 部署新 Worker。
+4. Wrangler 根据 `wrangler.jsonc` 原生处理 Durable Objects；工作流不会直接 PATCH 或删除 DO 绑定和数据。
 
-> 2026-07-22 统一基线之前创建的旧数据库，仍需先按下文“升级”章节完成一次手动基线对齐。全新数据库以及已经对齐的数据库不需要人工参与。
+> 当前分支只支持 `sql/schema.sql` 定义的完整数据库基线，不提供旧数据库或旧字段的原地升级兼容。数据库结构发生变化时必须按下文“重建数据库基线”操作。
 
 ### 5. 可选：配置 Cloudflare Workers 运行环境密钥
 基础密码库不依赖以下密钥即可运行。只有需要注册白名单、Turnstile 或 Webhook/Telegram/企业微信通知时，才在 Cloudflare Dashboard -> Workers -> Settings -> Variables 中添加对应机密变量。
@@ -147,7 +146,7 @@ Worker 已支持动态生成 `GET /css/vaultwarden.css`，可通过环境变量�
 - `VW_CSS_USER`：自定义 CSS 文本（可放到 Worker Secret，优先读取 Secret）
 
 ### 6. 部署
-保存 `CLOUDFLARE_API_TOKEN` 后，在 GitHub 仓库的 **Actions** 中手动运行一次工作流；此后上述分支每次出现新提交都会自动升级部署。
+保存 `CLOUDFLARE_API_TOKEN` 后，在 GitHub 仓库的 **Actions** 中手动运行一次工作流；此后上述分支每次出现新提交都会自动部署。
 
 > 💡 **提示**：首次部署可能需要 3-5 分钟，因为包含构建和基础设施创建过程。
 
@@ -180,7 +179,6 @@ wrangler d1 create vaultsql
 
 ```bash
 wrangler d1 execute vaultsql --remote --file=sql/schema.sql
-wrangler d1 migrations apply vaultsql --remote
 ```
 
 ### 3. 配置密钥（Secrets）
@@ -209,7 +207,7 @@ wrangler secret put TURNSTILE_SECRET_KEY
 
 ### 5. 部署
 
-本次从旧版本升级时，请先按第 6 节手动把 D1 对齐到 2026-07-22 基线，再部署 Worker。完成这次对齐后，后续数据库升级由 GitHub Actions 在 Worker 部署前自动应用 `sql/migrations` 中尚未执行的增量迁移。
+部署前必须确保 D1 已经由当前 `sql/schema.sql` 初始化；Worker 不会在运行时建表、补列或回填旧数据。
 
 ```bash
 wrangler deploy
@@ -217,10 +215,10 @@ wrangler deploy
 
 部署后，把 Workers URL 或自定义域名填入 Bitwarden 客户端的“自托管服务器 URL”。
 
-### 6. 升级
-> `sql/schema.sql` 是 2026-07-22 统一后的完整数据库基线。它会删除并重建全部项目表，同时清除 Wrangler 的 `d1_migrations` 记录；执行后现有 D1 数据不可恢复。本次基线对齐不提供原地升级兼容。
+### 6. 重建数据库基线
+> `sql/schema.sql` 是当前分支唯一的完整数据库定义。它会删除并重建全部项目表；执行后现有 D1 数据不可恢复。本分支不提供旧设计的原地升级兼容。
 
-手动升级步骤：
+手动重建步骤：
 
 1. 在 Bitwarden 客户端导出密码库，并按需另行备份 D1/R2。
 2. 用当前基线重建远程 D1：
@@ -231,46 +229,32 @@ wrangler deploy
 
 3. 部署当前 Worker，再把密码库导回客户端。完成后即可恢复使用 GitHub Actions 自动部署。
 
-当前基线已经合并全部历史数据库变更，包括 Argon2 KDF 字段、服务端密码哈希字段、账号兼容字段、单用户约束、设备与认证请求、TOTP 防重放时间步、Email/WebAuthn 2FA、归档、附件以及 Send 的 D1/R2 元数据。旧迁移已经删除，`sql/d1-migrations` 目录也不再使用。
+当前基线已经包含用户、设备与认证请求、组织/成员/集合/组/策略/事件、紧急访问、全部二步验证状态、归档、附件、Send、注册令牌和通知 outbox。所有升级补丁与迁移目录均已删除。
 
 #### 后续数据库变更
 
-统一基线之后的每次数据库变更只新增到 `sql/migrations`。使用 Wrangler 创建顺序迁移：
-
-```bash
-wrangler d1 migrations create vaultsql add_example_column
-```
-
-生成的文件形如 `sql/migrations/0001_add_example_column.sql`。写入并在本地验证 SQL 后随代码提交；GitHub Actions 会在部署 Worker 之前执行：
-
-```bash
-wrangler d1 migrations apply vaultsql --remote
-```
-
-Wrangler 使用 D1 的 `d1_migrations` 表记录已执行的文件，因此后续部署只会应用尚未执行的迁移。新数据库会先导入 `sql/schema.sql` 基线，再依次执行 `sql/migrations` 中的全部迁移；已有数据库只执行待处理迁移。迁移失败会使基础设施任务失败，从而阻止依赖新结构的 Worker 继续部署。
-
-已经应用的迁移不得修改、改名、重排或删除。为了避免新数据库重复创建同一结构，基线之后的变化不要同时写回 `sql/schema.sql`；需要再次收敛基线时，应单独安排一次和本次相同的手动重建。
+当前分支的每次数据库变更都直接合入 `sql/schema.sql`，不再创建增量迁移文件。修改结构后必须用完整基线重建测试数据库并验证；部署到已有环境前，应先导出密码库和备份 D1/R2，再重建 D1。
 
 密码项独立加密密钥、用户 API Key 与待确认邮箱字段、附件元数据表均已直接包含在 `sql/schema.sql` 中。附件二进制数据仍存储在既有的 `SEND_FILES_BUCKET` R2 Bucket；`wrangler.jsonc` 中的每日 Cron 会清理已过删除日期的 Send，避免 D1 元数据与 R2 文件长期残留。
 
 附件和文件 Send 的单文件上限固定为 **95 MiB**。上传请求体上限为 100,000,000 字节，以适配 Cloudflare Free/Pro 的 100 MB 入口限制并给 multipart 边界留出余量；文件数据按约 8 MiB 分片写入 R2，下载通过 Cloudflare `FixedLengthStream` 直接流式返回并生成正确的 `Content-Length`，不会把完整文件读入 Worker 内存。
 
-密码迁移不会立即改写现有密码哈希。旧记录会在用户下一次成功输入主密码时自动迁移为独立的 PBKDF2-HMAC-SHA256（600,000 次迭代、64 字节随机 salt）；客户端 KDF 设置保持不变。单用户迁移会阻止继续向 `users` 表插入记录，但不会删除或修改已有用户。注册接口也会在检测到首个用户后立即返回错误，不再执行耗时的密码哈希。
+服务端密码校验只接受当前 Vaultwarden 风格的 PBKDF2-HMAC-SHA256 记录，不再识别本项目旧设计曾使用的明文或客户端 KDF 哈希格式。数据库也不再包含单用户插入限制，可由内部 Webhook/Telegram 注册与邀请流程创建多个用户。
 
-服务端 PBKDF2 使用 Rust/Wasm 实现，以避开 Workers Web Crypto 单次最多 100,000 次迭代的限制。所有创建或验证服务端密码哈希的接口（注册、登录、主密码/邮箱/KDF 修改、密码确认、账号删除、设置密码，以及可能验证主密码的双因素和 WebAuthn 接口）都由 `HEAVY_DO` 承载：Free 计划的入口 Worker 只负责轻量路由，实际 600,000 次 PBKDF2 在每次调用默认具有 30 秒 CPU 上限的 Durable Object 内执行。本项目定位为个人单用户密码库，所有重计算路由共用一个固定名称为 `personal-vault` 的 `HeavyDo` 实例，不按用户或请求创建额外实例；代价是同时发生的重计算会短暂串行，但个人使用场景下可以接受。Free 计划仍需遵守 Durable Objects 的每日请求量和 duration 配额；限制详情参见 [Durable Objects limits](https://developers.cloudflare.com/durable-objects/platform/limits/) 与 [pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/)。
+服务端 PBKDF2 使用 Rust/Wasm 实现，以避开 Workers Web Crypto 单次最多 100,000 次迭代的限制。所有创建或验证服务端密码哈希的接口（注册、登录、主密码/邮箱/KDF 修改、密码确认、账号删除、设置密码，以及可能验证主密码的双因素和 WebAuthn 接口）都由 `HEAVY_DO` 承载：Free 计划的入口 Worker 只负责轻量路由，实际 600,000 次 PBKDF2 在 Durable Object 内执行。相关请求按身份稳定分片，Free 计划仍需遵守 Durable Objects 的每日请求量和 duration 配额；限制详情参见 [Durable Objects limits](https://developers.cloudflare.com/durable-objects/platform/limits/) 与 [pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/)。
 
 ## 组织功能（试运行）
 
 组织核心能力可以运行在 Cloudflare Workers 上：成员、集合、组、策略、事件和共享密码项元数据存入 D1；附件继续使用 R2；密码哈希和组织管理请求由按身份稳定分片的 `HeavyDo` 承载；邀请注册链接通过内部 Webhook/Telegram outbox 投递并由 Cron 重试。
 
-组织功能默认关闭。启用前应按以下顺序操作：
+组织核心功能在当前基线中默认启用。部署前应按以下顺序验证：
 
-1. 备份 D1 和 R2，并先执行 `wrangler d1 migrations apply vaultsql --remote`。
+1. 使用当前 `sql/schema.sql` 初始化全新 D1，并准备 R2。
 2. 至少配置 `WEWORK_WEBHOOK_URL`，或同时配置 `TELEGRAM_BOT_TOKEN` 与 `TELEGRAM_CHAT_ID`，验证注册和组织邀请链接能够送达。
-3. 先在测试环境把 `ORGANIZATIONS_ENABLED` 改为 `true`，完成创建组织、邀请/确认成员、集合授权、共享密码项和全量同步测试。
-4. 组和事件分别由 `ORG_GROUPS_ENABLED`、`ORG_EVENTS_ENABLED` 控制；核心组织流程稳定后再分别开启。
+3. 完成创建组织、邀请/确认成员、集合授权、共享密码项和全量同步测试。
+4. 组和事件与 Vaultwarden 一样分别由 `ORG_GROUPS_ENABLED`、`ORG_EVENTS_ENABLED` 控制，默认关闭。
 
-Workers/D1 没有阻碍核心组织功能，但存在平台边界：导入和批量接口按 40 条 D1 语句分批，组织导入最多 500 个密码项和 500 个集合，跨批导入不是单个数据库事务。当前仍不支持组织密码项附件、组织 API Key/客户端凭据、SSO/SCIM、Provider，以及完整的服务端组织操作事件审计；在这些能力补齐前不要把本实现视为 Vaultwarden 企业功能的完全替代。
+Workers/D1 没有阻碍核心组织功能，但存在平台边界：导入和批量接口按 40 条 D1 语句分批，组织导入最多 500 个密码项和 500 个集合，跨批导入不是单个数据库事务。当前仍不支持 SSO/SCIM、Provider、服务端 Admin 页面，以及完整的服务端组织操作事件审计；在这些能力补齐前不要把本实现视为 Vaultwarden 企业功能的完全替代。
 
 ## 客户端使用建议
 

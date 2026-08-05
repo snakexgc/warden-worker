@@ -23,30 +23,11 @@ pub const TWO_FACTOR_TYPE_EMAIL_VERIFICATION_CHALLENGE: i32 = 1002;
 pub const PROTECTED_ACTION_OTP_EXPIRATION_TIME: i64 = 600;
 pub const PROTECTED_ACTION_OTP_ATTEMPTS_LIMIT: u64 = 3;
 
-pub async fn ensure_external_two_factor_table(db: &D1Database) -> Result<(), AppError> {
-    db.prepare(
-        "CREATE TABLE IF NOT EXISTS two_factor_external (
-            user_id TEXT NOT NULL,
-            type INTEGER NOT NULL CHECK (type IN (2, 3)),
-            data TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            PRIMARY KEY (user_id, type),
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        )",
-    )
-    .run()
-    .await
-    .map_err(|_| AppError::Database)?;
-    Ok(())
-}
-
 pub async fn get_external_two_factor(
     db: &D1Database,
     user_id: &str,
     provider_type: i32,
 ) -> Result<Option<String>, AppError> {
-    ensure_external_two_factor_table(db).await?;
     db.prepare("SELECT data FROM two_factor_external WHERE user_id = ?1 AND type = ?2")
         .bind(&[user_id.into(), provider_type.into()])?
         .first(Some("data"))
@@ -70,7 +51,6 @@ pub async fn upsert_external_two_factor(
     provider_type: i32,
     data: &str,
 ) -> Result<(), AppError> {
-    ensure_external_two_factor_table(db).await?;
     let now = Utc::now().to_rfc3339();
     db.prepare(
         "INSERT INTO two_factor_external (user_id, type, data, created_at, updated_at)
@@ -96,7 +76,6 @@ pub async fn delete_external_two_factor(
     user_id: &str,
     provider_type: Option<i32>,
 ) -> Result<(), AppError> {
-    ensure_external_two_factor_table(db).await?;
     match provider_type {
         Some(provider_type) => {
             db.prepare("DELETE FROM two_factor_external WHERE user_id = ?1 AND type = ?2")
@@ -147,26 +126,7 @@ pub fn generate_totp_secret_base32_20() -> String {
     Secret::Raw(bytes.to_vec()).to_encoded().to_string()
 }
 
-pub async fn ensure_two_factor_authenticator_table(db: &D1Database) -> Result<(), AppError> {
-    db.prepare(
-        "CREATE TABLE IF NOT EXISTS two_factor_authenticator (
-            user_id TEXT PRIMARY KEY NOT NULL,
-            enabled BOOLEAN NOT NULL DEFAULT 0,
-            secret_enc TEXT NOT NULL,
-            last_used INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        )",
-    )
-    .run()
-    .await
-    .map_err(|_| AppError::Database)?;
-    Ok(())
-}
-
 pub async fn is_authenticator_enabled(db: &D1Database, user_id: &str) -> Result<bool, AppError> {
-    ensure_two_factor_authenticator_table(db).await?;
     let enabled: Option<i64> = db
         .prepare("SELECT enabled FROM two_factor_authenticator WHERE user_id = ?1")
         .bind(&[user_id.into()])?
@@ -180,7 +140,6 @@ pub async fn get_authenticator_secret_enc(
     db: &D1Database,
     user_id: &str,
 ) -> Result<Option<String>, AppError> {
-    ensure_two_factor_authenticator_table(db).await?;
     let secret_enc: Option<String> = db
         .prepare("SELECT secret_enc FROM two_factor_authenticator WHERE user_id = ?1")
         .bind(&[user_id.into()])?
@@ -198,7 +157,6 @@ pub async fn upsert_authenticator_secret(
     last_used: i64,
     now: &str,
 ) -> Result<(), AppError> {
-    ensure_two_factor_authenticator_table(db).await?;
     db.prepare(
         "INSERT INTO two_factor_authenticator (user_id, enabled, secret_enc, last_used, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -219,7 +177,6 @@ pub async fn upsert_authenticator_secret(
 }
 
 pub async fn disable_authenticator(db: &D1Database, user_id: &str) -> Result<(), AppError> {
-    ensure_two_factor_authenticator_table(db).await?;
     db.prepare("DELETE FROM two_factor_authenticator WHERE user_id = ?1")
         .bind(&[user_id.into()])?
         .run()
@@ -398,7 +355,6 @@ pub async fn consume_totp_code(
     let Some(time_step) = match_current_totp_time_step(secret_encoded, token)? else {
         return Ok(false);
     };
-    ensure_two_factor_authenticator_table(db).await?;
     let result = db
         .prepare(
             "UPDATE two_factor_authenticator
@@ -467,45 +423,10 @@ pub fn generate_email_token(token_size: u8) -> String {
     result
 }
 
-pub async fn ensure_two_factor_email_table(db: &D1Database) -> Result<(), AppError> {
-    db.prepare(
-        "CREATE TABLE IF NOT EXISTS two_factor_email (
-            user_id TEXT PRIMARY KEY NOT NULL,
-            atype INTEGER NOT NULL DEFAULT 1,
-            enabled BOOLEAN NOT NULL DEFAULT 0,
-            data TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        )",
-    )
-    .run()
-    .await
-    .map_err(|_| AppError::Database)?;
-    Ok(())
-}
-
-pub async fn ensure_protected_action_otp_table(db: &D1Database) -> Result<(), AppError> {
-    db.prepare(
-        "CREATE TABLE IF NOT EXISTS protected_action_otp (
-            user_id TEXT PRIMARY KEY NOT NULL,
-            data TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        )",
-    )
-    .run()
-    .await
-    .map_err(|_| AppError::Database)?;
-    Ok(())
-}
-
 pub async fn get_protected_action_otp(
     db: &D1Database,
     user_id: &str,
 ) -> Result<Option<ProtectedActionOtpData>, AppError> {
-    ensure_protected_action_otp_table(db).await?;
     let data: Option<String> = db
         .prepare("SELECT data FROM protected_action_otp WHERE user_id = ?1")
         .bind(&[user_id.into()])?
@@ -525,7 +446,6 @@ pub async fn upsert_protected_action_otp(
     data: &ProtectedActionOtpData,
     now: &str,
 ) -> Result<(), AppError> {
-    ensure_protected_action_otp_table(db).await?;
     db.prepare(
         "INSERT INTO protected_action_otp (user_id, data, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4)
@@ -544,7 +464,6 @@ pub async fn upsert_protected_action_otp(
 }
 
 pub async fn delete_protected_action_otp(db: &D1Database, user_id: &str) -> Result<(), AppError> {
-    ensure_protected_action_otp_table(db).await?;
     db.prepare("DELETE FROM protected_action_otp WHERE user_id = ?1")
         .bind(&[user_id.into()])?
         .run()
@@ -597,7 +516,6 @@ pub async fn get_email_2fa(
     db: &D1Database,
     user_id: &str,
 ) -> Result<Option<(bool, String)>, AppError> {
-    ensure_two_factor_email_table(db).await?;
     let result: Option<serde_json::Value> = db
         .prepare("SELECT enabled, data FROM two_factor_email WHERE user_id = ?1 AND atype = 1")
         .bind(&[user_id.into()])?
@@ -641,7 +559,6 @@ pub async fn upsert_email_2fa(
     data: &str,
     now: &str,
 ) -> Result<(), AppError> {
-    ensure_two_factor_email_table(db).await?;
     db.prepare(
         "INSERT INTO two_factor_email (user_id, atype, enabled, data, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -662,7 +579,6 @@ pub async fn upsert_email_2fa(
 }
 
 pub async fn delete_email_2fa(db: &D1Database, user_id: &str) -> Result<(), AppError> {
-    ensure_two_factor_email_table(db).await?;
     db.prepare("DELETE FROM two_factor_email WHERE user_id = ?1")
         .bind(&[user_id.into()])?
         .run()
@@ -675,7 +591,6 @@ pub async fn get_email_2fa_verification(
     db: &D1Database,
     user_id: &str,
 ) -> Result<Option<String>, AppError> {
-    ensure_two_factor_email_table(db).await?;
     let result: Option<serde_json::Value> = db
         .prepare("SELECT data FROM two_factor_email WHERE user_id = ?1 AND atype = ?2")
         .bind(&[

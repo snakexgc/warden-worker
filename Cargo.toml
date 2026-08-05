@@ -55,7 +55,6 @@ p256 = { version = "0.13", features = ["ecdsa"] }
 rsa = { version = "0.9", features = ["sha2"] }
 serde_cbor_2 = "0.13"
 ciborium = "0.2"
-argon2 = "0.5"
 
 # Utilities
 chrono = { version = "0.4.45", features = ["serde"] }

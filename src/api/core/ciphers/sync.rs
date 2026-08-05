@@ -14,7 +14,6 @@ use crate::{
     auth::Claims,
     db,
     db::models::{
-        archive,
         cipher::Cipher,
         folder::{Folder, FolderResponse},
         send::{SendDBModel, send_to_json},
@@ -80,7 +79,6 @@ pub async fn sync(
 ) -> Result<Json<SyncResponse>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    archive::ensure_table(&db).await?;
     let user_id = claims.sub;
 
     // Fetch profile

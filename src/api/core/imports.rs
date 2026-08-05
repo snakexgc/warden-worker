@@ -19,7 +19,7 @@ use crate::auth::Claims;
 use crate::db;
 use crate::db::models::folder::Folder;
 use crate::db::models::{
-    Collection, archive,
+    Collection,
     cipher::{CipherData, normalize_optional_rfc3339},
 };
 use crate::error::AppError;
@@ -70,7 +70,6 @@ pub async fn import_data(
 ) -> Result<Json<()>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    archive::ensure_table(&db).await?;
     let folder_count = payload.folders.len();
     let cipher_count = payload.ciphers.len();
     let now = Utc::now();
@@ -246,7 +245,6 @@ pub async fn import_organization(
 
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    archive::ensure_table(&db).await?;
     let member =
         crate::api::core::organizations::load_membership(&db, &claims.sub, &query.organization_id)
             .await?;

@@ -23,7 +23,7 @@ use crate::{
     auth::Claims,
     crypto::{self, password},
     db,
-    db::models::{OrganizationApiKey, auth_request, device, two_factor, user::User},
+    db::models::{OrganizationApiKey, auth_request, two_factor, user::User},
     error::AppError,
     worker_runtime::{jwt, logging::targets, webauthn},
 };
@@ -61,16 +61,6 @@ fn update_device_background(
                 return;
             }
         };
-
-        if let Err(e) = device::ensure_table(&db).await {
-            log::warn!(
-                target: targets::DB,
-                "background device update failed: cannot ensure devices table user_id={} error={:?}",
-                user_id,
-                e
-            );
-            return;
-        }
 
         let now = Utc::now().to_rfc3339();
 
@@ -1159,7 +1149,6 @@ pub async fn token(
             // If this is an auth-request login (trusted device), skip master password check
             // and verify the auth-request access code instead.
             if let Some(auth_request_id) = payload.auth_request.as_deref() {
-                auth_request::ensure_table(&db).await?;
                 auth_request::purge_expired(&db).await?;
 
                 let ar_row: Option<Value> = db
@@ -2368,8 +2357,6 @@ pub async fn token(
             .await?;
 
             if let Some(device_identifier) = device_identifier.as_deref() {
-                device::ensure_table(&db).await?;
-
                 let now = chrono::Utc::now().to_rfc3339();
                 if let Ok(stmt) = db
                     .prepare(

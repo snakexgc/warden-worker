@@ -8,8 +8,8 @@
 - 项目名称：Warden Worker
 - 项目路径：`D:\gitrepo\warden-worker`
 - 上游仓库：`git@github.com:snakexgc/warden-worker.git`
-- 当前分支：`main`
-- 项目类型：面向个人、单用户部署的 Bitwarden 兼容 Cloudflare Workers 服务端
+- 当前分支：`agent/organization-management-migration`
+- 项目类型：面向多用户和组织管理的 Vaultwarden 兼容 Cloudflare Workers 服务端
 - Cargo 包版本：`1.3.0`
 - Web Vault 版本：`2026.6.2`
 - 主要技术栈：Rust 2024、WebAssembly、worker-rs、Axum、JavaScript、Cloudflare Workers、D1、R2、Durable Objects
@@ -24,11 +24,11 @@
   - `cargo fmt --all -- --check`
   - `node --test tests/*.test.mjs`
 - 手动部署命令：`wrangler deploy`
-- 最后更新时间：2026-07-22
+- 最后更新时间：2026-08-05
 
 ## 项目概述
 
-Warden Worker 将个人密码库服务部署到 Cloudflare 边缘环境，提供 Bitwarden 客户端和 Web Vault 所需的账户、认证、同步、密码项、文件夹、附件、Send、2FA、WebAuthn 与通知接口。D1 保存业务数据和密钥材料，R2 保存附件及 Send 文件，Durable Objects 分别承担实时通知和高 CPU 路由。
+Warden Worker 将 Vaultwarden 兼容服务部署到 Cloudflare 边缘环境，提供账户、认证、个人密码库、组织管理、紧急访问、Send、2FA、WebAuthn、Push 与通知接口。D1 保存业务数据和密钥材料，R2 保存附件及 Send 文件，Durable Objects 分别承担实时通知和高 CPU 路由。
 
 本项目不是 Vaultwarden 的逐行移植。兼容性工作应以客户端可观察行为为准，核对请求/响应结构、路由、状态码、版本与功能开关、同步 revision、通知副作用和数据迁移，而不能仅比较同名文件。
 
@@ -41,9 +41,9 @@ Warden Worker 将个人密码库服务部署到 Cloudflare 边缘环境，提供
 - `Cargo.toml` / `Cargo.lock`
   - Rust 包元数据、依赖版本、Wasm 发布配置和 lint 规则。
 - `wrangler.jsonc`
-  - Worker 入口、Cron、变量、D1/R2/限流/DO 绑定、D1 增量迁移目录、日志、构建与静态资源配置。
+  - Worker 入口、Cron、变量、D1/R2/限流/DO 绑定、日志、构建与静态资源配置。
 - `.github/workflows/push-cloudflare.yaml`
-  - 对 `main`、`uat`、`release*` 的无人值守首次部署与自动升级；执行预检、Cloudflare 资源创建或复用、真实 D1 ID 写入、新库基线初始化、待处理迁移、Worker 部署和健康检查。
+  - 对 `main`、`uat`、`release*` 的无人值守部署；执行预检、Cloudflare 资源创建或复用、真实 D1 ID 写入、新库基线初始化、Worker 部署和健康检查。
 - `scripts/cloudflare-provision.mjs`
   - 自动发现 Cloudflare 账户和 Workers 子域，精确创建或复用 D1/R2，并将真实 D1 `database_id` 更新到 Wrangler 配置。
 - `scripts/patch-webvault-turnstile.mjs`
@@ -53,7 +53,7 @@ Warden Worker 将个人密码库服务部署到 Cloudflare 边缘环境，提供
 - `tests/deployment_workflow.test.mjs`
   - 验证 Workflow 的触发条件、权限、并发、固定工具链、数据库执行顺序与 DO 生命周期合约。
 - `tests/heavy_do_routing.test.mjs`
-  - 验证高 CPU/密码相关路径被分流到固定的 `personal-vault` HeavyDo。
+  - 验证高 CPU、密码和组织管理路径按身份稳定分流到 HeavyDo。
 - `static/web-vault/`
   - Wrangler Assets 发布的 Web Vault 构建产物；当前版本为 `2026.6.2`。
 - `build/`、`target/`
@@ -82,7 +82,7 @@ Warden Worker 将个人密码库服务部署到 Cloudflare 边缘环境，提供
 - `src/auth.rs`、`src/worker_runtime/jwt.rs`、`src/worker_runtime/jwt_manager.rs`
   - Bearer/JWT 鉴权、令牌签发与 D1 中的 JWT 密钥管理。
 - `src/crypto/password.rs`、`src/crypto.rs`
-  - 服务端密码哈希、验证、旧哈希升级与客户端 KDF 参数校验。
+  - Vaultwarden 风格服务端密码哈希、验证、迭代次数提升与客户端 KDF 参数校验；不再读取本项目旧哈希格式。
 - `src/worker_runtime/r2_file.rs`
   - 附件与 Send 共用的 95 MiB 限制、约 8 MiB 分片、R2 multipart abort/complete 和声明大小校验。
 - `src/db/models/two_factor.rs`、`src/worker_runtime/two_factor_key_manager.rs`
@@ -97,16 +97,14 @@ Warden Worker 将个人密码库服务部署到 Cloudflare 边缘环境，提供
 ### `sql`
 
 - `sql/schema.sql`
-  - 2026-07-22 统一后的完整数据库基线；已合并此前全部迁移的最终状态。包含 `DROP TABLE` 并清除 `d1_migrations`，对已有数据库执行会清空数据和迁移记录。
-- `sql/migrations/`
-  - 统一基线之后的 Wrangler 原生 D1 增量迁移目录；当前只有维护规则说明，未来按顺序新增 `.sql`，已应用文件不可修改、改名、重排或删除。
+  - 2026-08-05 统一后的唯一完整数据库基线；包含个人密码库、组织管理、紧急访问、2FA、Push、注册令牌和通知 outbox 的最终结构。执行会删除并重建项目表。
 
 ## 架构与关键流程
 
 ### HTTP 请求
 
 1. Wrangler Assets 根据 `run_worker_first` 决定 API/动态路径先进入 Worker。
-2. `src/entry.js` 规范化 URL；匹配 `src/heavy_do_routing.mjs` 的路径进入固定 `personal-vault` HeavyDo，其余进入 Rust Worker。
+2. `src/entry.js` 规范化 URL；匹配 `src/heavy_do_routing.mjs` 的高 CPU 路径按身份稳定分片进入 HeavyDo，其余进入 Rust Worker。
 3. Rust 入口对 `/notifications/*` 直接代理到 `NotificationsHub`；普通请求初始化 D1、JWT 密钥和 2FA 密钥后进入 Axum Router。
 4. `src/worker_runtime/router.rs` 将请求分派到 `src/api/core/`；处理器调用模型、鉴权/密码/WebAuthn/2FA 模块并读写 D1 或 R2。
 5. 成功的 vault 变更需同步更新用户 revision，并按业务需要发布实时通知。
@@ -115,8 +113,8 @@ Warden Worker 将个人密码库服务部署到 Cloudflare 边缘环境，提供
 
 - 服务端密码 verifier 使用 PBKDF2-HMAC-SHA256，当前规则为 600,000 次迭代和独立随机 salt。
 - 创建或验证 verifier 的路径必须经 `HEAVY_DO`，避免入口 Worker 的 CPU 限制。
-- 本项目是单用户密码库，所有重计算请求共用固定的 `personal-vault` 实例；并发重计算可能短暂串行。
-- 旧密码记录在成功验证后按当前格式渐进升级，不应将客户端 KDF 设置与服务端 verifier 规则混为一谈。
+- 高 CPU 请求按用户、组织或请求身份稳定分片，避免所有用户共享单个串行实例。
+- 服务端 verifier 只接受当前 PBKDF2 格式；低于当前安全基线的迭代次数在成功验证后提升，不应将客户端 KDF 设置与服务端 verifier 规则混为一谈。
 
 ### 数据与文件
 
@@ -132,17 +130,17 @@ Warden Worker 将个人密码库服务部署到 Cloudflare 边缘环境，提供
 - vault 写操作的正确性不仅包括 D1 结果，还包括用户 revision 和相应的实时更新事件。
 - `NotificationsHub` 使用 SignalR MessagePack 握手/二进制语义，每 15 秒通过 Durable Object alarm 发送 ping；宏必须使用 `#[durable_object]` 才会同时导出 WebSocket 与 alarm 回调。
 
-### 部署与迁移
+### 部署与数据库基线
 
-- `sql/schema.sql` 是 2026-07-22 统一基线；它会删除并重建项目表以及迁移追踪表，包括 D1 中的 JWT/2FA 密钥数据。执行前必须导出密码库并按需备份 D1/R2。
-- 基线之后的数据库变更只新增到 `sql/migrations/`，`wrangler.jsonc` 的 `migrations_dir` 固定指向该目录；不要同时把增量写回 schema，否则新库会重复执行同一结构变更。
-- GitHub Actions 对新库先导入 schema，再用 `wrangler d1 migrations apply` 应用全部增量；对已有库只应用 `d1_migrations` 未记录的文件。迁移失败会阻止后续 Worker 部署。
-- `sql/d1-migrations/` 已确认不再需要并删除；工作流不再包含历史列探测或硬编码旧迁移。
-- 执行任何数据库操作前必须确认 `--local`/`--remote` 和目标数据库；已发布迁移不得修改、改名、重排或删除。
+- `sql/schema.sql` 是当前分支唯一数据库定义；它会删除并重建项目表，包括 D1 中的 JWT/2FA 密钥数据。执行前必须导出密码库并按需备份 D1/R2。
+- 当前分支不提供旧数据库原地升级兼容，不维护 `sql/migrations`，业务代码也不得在运行时建表、补列或回填旧结构。
+- GitHub Actions 仅对全新 D1 导入 schema；复用已有 D1 时假定其已经与当前 schema 完全一致。
+- 后续数据库结构变更直接合入 `sql/schema.sql`，并通过重建隔离测试数据库验证。
+- 执行任何数据库操作前必须确认 `--local`/`--remote` 和目标数据库。
 
 ## 特殊事项与项目约束
 
-- 项目定位是个人单用户密码库；`users_single_user_before_insert` 触发器是数据库层最终约束，注册处理也应在昂贵哈希前快速拒绝第二个用户。
+- 当前基线允许多用户和组织管理；注册、邀请和验证消息继续通过项目特有的 Webhook/Telegram/企业微信通道投递。
 - 不得在仓库、日志或 `memory.md` 中记录 API Token、Webhook、Bot Token、Turnstile Secret 或用户密码。
 - `DOMAIN` 是可选的公开域名覆盖；未设置时附件/Send 使用相对 URL，WebAuthn 从请求头推导 Origin 与 RP ID。若显式设置自定义域名，应与真实 HTTPS Origin 一致。
 - `wrangler.jsonc` 中的 D1、R2、DO、Assets 与路由意图不能为了消除配置漂移警告而随意删除。
@@ -155,11 +153,11 @@ Warden Worker 将个人密码库服务部署到 Cloudflare 边缘环境，提供
 
 ## 当前项目状态
 
-- 分支/提交：`main`，本次任务开始时 HEAD 为 `3017b480c8d3aa849fc64cd27356de4094780593`（“修复编译报错”），工作树干净。
+- 分支/提交：`agent/organization-management-migration`，本次任务开始时 HEAD 为 `3c439b6`（“feat: align two-factor and push files with vaultwarden”），工作树干净。
 - Vaultwarden 最新三次提交审阅基线：`D:\gitrepo\vaultwarden` 的 `660faee68e3406d33244b67eadc18524c47674c2`（2026-07-21）。
 - Bitwarden Android 对照基线：`C:\Users\MINI\AppData\Local\Temp\bitwarden-android-2026.6.1-bwpm` 的 `2026.6.1` 客户端实现。
 - 2026-07-22 已实施审计确认的个人密码库兼容性修复；业务代码、schema、配置、测试和文档均有改动，静态 Web Vault 未改变。
-- 当前实现覆盖账户认证、密码库同步、Ciphers、Folders、附件、Send、导入、设备、2FA、WebAuthn、实时通知和动态 Vaultwarden CSS。
+- 当前实现覆盖账户认证、个人与组织密码库同步、Ciphers、Folders、附件、Send、导入、设备、紧急访问、2FA、WebAuthn、Push、实时通知和动态 Vaultwarden CSS。
 - 最近主要变化：
   - 将 worker-rs/worker-build 升级到 `0.8.5`、Wrangler 升级到 `4.111.0`，并刷新低风险直接依赖和完整锁文件。
   - GitHub Actions 的 Rust 工具链固定为已验证的 `1.97.0`，避免移动的 `stable` 引入未验证 lint 后使部署突然失败。
@@ -168,10 +166,10 @@ Warden Worker 将个人密码库服务部署到 Cloudflare 边缘环境，提供
   - Cipher `cipherDetails` 响应已移除上游废弃的顶层 `data` 兼容字段，类型数据继续由 `login`、`secureNote`、`card`、`identity`、`sshKey` 等标准字段返回。
   - 增加附件 API 与附件元数据迁移。
   - 加强新版 Bitwarden 客户端的 Cipher key、请求字段、序列化、revision 与通知兼容。
-  - 历史 SQL 已收敛到 `sql/schema.sql` 基线；后续顺序迁移统一由 `sql/migrations/` 和 Wrangler `d1_migrations` 追踪。
+  - 全部数据库结构已收敛到 `sql/schema.sql` 唯一基线；增量迁移和运行时 schema 自修复均已删除。
 - 2026-07-22 已修复邮箱规范化、Token form 别名与 refresh 设备继承、profile/密码策略/config/密码提示响应、Email 2FA 鉴权与版本分支、TOTP 重放、设备 404/clear-token、健康检查、通知 keepalive 和文件流式 multipart 等已确认偏差。
 - Bitwarden/Vaultwarden API 错误体字段现为 `validationErrors`、`errorModel`、`exceptionMessage` 等 camelCase；OAuth `error_description` 保持规范名称。
-- 组织管理、SSO 与 Push 仍按项目边界不实现；组织字段保持兼容空值，Push 的设备 token 端点仅保持兼容语义。
+- 组织管理、紧急访问与 Push 已实现；SSO、SCIM、Provider、SMTP 和服务端 Admin UI 仍未实现。
 - `two_factor_authenticator.last_used` 已直接包含在唯一 schema 中；本次不提供保留旧 D1 数据的原地升级路径。
 - 尚未验证：
     - 未部署到 Cloudflare，未检查远程 Worker 版本、绑定、D1/R2 实际状态或远程日志。
@@ -179,6 +177,20 @@ Warden Worker 将个人密码库服务部署到 Cloudflare 边缘环境，提供
     - 未做远程大文件上传/下载、生产 Durable Object alarm 或完整旧版本客户端矩阵验证。
 
 ## 需求与修改记录
+
+### 2026-08-05：收敛为无旧设计兼容的完整数据库基线
+
+#### 用户需求
+
+当前分支不再兼容项目旧设计，继续向 Vaultwarden 靠拢；删除兼容性补丁，把全部数据库变更合入 `sql/schema.sql`，删除其他升级补丁。
+
+#### 实施结果
+
+- 原 `sql/migrations/0001` 至 `0008` 的最终结构全部直接合入 `sql/schema.sql`，删除迁移目录、Wrangler `migrations_dir` 和 Workflow 迁移步骤。
+- 删除模型与 WebAuthn 运行时的建表、补列、旧数据回填逻辑；业务代码现在假定 D1 已严格匹配当前完整基线。
+- 删除项目旧服务端密码格式与旧 Send 密码格式回退，同时保留 Vaultwarden 自身仍需要的客户端协议兼容路由。
+- 移除单用户触发器，组织核心默认启用；组和事件开关继续与 Vaultwarden 一样默认关闭。
+- 隔离本地 D1 成功执行完整 schema，创建 38 张业务表和 41 个显式索引，外键检查无错误。
 
 ### 2026-07-17：使用 Memory 技能初始化仓库
 

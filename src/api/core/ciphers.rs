@@ -218,7 +218,6 @@ pub(crate) async fn get_accessible_ciphers(
     organizations_enabled: bool,
     user_id: &str,
 ) -> Result<Vec<Cipher>, AppError> {
-    archive::ensure_table(db).await?;
     let rows: Vec<Value> = db
         .prepare(accessible_cipher_sql(false))
         .bind(&[user_id.into(), organizations_enabled.into()])?
@@ -593,7 +592,6 @@ pub(crate) async fn get_cipher_dbmodel_with_access(
     user_id: &str,
     organizations_enabled: bool,
 ) -> Result<crate::db::models::cipher::CipherDBModel, AppError> {
-    archive::ensure_table(db).await?;
     db.prepare(accessible_cipher_sql(true))
         .bind(&[
             cipher_id.into(),
@@ -629,7 +627,6 @@ async fn create_cipher_inner(
 ) -> Result<Cipher, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    archive::ensure_table(&db).await?;
     cipher_data_req
         .validate_for_vault(&claims.sub)
         .map_err(|message| AppError::BadRequest(message.to_string()))?;
@@ -766,7 +763,6 @@ async fn share_cipher_inner(
 ) -> Result<Cipher, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    archive::ensure_table(&db).await?;
     cipher_data_req
         .validate_for_vault(&claims.sub)
         .map_err(|message| AppError::BadRequest(message.to_string()))?;
@@ -1057,7 +1053,6 @@ pub async fn update_cipher(
 ) -> Result<Json<Cipher>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    archive::ensure_table(&db).await?;
     let now = now_string();
 
     let existing_cipher = get_cipher_dbmodel_with_access(
@@ -2342,7 +2337,6 @@ pub async fn put_cipher_partial(
 ) -> Result<Json<Cipher>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    archive::ensure_table(&db).await?;
 
     let now = now_string();
 

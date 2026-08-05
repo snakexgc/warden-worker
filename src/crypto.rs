@@ -13,7 +13,6 @@ pub const KDF_TYPE_PBKDF2: i32 = 0;
 pub const KDF_TYPE_ARGON2ID: i32 = 1;
 
 // 默认参数（与 vaultwarden 一致）
-pub const PBKDF2_ITERATIONS_DEFAULT: i32 = 600_000;
 pub const PBKDF2_ITERATIONS_MIN: i32 = 100_000;
 pub const ARGON2ID_MEMORY_DEFAULT_MB: i32 = 64;
 pub const ARGON2ID_PARALLELISM_DEFAULT: i32 = 4;
@@ -59,95 +58,6 @@ pub async fn hash_password_pbkdf2(
     let mut derived = [0u8; 32];
     pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt_bytes, iterations, &mut derived);
     Ok(general_purpose::STANDARD.encode(derived))
-}
-
-/// 验证 PBKDF2 密码
-pub async fn verify_password_pbkdf2(
-    password: &str,
-    salt: &str,
-    hash: &str,
-    iterations: i32,
-) -> bool {
-    match hash_password_pbkdf2(password, salt, iterations).await {
-        Ok(new_hash) => constant_time_eq(new_hash.as_bytes(), hash.as_bytes()),
-        Err(_) => false,
-    }
-}
-
-/// 验证 Argon2id 密码 (PHC 格式)
-pub fn verify_password_argon2id(password: &str, hash: &str) -> bool {
-    use argon2::{Argon2, password_hash::PasswordVerifier};
-
-    // 解析 PHC 格式哈希
-    let parsed_hash = match argon2::password_hash::PasswordHash::new(hash) {
-        Ok(h) => h,
-        Err(e) => {
-            log::warn!("Failed to parse Argon2 hash: {:?}", e);
-            return false;
-        }
-    };
-
-    // 验证密码
-    let argon2 = Argon2::default();
-    argon2
-        .verify_password(password.as_bytes(), &parsed_hash)
-        .is_ok()
-}
-
-/// 根据 KDF 类型验证密码
-///
-/// # 参数
-/// * `password` - 密码字符串
-/// * `salt` - Base64 编码的盐值 (PBKDF2 需要)
-/// * `hash` - 存储的哈希值
-/// * `kdf_type` - KDF 类型 (0=PBKDF2, 1=Argon2id)
-/// * `iterations` - 迭代次数
-/// * `memory` - 内存使用量 (Argon2id 专用)
-/// * `parallelism` - 并行度 (Argon2id 专用)
-///
-/// # 返回
-/// 密码是否匹配
-pub async fn verify_password(
-    password: &str,
-    salt: &str,
-    hash: &str,
-    kdf_type: i32,
-    iterations: i32,
-    memory: Option<i32>,
-    parallelism: Option<i32>,
-) -> bool {
-    let kdf_name = match kdf_type {
-        KDF_TYPE_PBKDF2 => "PBKDF2",
-        KDF_TYPE_ARGON2ID => "Argon2id",
-        _ => "Unknown",
-    };
-    log::info!(
-        "[KDF] verify_password: type={} ({}), iterations={}, memory={:?}, parallelism={:?}",
-        kdf_type,
-        kdf_name,
-        iterations,
-        memory,
-        parallelism
-    );
-
-    match kdf_type {
-        KDF_TYPE_PBKDF2 => {
-            log::debug!(
-                "[KDF] Using PBKDF2 verification with {} iterations",
-                iterations
-            );
-            verify_password_pbkdf2(password, salt, hash, iterations).await
-        }
-        KDF_TYPE_ARGON2ID => {
-            log::debug!("[KDF] Using Argon2id verification (PHC format)");
-            let _ = (salt, memory, parallelism);
-            verify_password_argon2id(password, hash)
-        }
-        _ => {
-            log::warn!("[KDF] Unknown KDF type: {}", kdf_type);
-            false
-        }
-    }
 }
 
 fn generate_salt_bytes<const N: usize>() -> String {

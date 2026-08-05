@@ -7,7 +7,7 @@ const workflow = readFileSync(
   "utf8",
 );
 
-test("deployment workflow supports private repositories and serializes upgrades", () => {
+test("deployment workflow supports private repositories and serializes deployments", () => {
   assert.match(workflow, /permissions:\s+contents: read/);
   assert.match(workflow, /group: \$\{\{ github\.repository \}\}-cloudflare-deploy/);
   assert.match(workflow, /cancel-in-progress: false/);
@@ -33,22 +33,20 @@ test("deployment workflow requires only the API token and can discover account I
   assert.doesNotMatch(workflow, /Missing required.*CLOUDFLARE_ACCOUNT_ID/);
 });
 
-test("database ID, schema and migrations are ordered before the real deploy", () => {
+test("database ID and schema initialization are ordered before the real deploy", () => {
   const provision = workflow.indexOf("node scripts/cloudflare-provision.mjs");
   const databaseIdCheck = workflow.indexOf(
     "Verify database_id was written to Wrangler config",
   );
   const schema = workflow.indexOf("Initialize a newly created D1 database");
-  const migrations = workflow.indexOf("Apply pending D1 migrations");
   const realDeploy = workflow.indexOf("- name: Deploy Worker");
 
   assert.ok(provision >= 0);
   assert.ok(databaseIdCheck > provision);
   assert.ok(schema > databaseIdCheck);
-  assert.ok(migrations > schema);
-  assert.ok(realDeploy > migrations);
+  assert.ok(realDeploy > schema);
   assert.match(workflow, /if: steps\.provision\.outputs\.d1_is_new == 'true'/);
-  assert.match(workflow, /wrangler d1 migrations apply/);
+  assert.doesNotMatch(workflow, /wrangler d1 migrations apply/);
 });
 
 test("workflow delegates Durable Object lifecycle to Wrangler", () => {

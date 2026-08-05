@@ -1,32 +1,47 @@
--- Consolidated database baseline as of 2026-07-22.
--- Future schema changes belong in sql/migrations and are applied after this file.
+-- Consolidated database baseline as of 2026-08-05.
+-- This branch intentionally supports only this schema; no incremental upgrade path is provided.
 -- WARNING: This script DROPs existing tables and data.
 
 PRAGMA foreign_keys = ON;
 
-DROP TABLE IF EXISTS devices;
-DROP TABLE IF EXISTS auth_requests;
-DROP TABLE IF EXISTS protected_action_otp;
-DROP TABLE IF EXISTS two_factor_email;
-DROP TABLE IF EXISTS two_factor_authenticator_new;
-DROP TABLE IF EXISTS two_factor_authenticator;
-DROP TABLE IF EXISTS webauthn_challenges;
-DROP TABLE IF EXISTS two_factor_webauthn_challenges;
-DROP TABLE IF EXISTS two_factor_webauthn_settings;
-DROP TABLE IF EXISTS two_factor_webauthn_new;
-DROP TABLE IF EXISTS two_factor_webauthn;
-DROP TABLE IF EXISTS archives;
-DROP TABLE IF EXISTS cipher_attachments;
-DROP TABLE IF EXISTS folders;
-DROP TABLE IF EXISTS ciphers;
 DROP TABLE IF EXISTS send_file_chunks;
 DROP TABLE IF EXISTS send_files;
 DROP TABLE IF EXISTS sends;
+DROP TABLE IF EXISTS notification_outbox;
+DROP TABLE IF EXISTS registration_tokens;
+DROP TABLE IF EXISTS events;
+DROP TABLE IF EXISTS organization_api_key;
+DROP TABLE IF EXISTS org_policies;
+DROP TABLE IF EXISTS collections_groups;
+DROP TABLE IF EXISTS groups_users;
+DROP TABLE IF EXISTS groups;
+DROP TABLE IF EXISTS invitations;
+DROP TABLE IF EXISTS folders_ciphers;
+DROP TABLE IF EXISTS favorites;
+DROP TABLE IF EXISTS ciphers_collections;
+DROP TABLE IF EXISTS users_collections;
+DROP TABLE IF EXISTS collections;
+DROP TABLE IF EXISTS cipher_attachments;
+DROP TABLE IF EXISTS archives;
+DROP TABLE IF EXISTS ciphers;
+DROP TABLE IF EXISTS folders;
+DROP TABLE IF EXISTS users_organizations;
+DROP TABLE IF EXISTS emergency_access;
+DROP TABLE IF EXISTS auth_requests;
+DROP TABLE IF EXISTS devices;
+DROP TABLE IF EXISTS protected_action_otp;
+DROP TABLE IF EXISTS two_factor_email;
+DROP TABLE IF EXISTS two_factor_external;
+DROP TABLE IF EXISTS two_factor_incomplete;
+DROP TABLE IF EXISTS twofactor_duo_ctx;
+DROP TABLE IF EXISTS two_factor_authenticator;
+DROP TABLE IF EXISTS webauthn_challenges;
+DROP TABLE IF EXISTS two_factor_webauthn_settings;
+DROP TABLE IF EXISTS two_factor_webauthn;
 DROP TABLE IF EXISTS two_factor_keys;
 DROP TABLE IF EXISTS jwt_keys;
+DROP TABLE IF EXISTS organizations;
 DROP TABLE IF EXISTS users;
-DROP TABLE IF EXISTS d1_migrations;
-
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY NOT NULL,
     name TEXT,
@@ -57,12 +72,55 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at TEXT NOT NULL
 );
 
-CREATE TRIGGER IF NOT EXISTS users_single_user_before_insert
-BEFORE INSERT ON users
-WHEN EXISTS (SELECT 1 FROM users)
-BEGIN
-    SELECT RAISE(ABORT, 'single-user vault already has an account');
-END;
+CREATE TABLE IF NOT EXISTS organizations (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+    billing_email TEXT NOT NULL,
+    private_key TEXT,
+    public_key TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS users_organizations (
+    id TEXT PRIMARY KEY NOT NULL,
+    user_id TEXT NOT NULL,
+    organization_id TEXT NOT NULL,
+    invited_by_email TEXT,
+    access_all INTEGER NOT NULL DEFAULT 0 CHECK (access_all IN (0, 1)),
+    key TEXT NOT NULL DEFAULT '',
+    status INTEGER NOT NULL DEFAULT 0,
+    type INTEGER NOT NULL DEFAULT 2 CHECK (type BETWEEN 0 AND 3),
+    reset_password_key TEXT,
+    external_id TEXT,
+    permissions TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (user_id, organization_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS collections (
+    id TEXT PRIMARY KEY NOT NULL,
+    organization_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    external_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS users_collections (
+    membership_id TEXT NOT NULL,
+    collection_id TEXT NOT NULL,
+    read_only INTEGER NOT NULL DEFAULT 0 CHECK (read_only IN (0, 1)),
+    hide_passwords INTEGER NOT NULL DEFAULT 0 CHECK (hide_passwords IN (0, 1)),
+    manage INTEGER NOT NULL DEFAULT 0 CHECK (manage IN (0, 1)),
+    PRIMARY KEY (membership_id, collection_id),
+    FOREIGN KEY (membership_id) REFERENCES users_organizations(id) ON DELETE CASCADE,
+    FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE CASCADE
+);
 
 CREATE TABLE IF NOT EXISTS folders (
     id TEXT PRIMARY KEY NOT NULL,
@@ -86,6 +144,7 @@ CREATE TABLE IF NOT EXISTS ciphers (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
     FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE SET NULL
 );
 
@@ -101,7 +160,7 @@ CREATE TABLE IF NOT EXISTS archives (
 CREATE TABLE IF NOT EXISTS cipher_attachments (
     id TEXT PRIMARY KEY NOT NULL,
     cipher_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
+    user_id TEXT,
     file_name TEXT NOT NULL,
     size INTEGER NOT NULL DEFAULT 0,
     key TEXT,
@@ -110,6 +169,130 @@ CREATE TABLE IF NOT EXISTS cipher_attachments (
     updated_at TEXT NOT NULL,
     FOREIGN KEY (cipher_id) REFERENCES ciphers(id) ON DELETE CASCADE,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS ciphers_collections (
+    cipher_id TEXT NOT NULL,
+    collection_id TEXT NOT NULL,
+    PRIMARY KEY (cipher_id, collection_id),
+    FOREIGN KEY (cipher_id) REFERENCES ciphers(id) ON DELETE CASCADE,
+    FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS favorites (
+    user_id TEXT NOT NULL,
+    cipher_id TEXT NOT NULL,
+    PRIMARY KEY (user_id, cipher_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (cipher_id) REFERENCES ciphers(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS folders_ciphers (
+    folder_id TEXT NOT NULL,
+    cipher_id TEXT NOT NULL,
+    PRIMARY KEY (folder_id, cipher_id),
+    FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE CASCADE,
+    FOREIGN KEY (cipher_id) REFERENCES ciphers(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS invitations (
+    email TEXT PRIMARY KEY NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS groups (
+    id TEXT PRIMARY KEY NOT NULL,
+    organization_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    access_all INTEGER NOT NULL DEFAULT 0 CHECK (access_all IN (0, 1)),
+    external_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS groups_users (
+    group_id TEXT NOT NULL,
+    membership_id TEXT NOT NULL,
+    PRIMARY KEY (group_id, membership_id),
+    FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
+    FOREIGN KEY (membership_id) REFERENCES users_organizations(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS collections_groups (
+    collection_id TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    read_only INTEGER NOT NULL DEFAULT 0 CHECK (read_only IN (0, 1)),
+    hide_passwords INTEGER NOT NULL DEFAULT 0 CHECK (hide_passwords IN (0, 1)),
+    manage INTEGER NOT NULL DEFAULT 0 CHECK (manage IN (0, 1)),
+    PRIMARY KEY (collection_id, group_id),
+    FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE CASCADE,
+    FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS org_policies (
+    id TEXT PRIMARY KEY NOT NULL,
+    organization_id TEXT NOT NULL,
+    type INTEGER NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+    data TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (organization_id, type),
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS organization_api_key (
+    id TEXT PRIMARY KEY NOT NULL,
+    organization_id TEXT NOT NULL UNIQUE,
+    type INTEGER NOT NULL DEFAULT 0,
+    api_key TEXT NOT NULL,
+    revision_date TEXT NOT NULL,
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    id TEXT PRIMARY KEY NOT NULL,
+    type INTEGER NOT NULL,
+    user_id TEXT,
+    organization_id TEXT,
+    cipher_id TEXT,
+    collection_id TEXT,
+    group_id TEXT,
+    membership_id TEXT,
+    device_type INTEGER,
+    ip_address TEXT,
+    acting_user_id TEXT,
+    date TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
+    FOREIGN KEY (cipher_id) REFERENCES ciphers(id) ON DELETE SET NULL,
+    FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE SET NULL,
+    FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE SET NULL,
+    FOREIGN KEY (membership_id) REFERENCES users_organizations(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS registration_tokens (
+    id TEXT PRIMARY KEY NOT NULL,
+    email TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS notification_outbox (
+    id TEXT PRIMARY KEY NOT NULL,
+    dedupe_key TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL,
+    sent_at TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS sends (
@@ -171,6 +354,34 @@ CREATE TABLE IF NOT EXISTS two_factor_authenticator (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS two_factor_external (
+    user_id TEXT NOT NULL,
+    type INTEGER NOT NULL CHECK (type IN (2, 3)),
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, type),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS two_factor_incomplete (
+    user_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    device_name TEXT NOT NULL,
+    device_type INTEGER NOT NULL,
+    login_time TEXT NOT NULL,
+    ip_address TEXT NOT NULL,
+    PRIMARY KEY (user_id, device_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS twofactor_duo_ctx (
+    state TEXT PRIMARY KEY NOT NULL,
+    user_email TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    exp INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS two_factor_email (
     user_id TEXT PRIMARY KEY NOT NULL,
     atype INTEGER NOT NULL DEFAULT 1,
@@ -227,6 +438,8 @@ CREATE TABLE IF NOT EXISTS devices (
     device_name TEXT,
     device_type INTEGER,
     remember_token_hash TEXT,
+    push_token TEXT,
+    push_uuid TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(user_id, device_identifier),
@@ -259,6 +472,23 @@ CREATE TABLE IF NOT EXISTS protected_action_otp (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS emergency_access (
+    id TEXT PRIMARY KEY NOT NULL,
+    grantor_uuid TEXT NOT NULL,
+    grantee_uuid TEXT,
+    email TEXT,
+    key_encrypted TEXT,
+    type INTEGER NOT NULL CHECK (type IN (0, 1)),
+    status INTEGER NOT NULL CHECK (status BETWEEN 0 AND 4),
+    wait_time_days INTEGER NOT NULL,
+    recovery_initiated_at TEXT,
+    last_notification_at TEXT,
+    updated_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (grantor_uuid) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (grantee_uuid) REFERENCES users(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS jwt_keys (
     id TEXT PRIMARY KEY NOT NULL DEFAULT 'global',
     access_secret TEXT NOT NULL,
@@ -276,17 +506,42 @@ CREATE TABLE IF NOT EXISTS two_factor_keys (
 
 CREATE INDEX IF NOT EXISTS idx_ciphers_user_id ON ciphers(user_id);
 CREATE INDEX IF NOT EXISTS idx_ciphers_folder_id ON ciphers(folder_id);
+CREATE INDEX IF NOT EXISTS idx_memberships_user ON users_organizations(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_memberships_org ON users_organizations(organization_id, status, type);
+CREATE INDEX IF NOT EXISTS idx_collections_org ON collections(organization_id);
+CREATE INDEX IF NOT EXISTS idx_users_collections_collection ON users_collections(collection_id);
+CREATE INDEX IF NOT EXISTS idx_cipher_collections_collection ON ciphers_collections(collection_id);
+CREATE INDEX IF NOT EXISTS idx_cipher_collections_cipher ON ciphers_collections(cipher_id);
+CREATE INDEX IF NOT EXISTS idx_favorites_cipher ON favorites(cipher_id);
+CREATE INDEX IF NOT EXISTS idx_folders_ciphers_cipher ON folders_ciphers(cipher_id);
+CREATE INDEX IF NOT EXISTS idx_groups_org ON groups(organization_id);
+CREATE INDEX IF NOT EXISTS idx_groups_users_membership ON groups_users(membership_id);
+CREATE INDEX IF NOT EXISTS idx_collections_groups_group ON collections_groups(group_id);
+CREATE INDEX IF NOT EXISTS idx_policies_org ON org_policies(organization_id, enabled);
+CREATE INDEX IF NOT EXISTS idx_events_org_date ON events(organization_id, date DESC);
+CREATE INDEX IF NOT EXISTS idx_events_user_date ON events(user_id, date DESC);
+CREATE INDEX IF NOT EXISTS idx_events_cipher_date ON events(cipher_id, date DESC);
+CREATE INDEX IF NOT EXISTS idx_registration_tokens_email ON registration_tokens(email, expires_at);
+CREATE INDEX IF NOT EXISTS idx_outbox_pending ON notification_outbox(sent_at, next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_archives_user_id ON archives(user_id);
 CREATE INDEX IF NOT EXISTS idx_archives_cipher_id ON archives(cipher_id);
-CREATE INDEX IF NOT EXISTS idx_cipher_attachments_cipher_id ON cipher_attachments(cipher_id);
-CREATE INDEX IF NOT EXISTS idx_cipher_attachments_user_id ON cipher_attachments(user_id);
+CREATE INDEX IF NOT EXISTS idx_cipher_attachments_cipher ON cipher_attachments(cipher_id);
+CREATE INDEX IF NOT EXISTS idx_cipher_attachments_user ON cipher_attachments(user_id);
 CREATE INDEX IF NOT EXISTS idx_sends_user_id ON sends(user_id);
 CREATE INDEX IF NOT EXISTS idx_sends_deletion_date ON sends(deletion_date);
 CREATE INDEX IF NOT EXISTS idx_send_files_send_id ON send_files(send_id);
 CREATE INDEX IF NOT EXISTS idx_send_file_chunks_send_file_id ON send_file_chunks(send_file_id);
 CREATE INDEX IF NOT EXISTS idx_folders_user_id ON folders(user_id);
 CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id);
+CREATE INDEX IF NOT EXISTS idx_devices_push_uuid ON devices(push_uuid);
 CREATE INDEX IF NOT EXISTS idx_auth_requests_user_id ON auth_requests(user_id);
 CREATE INDEX IF NOT EXISTS idx_protected_action_otp_user_id ON protected_action_otp(user_id);
+CREATE INDEX IF NOT EXISTS idx_two_factor_external_user ON two_factor_external(user_id);
+CREATE INDEX IF NOT EXISTS idx_two_factor_incomplete_time ON two_factor_incomplete(login_time);
+CREATE INDEX IF NOT EXISTS idx_twofactor_duo_ctx_exp ON twofactor_duo_ctx(exp);
 CREATE INDEX IF NOT EXISTS idx_two_factor_webauthn_user_id ON two_factor_webauthn(user_id);
 CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_user ON webauthn_challenges(user_id);
+CREATE INDEX IF NOT EXISTS idx_emergency_grantor ON emergency_access(grantor_uuid);
+CREATE INDEX IF NOT EXISTS idx_emergency_grantee ON emergency_access(grantee_uuid);
+CREATE INDEX IF NOT EXISTS idx_emergency_email ON emergency_access(email, status);
+CREATE INDEX IF NOT EXISTS idx_emergency_recovery ON emergency_access(status, recovery_initiated_at);

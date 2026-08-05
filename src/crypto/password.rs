@@ -1,5 +1,4 @@
 use chrono::Utc;
-use constant_time_eq::constant_time_eq;
 use serde_json::Value;
 use wasm_bindgen::JsValue;
 use worker::D1Database;
@@ -35,7 +34,7 @@ pub async fn hash_password(
     })
 }
 
-/// 验证客户端提交的 masterPasswordHash，并将旧认证格式渐进迁移到 Vaultwarden 格式。
+/// Verify the client-provided masterPasswordHash using Vaultwarden's server-side hash format.
 pub async fn verify_user_password(
     db: &D1Database,
     user_id: &str,
@@ -43,7 +42,7 @@ pub async fn verify_user_password(
 ) -> Result<bool, AppError> {
     let row: Option<Value> = db
         .prepare(
-            "SELECT master_password_hash, password_salt, password_iterations, kdf_type, kdf_iterations, kdf_memory, kdf_parallelism FROM users WHERE id = ?1",
+            "SELECT master_password_hash, password_salt, password_iterations FROM users WHERE id = ?1",
         )
         .bind(&[user_id.into()])?
         .first(None)
@@ -67,41 +66,14 @@ pub async fn verify_user_password(
         .and_then(Value::as_i64)
         .and_then(|value| i32::try_from(value).ok());
 
-    if let (Some(salt), Some(iterations)) = (salt, password_iterations) {
-        let valid = crypto::verify_server_password(candidate, salt, stored_hash, iterations).await;
-        if valid && iterations < crypto::PASSWORD_ITERATIONS_DEFAULT {
-            upgrade_password_hash(db, user_id, candidate, Some(salt)).await?;
-        }
-        return Ok(valid);
-    }
-
-    // 兼容 2026-02-18 至本次迁移前的格式：服务端哈希错误地复用了客户端 KDF。
-    let legacy_valid = if let Some(salt) = salt {
-        let kdf_type = value_i32(&row, "kdf_type", crypto::KDF_TYPE_PBKDF2);
-        let kdf_iterations = value_i32(&row, "kdf_iterations", crypto::PBKDF2_ITERATIONS_DEFAULT);
-        let kdf_memory = optional_i32(&row, "kdf_memory");
-        let kdf_parallelism = optional_i32(&row, "kdf_parallelism");
-        crypto::verify_password(
-            candidate,
-            salt,
-            stored_hash,
-            kdf_type,
-            kdf_iterations,
-            kdf_memory,
-            kdf_parallelism,
-        )
-        .await
-    } else {
-        // 更早的记录直接存储客户端 masterPasswordHash。
-        constant_time_eq(stored_hash.as_bytes(), candidate.as_bytes())
+    let (Some(salt), Some(iterations)) = (salt, password_iterations) else {
+        return Ok(false);
     };
-
-    if legacy_valid {
-        // 旧 salt 只有 32 字节；迁移时换成 Vaultwarden 使用的 64 字节随机 salt。
-        upgrade_password_hash(db, user_id, candidate, None).await?;
+    let valid = crypto::verify_server_password(candidate, salt, stored_hash, iterations).await;
+    if valid && iterations < crypto::PASSWORD_ITERATIONS_DEFAULT {
+        upgrade_password_hash(db, user_id, candidate, Some(salt)).await?;
     }
-
-    Ok(legacy_valid)
+    Ok(valid)
 }
 
 async fn upgrade_password_hash(
@@ -131,18 +103,8 @@ async fn upgrade_password_hash(
     })?;
 
     log::info!(
-        "Migrated server password verifier for user {user_id} to PBKDF2-HMAC-SHA256 ({} iterations)",
+        "Updated server password verifier for user {user_id} to PBKDF2-HMAC-SHA256 ({} iterations)",
         crypto::PASSWORD_ITERATIONS_DEFAULT
     );
     Ok(())
-}
-
-fn value_i32(row: &Value, key: &str, default: i32) -> i32 {
-    optional_i32(row, key).unwrap_or(default)
-}
-
-fn optional_i32(row: &Value, key: &str) -> Option<i32> {
-    row.get(key)
-        .and_then(Value::as_i64)
-        .and_then(|value| i32::try_from(value).ok())
 }

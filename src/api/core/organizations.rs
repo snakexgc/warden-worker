@@ -269,8 +269,8 @@ impl MemberUserRow {
     }
 }
 
-pub(crate) fn organizations_enabled(env: &worker::Env) -> bool {
-    env_bool(env, "ORGANIZATIONS_ENABLED", false)
+pub(crate) fn organizations_enabled(_env: &worker::Env) -> bool {
+    true
 }
 
 pub(crate) fn events_enabled(env: &worker::Env) -> bool {
