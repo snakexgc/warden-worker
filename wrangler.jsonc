@@ -40,6 +40,16 @@
 		// Vaultwarden defaults emergency access to enabled. Set false to make all
 		// mutating emergency-access endpoints reject requests.
 		"EMERGENCY_ACCESS_ALLOWED": "true",
+		// Notify when a password login does not finish 2FA within this many minutes.
+		// Set to 0 to disable incomplete-login tracking.
+		"INCOMPLETE_2FA_TIME_LIMIT": "3",
+		// Vaultwarden Duo Universal Prompt is the default. Set true only for an
+		// existing deprecated Traditional Prompt integration.
+		"DUO_USE_IFRAME": "false",
+		// Bitwarden mobile push relay. Installation id/key must be Worker Secrets.
+		"PUSH_ENABLED": "false",
+		"PUSH_RELAY_URI": "https://push.bitwarden.com",
+		"PUSH_IDENTITY_URI": "https://identity.bitwarden.com",
 		// ===============================
 		// 动态 vaultwarden.css 配置（参考 Vaultwarden 设计）
 		// 说明：

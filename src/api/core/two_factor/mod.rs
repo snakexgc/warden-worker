@@ -1,41 +1,29 @@
+pub mod authenticator;
 pub mod duo;
+pub mod duo_oidc;
+pub mod email;
+pub mod protected_actions;
 pub mod webauthn;
 pub mod yubikey;
 
-use axum::http::HeaderMap;
-use axum::{Json, extract::State};
-use chrono::Utc;
-use constant_time_eq::constant_time_eq;
+use axum::{Json, extract::State, http::HeaderMap};
+use chrono::{Duration, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use totp_rs::{Algorithm, Secret, TOTP};
 
-use crate::api::AppState;
-use crate::auth::Claims;
-use crate::crypto::password;
-use crate::db;
-use crate::db::models::{
-    auth_request,
-    two_factor::{self, EmailTokenData},
+use crate::{
+    api::AppState,
+    auth::Claims,
+    crypto::password,
+    db,
+    db::models::two_factor,
+    error::AppError,
+    extensions::notify::{self, NotifyContext, NotifyEvent},
+    worker_runtime::{logging::targets, webauthn as webauthn_runtime},
 };
-use crate::error::AppError;
-use crate::extensions::notify::{self, EmailType, NotifyContext, NotifyEvent};
-use crate::worker_runtime::logging::targets;
-use crate::worker_runtime::webauthn as webauthn_runtime;
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EnableAuthenticatorRequest {
-    pub code: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DisableAuthenticatorRequest {
-    pub code: String,
-}
+pub(crate) use email::issue_email_login_token;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,8 +44,7 @@ impl PasswordOrOtpData {
                 if !password::verify_user_password(db, user_id, master_password_hash).await? {
                     log::warn!(
                         target: targets::AUTH,
-                        "PasswordOrOtpData.validate: password mismatch user_id={}",
-                        user_id
+                        "PasswordOrOtpData.validate: password mismatch user_id={user_id}"
                     );
                     return Err(AppError::Unauthorized("Invalid credentials".to_string()));
                 }
@@ -66,14 +53,7 @@ impl PasswordOrOtpData {
             (None, Some(otp)) => {
                 two_factor::validate_protected_action_otp(db, user_id, otp, true).await
             }
-            _ => {
-                log::warn!(
-                    target: targets::AUTH,
-                    "PasswordOrOtpData.validate: no validation provided user_id={}",
-                    user_id
-                );
-                Err(AppError::BadRequest("No validation provided".to_string()))
-            }
+            _ => Err(AppError::BadRequest("No validation provided".to_string())),
         }
     }
 }
@@ -86,30 +66,12 @@ pub enum NumberOrString {
 }
 
 impl NumberOrString {
-    fn into_string(self) -> String {
+    pub(crate) fn into_string(self) -> String {
         match self {
-            NumberOrString::Number(n) => n.to_string(),
-            NumberOrString::String(s) => s,
+            Self::Number(value) => value.to_string(),
+            Self::String(value) => value,
         }
     }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EnableAuthenticatorData {
-    key: String,
-    token: NumberOrString,
-    master_password_hash: Option<String>,
-    otp: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DisableAuthenticatorData {
-    key: String,
-    master_password_hash: String,
-    #[serde(rename = "type")]
-    r#type: NumberOrString,
 }
 
 #[worker::send]
@@ -117,30 +79,19 @@ pub async fn two_factor_status(
     claims: Claims,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
+    let mut providers = Vec::new();
 
-    let mut providers: Vec<serde_json::Value> = Vec::new();
-
-    let authenticator_enabled = two_factor::is_authenticator_enabled(&db, &claims.sub).await?;
-    if authenticator_enabled {
-        providers.push(json!({
-            "enabled": true,
-            "type": two_factor::TWO_FACTOR_PROVIDER_AUTHENTICATOR,
-            "object": "twoFactorProvider"
-        }));
+    if two_factor::is_authenticator_enabled(&db, &claims.sub).await? {
+        providers.push(provider_json(two_factor::TWO_FACTOR_PROVIDER_AUTHENTICATOR));
     }
-
-    let email_enabled = two_factor::is_email_2fa_enabled(&db, &claims.sub).await?;
-    if email_enabled && notify::is_email_webhook_configured(&state.env) {
-        providers.push(json!({
-            "enabled": true,
-            "type": two_factor::TWO_FACTOR_PROVIDER_EMAIL,
-            "object": "twoFactorProvider"
-        }));
+    if two_factor::is_email_2fa_enabled(&db, &claims.sub).await?
+        && notify::is_email_webhook_configured(&state.env)
+    {
+        providers.push(provider_json(two_factor::TWO_FACTOR_PROVIDER_EMAIL));
     }
-
     if two_factor::is_external_two_factor_enabled(
         &db,
         &claims.sub,
@@ -148,13 +99,8 @@ pub async fn two_factor_status(
     )
     .await?
     {
-        providers.push(json!({
-            "enabled": true,
-            "type": two_factor::TWO_FACTOR_PROVIDER_DUO,
-            "object": "twoFactorProvider"
-        }));
+        providers.push(provider_json(two_factor::TWO_FACTOR_PROVIDER_DUO));
     }
-
     if two_factor::is_external_two_factor_enabled(
         &db,
         &claims.sub,
@@ -162,20 +108,14 @@ pub async fn two_factor_status(
     )
     .await?
     {
-        providers.push(json!({
-            "enabled": true,
-            "type": two_factor::TWO_FACTOR_PROVIDER_YUBIKEY,
-            "object": "twoFactorProvider"
-        }));
+        providers.push(provider_json(two_factor::TWO_FACTOR_PROVIDER_YUBIKEY));
     }
-
-    let webauthn_enabled = webauthn_runtime::is_webauthn_enabled(&db, &claims.sub).await?;
-    if webauthn_enabled && webauthn_runtime::is_webauthn_2fa_supported(&headers) {
-        providers.push(json!({
-            "enabled": true,
-            "type": webauthn_runtime::TWO_FACTOR_PROVIDER_WEBAUTHN,
-            "object": "twoFactorProvider"
-        }));
+    if webauthn_runtime::is_webauthn_enabled(&db, &claims.sub).await?
+        && webauthn_runtime::is_webauthn_2fa_supported(&headers)
+    {
+        providers.push(provider_json(
+            webauthn_runtime::TWO_FACTOR_PROVIDER_WEBAUTHN,
+        ));
     }
 
     Ok(Json(json!({
@@ -183,6 +123,14 @@ pub async fn two_factor_status(
         "object": "list",
         "continuationToken": null
     })))
+}
+
+fn provider_json(provider_type: i32) -> Value {
+    json!({
+        "enabled": true,
+        "type": provider_type,
+        "object": "twoFactorProvider"
+    })
 }
 
 #[worker::send]
@@ -199,838 +147,13 @@ pub async fn get_device_verification_settings(
     })))
 }
 
-#[worker::send]
-pub async fn authenticator_request(
-    claims: Claims,
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let db = db::get_db(&state.env)?;
-    claims.verify_security_stamp(&db).await?;
-    let now = Utc::now().to_rfc3339();
-
-    let user_email: Option<String> = db
-        .prepare("SELECT email FROM users WHERE id = ?1")
-        .bind(&[claims.sub.clone().into()])?
-        .first(Some("email"))
-        .await
-        .map_err(|_| AppError::Database)?;
-    let user_email = user_email.ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
-
-    let secret_encoded = two_factor::generate_totp_secret_base32_20();
-    let secret_enc =
-        two_factor::encrypt_secret_with_db_key(&db, &claims.sub, &secret_encoded).await?;
-
-    two_factor::upsert_authenticator_secret(&db, &claims.sub, secret_enc, false, 0, &now).await?;
-
-    let issuer = state
-        .env
-        .var("TWO_FACTOR_ISSUER")
-        .ok()
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| "Warden Worker".to_string());
-    let issuer = issuer.replace(':', "");
-    let account = user_email.replace(':', "");
-    let totp = TOTP::new(
-        Algorithm::SHA1,
-        6,
-        1,
-        30,
-        Secret::Encoded(secret_encoded.clone())
-            .to_bytes()
-            .map_err(|_| AppError::Internal)?,
-        Some(issuer.clone()),
-        account.clone(),
-    )
-    .map_err(|_| AppError::Internal)?;
-    let otpauth = totp.get_url();
-    let qr_base64 = totp.get_qr_base64().map_err(|_| AppError::Internal)?;
-
-    Ok(Json(json!({
-        "secret": secret_encoded,
-        "otpauth": otpauth,
-        "qrBase64": qr_base64
-    })))
-}
-
-#[worker::send]
-pub async fn get_authenticator(
-    claims: Claims,
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<PasswordOrOtpData>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let db = db::get_db(&state.env)?;
-    claims.verify_security_stamp(&db).await?;
-    payload.validate(&db, &claims.sub).await?;
-
-    let enabled = two_factor::is_authenticator_enabled(&db, &claims.sub).await?;
-    let key = if enabled {
-        let secret_enc = two_factor::get_authenticator_secret_enc(&db, &claims.sub)
-            .await?
-            .ok_or_else(|| AppError::Internal)?;
-        two_factor::decrypt_secret_with_key(&state.two_factor_key, &claims.sub, &secret_enc)?
-    } else {
-        two_factor::generate_totp_secret_base32_20()
-    };
-
-    Ok(Json(json!({
-        "enabled": enabled,
-        "key": key,
-        "object": "twoFactorAuthenticator"
-    })))
-}
-
-#[worker::send]
-pub async fn activate_authenticator(
-    claims: Claims,
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(payload): Json<EnableAuthenticatorData>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let db = db::get_db(&state.env)?;
-    claims.verify_security_stamp(&db).await?;
-
-    PasswordOrOtpData {
-        master_password_hash: payload.master_password_hash.clone(),
-        otp: payload.otp.clone(),
-    }
-    .validate(&db, &claims.sub)
-    .await?;
-
-    let key = payload.key.trim().to_uppercase();
-    let key_bytes = Secret::Encoded(key.clone())
-        .to_bytes()
-        .map_err(|_| AppError::BadRequest("Invalid totp secret".to_string()))?;
-    if key_bytes.len() != 20 {
-        return Err(AppError::BadRequest("Invalid key length".to_string()));
-    }
-
-    let token = payload.token.into_string();
-    let Some(last_used) = two_factor::match_current_totp_time_step(&key, &token)? else {
-        return Err(AppError::BadRequest("Invalid TOTP code".to_string()));
-    };
-
-    let now = Utc::now().to_rfc3339();
-    let secret_enc = two_factor::encrypt_secret_with_key(&state.two_factor_key, &claims.sub, &key)?;
-    two_factor::upsert_authenticator_secret(&db, &claims.sub, secret_enc, true, last_used, &now)
-        .await?;
-
-    let _ = two_factor::get_or_create_recovery_code(&db, &claims.sub).await?;
-
-    let meta = notify::extract_request_meta(&headers);
-    notify::notify_background(
-        &state.ctx,
-        state.env.clone(),
-        NotifyEvent::TwoFactorEnable,
-        NotifyContext {
-            user_id: Some(claims.sub),
-            user_email: Some(claims.email),
-            detail: Some("provider=authenticator".to_string()),
-            meta,
-            ..Default::default()
-        },
-    );
-
-    Ok(Json(json!({
-        "enabled": true,
-        "key": key,
-        "object": "twoFactorAuthenticator"
-    })))
-}
-
-#[worker::send]
-pub async fn activate_authenticator_put(
-    claims: Claims,
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(payload): Json<EnableAuthenticatorData>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    activate_authenticator(claims, State(state), headers, Json(payload)).await
-}
-
-#[worker::send]
-pub async fn disable_authenticator_vw(
-    claims: Claims,
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(payload): Json<DisableAuthenticatorData>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let db = db::get_db(&state.env)?;
-    claims.verify_security_stamp(&db).await?;
-
-    if !password::verify_user_password(&db, &claims.sub, &payload.master_password_hash).await? {
-        return Err(AppError::Unauthorized("Invalid credentials".to_string()));
-    }
-
-    if let Some(secret_enc) = two_factor::get_authenticator_secret_enc(&db, &claims.sub).await? {
-        let secret_encoded =
-            two_factor::decrypt_secret_with_key(&state.two_factor_key, &claims.sub, &secret_enc)?;
-        if secret_encoded.eq_ignore_ascii_case(payload.key.trim()) {
-            two_factor::disable_authenticator(&db, &claims.sub).await?;
-        } else {
-            return Err(AppError::BadRequest(
-                "TOTP key does not match recorded value".to_string(),
-            ));
-        }
-    }
-
-    let type_ = match payload.r#type {
-        NumberOrString::Number(n) => n as i32,
-        NumberOrString::String(s) => s
-            .parse::<i32>()
-            .unwrap_or(two_factor::TWO_FACTOR_PROVIDER_AUTHENTICATOR),
-    };
-
-    let meta = notify::extract_request_meta(&headers);
-    notify::notify_background(
-        &state.ctx,
-        state.env.clone(),
-        NotifyEvent::TwoFactorDisable,
-        NotifyContext {
-            user_id: Some(claims.sub),
-            user_email: Some(claims.email),
-            detail: Some(format!("type={type_}")),
-            meta,
-            ..Default::default()
-        },
-    );
-
-    Ok(Json(json!({
-        "enabled": false,
-        "keys": type_,
-        "object": "twoFactorProvider"
-    })))
-}
-
-#[worker::send]
-pub async fn authenticator_enable(
-    claims: Claims,
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(payload): Json<EnableAuthenticatorRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let db = db::get_db(&state.env)?;
-    claims.verify_security_stamp(&db).await?;
-    let now = Utc::now().to_rfc3339();
-
-    let secret_enc = two_factor::get_authenticator_secret_enc(&db, &claims.sub)
-        .await?
-        .ok_or_else(|| AppError::BadRequest("No pending authenticator setup".to_string()))?;
-    let secret_encoded = match two_factor::decrypt_secret_with_key(
-        &state.two_factor_key,
-        &claims.sub,
-        &secret_enc,
-    ) {
-        Ok(v) => v,
-        Err(e) => {
-            let _ = two_factor::disable_authenticator(&db, &claims.sub).await;
-            return Err(e);
-        }
-    };
-    let Some(last_used) = two_factor::match_current_totp_time_step(&secret_encoded, &payload.code)?
-    else {
-        return Err(AppError::BadRequest("Invalid TOTP code".to_string()));
-    };
-
-    two_factor::upsert_authenticator_secret(&db, &claims.sub, secret_enc, true, last_used, &now)
-        .await?;
-
-    let meta = notify::extract_request_meta(&headers);
-    notify::notify_background(
-        &state.ctx,
-        state.env.clone(),
-        NotifyEvent::TwoFactorEnable,
-        NotifyContext {
-            user_id: Some(claims.sub),
-            user_email: Some(claims.email),
-            detail: Some("provider=authenticator".to_string()),
-            meta,
-            ..Default::default()
-        },
-    );
-    Ok(Json(json!({})))
-}
-
-#[worker::send]
-pub async fn authenticator_disable(
-    claims: Claims,
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(payload): Json<DisableAuthenticatorRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let db = db::get_db(&state.env)?;
-    claims.verify_security_stamp(&db).await?;
-    let secret_enc = two_factor::get_authenticator_secret_enc(&db, &claims.sub)
-        .await?
-        .ok_or_else(|| AppError::BadRequest("Authenticator not enabled".to_string()))?;
-    let secret_encoded =
-        two_factor::decrypt_secret_with_key(&state.two_factor_key, &claims.sub, &secret_enc)?;
-    if !two_factor::consume_totp_code(&db, &claims.sub, &secret_encoded, &payload.code).await? {
-        return Err(AppError::BadRequest("Invalid TOTP code".to_string()));
-    }
-
-    two_factor::disable_authenticator(&db, &claims.sub).await?;
-
-    let meta = notify::extract_request_meta(&headers);
-    notify::notify_background(
-        &state.ctx,
-        state.env.clone(),
-        NotifyEvent::TwoFactorDisable,
-        NotifyContext {
-            user_id: Some(claims.sub),
-            user_email: Some(claims.email),
-            detail: Some("provider=authenticator".to_string()),
-            meta,
-            ..Default::default()
-        },
-    );
-    Ok(Json(json!({})))
-}
-
-const EMAIL_TOKEN_SIZE: u8 = 6;
-const EMAIL_EXPIRATION_TIME: i64 = 600;
-const EMAIL_ATTEMPTS_LIMIT: u64 = 3;
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SendEmailData {
-    pub email: String,
-    pub master_password_hash: Option<String>,
-    pub otp: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EmailData {
-    pub token: String,
-    pub master_password_hash: Option<String>,
-    pub otp: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SendEmailLoginData {
-    #[serde(alias = "DeviceIdentifier")]
-    pub device_identifier: Option<String>,
-    #[serde(alias = "Email")]
-    pub email: Option<String>,
-    #[serde(alias = "MasterPasswordHash")]
-    pub master_password_hash: Option<String>,
-    #[serde(alias = "AuthRequestId")]
-    pub auth_request_id: Option<String>,
-    #[serde(alias = "AuthRequestAccessCode")]
-    pub auth_request_access_code: Option<String>,
-}
-
-#[worker::send]
-pub async fn get_email(
-    claims: Claims,
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<PasswordOrOtpData>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let db = db::get_db(&state.env)?;
-
-    log::debug!(
-        target: targets::AUTH,
-        "get_email_2fa_status called user_id={}",
-        claims.sub
-    );
-
-    // 记录接收到的请求内容（脱敏）
-    let has_password = payload.master_password_hash.is_some();
-    let has_otp = payload.otp.is_some();
-    log::debug!(
-        target: targets::AUTH,
-        "get_email_2fa_status request payload user_id={} has_password={} has_otp={}",
-        claims.sub,
-        has_password,
-        has_otp
-    );
-
-    if let Err(e) = claims.verify_security_stamp(&db).await {
-        log::warn!(
-            target: targets::AUTH,
-            "get_email_2fa_status security_stamp verification failed user_id={} error={:?}",
-            claims.sub,
-            e
-        );
-        return Err(e);
-    }
-
-    if let Err(e) = payload.validate(&db, &claims.sub).await {
-        log::warn!(
-            target: targets::AUTH,
-            "get_email_2fa_status password validation failed user_id={} error={:?}",
-            claims.sub,
-            e
-        );
-        return Err(e);
-    }
-
-    log::info!(
-        target: targets::AUTH,
-        "get_email_2fa_status success user_id={}",
-        claims.sub
-    );
-
-    let (enabled, mfa_email) = match two_factor::get_email_2fa(&db, &claims.sub).await? {
-        Some((enabled, data)) => {
-            let email_data = EmailTokenData::from_json(&data)?;
-            (enabled, json!(email_data.email))
-        }
-        None => (false, serde_json::Value::Null),
-    };
-
-    Ok(Json(json!({
-        "email": mfa_email,
-        "enabled": enabled,
-        "object": "twoFactorEmail"
-    })))
-}
-
-#[worker::send]
-pub async fn send_email(
-    claims: Claims,
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<SendEmailData>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let db = db::get_db(&state.env)?;
-    claims.verify_security_stamp(&db).await?;
-
-    PasswordOrOtpData {
-        master_password_hash: payload.master_password_hash.clone(),
-        otp: payload.otp,
-    }
-    .validate(&db, &claims.sub)
-    .await?;
-
-    if !notify::is_email_webhook_configured(&state.env) {
-        log::warn!(
-            target: targets::AUTH,
-            "send_email_2fa failed: webhook not configured user_id={}",
-            claims.sub
-        );
-        return Err(AppError::BadRequest(
-            "Email 2FA is not configured on server".to_string(),
-        ));
-    }
-
-    let now = Utc::now().to_rfc3339();
-    let generated_token = two_factor::generate_email_token(EMAIL_TOKEN_SIZE);
-    let twofactor_data = EmailTokenData::new(payload.email.clone(), generated_token.clone());
-
-    two_factor::upsert_email_2fa(
-        &db,
-        &claims.sub,
-        two_factor::TWO_FACTOR_TYPE_EMAIL_VERIFICATION_CHALLENGE,
-        false,
-        &twofactor_data.to_json(),
-        &now,
-    )
-    .await?;
-
-    log::info!(
-        target: targets::AUTH,
-        "send_email_2fa_verification user_id={} email={}",
-        claims.sub,
-        payload.email
-    );
-
-    notify::send_email_token_background(
-        &state.ctx,
-        state.env.clone(),
-        payload.email,
-        generated_token,
-        EmailType::TwoFactorEmail,
-    );
-
-    Ok(Json(json!({})))
-}
-
-#[worker::send]
-pub async fn verify_email(
-    claims: Claims,
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(payload): Json<EmailData>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let db = db::get_db(&state.env)?;
-    claims.verify_security_stamp(&db).await?;
-
-    PasswordOrOtpData {
-        master_password_hash: payload.master_password_hash,
-        otp: payload.otp,
-    }
-    .validate(&db, &claims.sub)
-    .await?;
-
-    let data = two_factor::get_email_2fa_verification(&db, &claims.sub)
-        .await?
-        .ok_or_else(|| {
-            log::warn!(
-                target: targets::AUTH,
-                "verify_email_2fa failed: no verification record user_id={}",
-                claims.sub
-            );
-            AppError::BadRequest("Two factor not found".to_string())
-        })?;
-
-    let mut email_data = EmailTokenData::from_json(&data)?;
-
-    let Some(issued_token) = &email_data.last_token else {
-        log::warn!(
-            target: targets::AUTH,
-            "verify_email_2fa failed: no token available user_id={}",
-            claims.sub
-        );
-        return Err(AppError::BadRequest("No token available".to_string()));
-    };
-
-    // 首先验证token是否匹配（常量时间比较）
-    if !constant_time_eq(payload.token.as_bytes(), issued_token.as_bytes()) {
-        // 验证失败，增加尝试次数
-        email_data.add_attempt();
-        log::warn!(
-            target: targets::AUTH,
-            "verify_email_2fa failed: invalid token user_id={} attempts={}",
-            claims.sub,
-            email_data.attempts
-        );
-        if email_data.attempts >= EMAIL_ATTEMPTS_LIMIT {
-            email_data.reset_token();
-        }
-        let now = Utc::now().to_rfc3339();
-        two_factor::upsert_email_2fa(
-            &db,
-            &claims.sub,
-            two_factor::TWO_FACTOR_TYPE_EMAIL_VERIFICATION_CHALLENGE,
-            false,
-            &email_data.to_json(),
-            &now,
-        )
-        .await?;
-        return Err(AppError::BadRequest("Token is invalid".to_string()));
-    }
-
-    // token验证成功，先重置token并启用2FA
-    email_data.reset_token();
-    let now = Utc::now().to_rfc3339();
-    two_factor::upsert_email_2fa(
-        &db,
-        &claims.sub,
-        two_factor::TWO_FACTOR_PROVIDER_EMAIL,
-        true,
-        &email_data.to_json(),
-        &now,
-    )
-    .await?;
-
-    // 最后检查token是否过期（参考vaultwarden实现）
-    if two_factor::is_token_expired(email_data.token_sent, EMAIL_EXPIRATION_TIME) {
-        log::warn!(
-            target: targets::AUTH,
-            "verify_email_2fa failed: token expired user_id={}",
-            claims.sub
-        );
-        return Err(AppError::BadRequest("Token has expired".to_string()));
-    }
-
-    log::info!(
-        target: targets::AUTH,
-        "verify_email_2fa success user_id={} email={}",
-        claims.sub,
-        email_data.email
-    );
-
-    let _ = two_factor::get_or_create_recovery_code(&db, &claims.sub).await?;
-
-    let meta = notify::extract_request_meta(&headers);
-    notify::notify_background(
-        &state.ctx,
-        state.env.clone(),
-        NotifyEvent::TwoFactorEnable,
-        NotifyContext {
-            user_id: Some(claims.sub),
-            user_email: Some(claims.email),
-            detail: Some("provider=email".to_string()),
-            meta,
-            ..Default::default()
-        },
-    );
-
-    Ok(Json(json!({
-        "email": email_data.email,
-        "enabled": true,
-        "object": "twoFactorEmail"
-    })))
-}
-
-#[worker::send]
-pub async fn send_email_login(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(payload): Json<SendEmailLoginData>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    if !notify::is_email_webhook_configured(&state.env) {
-        log::warn!(
-            target: targets::AUTH,
-            "send_email_login failed: webhook not configured"
-        );
-        return Err(AppError::BadRequest(
-            "Email 2FA is not configured on server".to_string(),
-        ));
-    }
-
-    let db = db::get_db(&state.env)?;
-
-    let rate_limit_identity = payload
-        .email
-        .as_deref()
-        .map(crate::auth::normalize_email)
-        .or_else(|| payload.device_identifier.clone())
-        .unwrap_or_else(|| "unknown".to_string());
-    crate::api::identity::enforce_login_rate_limit_for(
-        &state,
-        &headers,
-        "email2fa",
-        &rate_limit_identity,
-    )
-    .await?;
-
-    let user_id: Option<String> = if let Some(email) = &payload.email {
-        let email = crate::auth::normalize_email(email);
-        if email.is_empty() {
-            return Err(AppError::BadRequest("Email is required".to_string()));
-        }
-
-        let result: Option<serde_json::Value> = db
-            .prepare("SELECT id FROM users WHERE email = ?1")
-            .bind(&[email.into()])?
-            .first(None)
-            .await
-            .map_err(|_| AppError::Database)?;
-
-        let Some(row) = result else {
-            return Err(AppError::Unauthorized(
-                "Username or password is incorrect".to_string(),
-            ));
-        };
-
-        let user_id = row
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if let Some(master_password_hash) = payload
-            .master_password_hash
-            .as_deref()
-            .filter(|hash| !hash.is_empty())
-        {
-            if !password::verify_user_password(&db, &user_id, master_password_hash).await? {
-                return Err(AppError::Unauthorized(
-                    "Username or password is incorrect".to_string(),
-                ));
-            }
-        } else if let Some(auth_request_id) = payload
-            .auth_request_id
-            .as_deref()
-            .filter(|id| !id.is_empty())
-        {
-            let access_code = payload
-                .auth_request_access_code
-                .as_deref()
-                .filter(|code| !code.is_empty())
-                .ok_or_else(|| AppError::Unauthorized("AuthRequest doesn't exist".to_string()))?;
-            auth_request::ensure_table(&db).await?;
-            auth_request::purge_expired(&db).await?;
-            let auth_request: Value = db
-                .prepare(
-                    "SELECT device_type, request_ip, access_code_hash, authentication_date
-                     FROM auth_requests WHERE id = ?1 AND user_id = ?2 LIMIT 1",
-                )
-                .bind(&[auth_request_id.into(), user_id.clone().into()])?
-                .first(None)
-                .await
-                .map_err(|_| AppError::Database)?
-                .ok_or_else(|| AppError::Unauthorized("AuthRequest doesn't exist".to_string()))?;
-            if auth_request
-                .get("authentication_date")
-                .and_then(Value::as_str)
-                .is_some()
-            {
-                return Err(AppError::Unauthorized(
-                    "AuthRequest doesn't exist".to_string(),
-                ));
-            }
-            let expected_device_type = auth_request
-                .get("device_type")
-                .and_then(Value::as_i64)
-                .unwrap_or(14) as i32;
-            let actual_device_type = headers
-                .get("device-type")
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.trim().parse::<i32>().ok())
-                .unwrap_or(14);
-            let expected_ip = auth_request
-                .get("request_ip")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let expected_hash = auth_request
-                .get("access_code_hash")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let actual_hash = format!("{:x}", Sha256::digest(access_code.as_bytes()));
-            if actual_device_type != expected_device_type
-                || crate::api::identity::client_ip_from_headers(&headers) != expected_ip
-                || !constant_time_eq(expected_hash.as_bytes(), actual_hash.as_bytes())
-            {
-                return Err(AppError::Unauthorized(
-                    "AuthRequest doesn't exist".to_string(),
-                ));
-            }
-        } else {
-            return Err(AppError::BadRequest(
-                "No password hash has been submitted.".to_string(),
-            ));
-        }
-
-        Some(user_id)
-    } else {
-        let Some(device_identifier) = &payload.device_identifier else {
-            return Err(AppError::BadRequest(
-                "No device identifier has been submitted.".to_string(),
-            ));
-        };
-
-        let result: Option<serde_json::Value> = db
-            .prepare("SELECT user_id FROM devices WHERE device_identifier = ?1 ORDER BY updated_at DESC LIMIT 1")
-            .bind(&[device_identifier.into()])?
-            .first(None)
-            .await
-            .map_err(|_| AppError::Database)?;
-
-        result.and_then(|r| {
-            r.get("user_id")
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-        })
-    };
-
-    let Some(user_id) = user_id else {
-        return Err(AppError::Unauthorized(
-            "Username or password is incorrect".to_string(),
-        ));
-    };
-
-    issue_email_login_token(&db, &state, &user_id).await?;
-
-    Ok(Json(json!({})))
-}
-
-pub(crate) async fn issue_email_login_token(
-    db: &worker::D1Database,
-    state: &Arc<AppState>,
-    user_id: &str,
-) -> Result<(), AppError> {
-    let (enabled, data) = match two_factor::get_email_2fa(db, user_id).await? {
-        Some((enabled, data)) => (enabled, data),
-        None => {
-            log::warn!(
-                target: targets::AUTH,
-                "send_email_login failed: email 2fa not found user_id={}",
-                user_id
-            );
-            return Err(AppError::BadRequest("Two factor not found".to_string()));
-        }
-    };
-
-    if !enabled {
-        log::warn!(
-            target: targets::AUTH,
-            "send_email_login failed: email 2fa not enabled user_id={}",
-            user_id
-        );
-        return Err(AppError::BadRequest("Email 2FA is not enabled".to_string()));
-    }
-
-    let mut email_data = EmailTokenData::from_json(&data)?;
-    let generated_token = two_factor::generate_email_token(EMAIL_TOKEN_SIZE);
-    email_data.set_token(generated_token.clone());
-
-    let now = Utc::now().to_rfc3339();
-    two_factor::upsert_email_2fa(
-        db,
-        user_id,
-        two_factor::TWO_FACTOR_PROVIDER_EMAIL,
-        true,
-        &email_data.to_json(),
-        &now,
-    )
-    .await?;
-
-    log::info!(
-        target: targets::AUTH,
-        "send_email_login user_id={} email={}",
-        user_id,
-        email_data.email
-    );
-
-    notify::send_email_token_background(
-        &state.ctx,
-        state.env.clone(),
-        email_data.email.clone(),
-        generated_token,
-        EmailType::TwoFactorLogin,
-    );
-
-    Ok(())
-}
-
-#[worker::send]
-pub async fn disable_email(
-    claims: Claims,
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(payload): Json<PasswordOrOtpData>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let db = db::get_db(&state.env)?;
-    claims.verify_security_stamp(&db).await?;
-    payload.validate(&db, &claims.sub).await?;
-
-    two_factor::delete_email_2fa(&db, &claims.sub).await?;
-
-    log::info!(
-        target: targets::AUTH,
-        "disable_email_2fa user_id={}",
-        claims.sub
-    );
-
-    let meta = notify::extract_request_meta(&headers);
-    notify::notify_background(
-        &state.ctx,
-        state.env.clone(),
-        NotifyEvent::TwoFactorDisable,
-        NotifyContext {
-            user_id: Some(claims.sub),
-            user_email: Some(claims.email),
-            detail: Some("provider=email".to_string()),
-            meta,
-            ..Default::default()
-        },
-    );
-
-    Ok(Json(json!({
-        "enabled": false,
-        "type": two_factor::TWO_FACTOR_PROVIDER_EMAIL,
-        "object": "twoFactorProvider"
-    })))
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisableTwoFactorData {
     pub master_password_hash: Option<String>,
     pub otp: Option<String>,
     #[serde(rename = "type")]
-    pub r#type: NumberOrString,
+    pub provider_type: NumberOrString,
 }
 
 #[worker::send]
@@ -1039,78 +162,42 @@ pub async fn disable_twofactor(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<DisableTwoFactorData>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-
-    // 验证主密码
     PasswordOrOtpData {
         master_password_hash: payload.master_password_hash,
         otp: payload.otp,
     }
     .validate(&db, &claims.sub)
     .await?;
-
-    // 解析类型
-    let type_ = match payload.r#type {
-        NumberOrString::Number(n) => n as i32,
-        NumberOrString::String(s) => s
+    let provider_type = match payload.provider_type {
+        NumberOrString::Number(value) => value as i32,
+        NumberOrString::String(value) => value
             .parse::<i32>()
             .unwrap_or(two_factor::TWO_FACTOR_PROVIDER_EMAIL),
     };
 
-    log::info!(
-        target: targets::AUTH,
-        "disable_twofactor user_id={} type={}",
-        claims.sub,
-        type_
-    );
-
-    // 根据类型删除对应的2FA
-    match type_ {
+    match provider_type {
         two_factor::TWO_FACTOR_PROVIDER_AUTHENTICATOR => {
-            two_factor::disable_authenticator(&db, &claims.sub).await?;
-            log::info!(
-                target: targets::AUTH,
-                "disable_twofactor: authenticator disabled user_id={}",
-                claims.sub
-            );
+            two_factor::disable_authenticator(&db, &claims.sub).await?
         }
         two_factor::TWO_FACTOR_PROVIDER_EMAIL => {
-            two_factor::delete_email_2fa(&db, &claims.sub).await?;
-            log::info!(
-                target: targets::AUTH,
-                "disable_twofactor: email 2fa disabled user_id={}",
-                claims.sub
-            );
+            two_factor::delete_email_2fa(&db, &claims.sub).await?
         }
         two_factor::TWO_FACTOR_PROVIDER_DUO | two_factor::TWO_FACTOR_PROVIDER_YUBIKEY => {
-            two_factor::delete_external_two_factor(&db, &claims.sub, Some(type_)).await?;
+            two_factor::delete_external_two_factor(&db, &claims.sub, Some(provider_type)).await?
         }
         webauthn_runtime::TWO_FACTOR_PROVIDER_WEBAUTHN => {
-            webauthn_runtime::disable_webauthn(&db, &claims.sub).await?;
-            log::info!(
-                target: targets::AUTH,
-                "disable_twofactor: webauthn disabled user_id={}",
-                claims.sub
-            );
+            webauthn_runtime::disable_webauthn(&db, &claims.sub).await?
         }
         _ => {
-            log::warn!(
-                target: targets::AUTH,
-                "disable_twofactor: unknown type user_id={} type={}",
-                claims.sub,
-                type_
-            );
             return Err(AppError::BadRequest(format!(
-                "Unknown two factor type: {}",
-                type_
+                "Unknown two factor type: {provider_type}"
             )));
         }
     }
-
-    // 发送通知
-    let provider_name = match type_ {
+    let provider_name = match provider_type {
         two_factor::TWO_FACTOR_PROVIDER_AUTHENTICATOR => "authenticator",
         two_factor::TWO_FACTOR_PROVIDER_EMAIL => "email",
         two_factor::TWO_FACTOR_PROVIDER_DUO => "duo",
@@ -1118,36 +205,31 @@ pub async fn disable_twofactor(
         webauthn_runtime::TWO_FACTOR_PROVIDER_WEBAUTHN => "webauthn",
         _ => "unknown",
     };
-
-    let meta = notify::extract_request_meta(&headers);
     notify::notify_background(
         &state.ctx,
         state.env.clone(),
         NotifyEvent::TwoFactorDisable,
         NotifyContext {
-            user_id: Some(claims.sub.clone()),
+            user_id: Some(claims.sub),
             user_email: Some(claims.email),
-            detail: Some(format!("provider={}", provider_name)),
-            meta,
+            detail: Some(format!("provider={provider_name}")),
+            meta: notify::extract_request_meta(&headers),
             ..Default::default()
         },
     );
-
     Ok(Json(json!({
         "enabled": false,
-        "type": type_,
+        "type": provider_type,
         "object": "twoFactorProvider"
     })))
 }
 
-// PUT 方法别名，与 vaultwarden 保持一致
-#[worker::send]
 pub async fn disable_twofactor_put(
     claims: Claims,
     state: State<Arc<AppState>>,
     headers: HeaderMap,
     payload: Json<DisableTwoFactorData>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<Value>, AppError> {
     disable_twofactor(claims, state, headers, payload).await
 }
 
@@ -1157,37 +239,22 @@ pub async fn get_recover(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<PasswordOrOtpData>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     payload.validate(&db, &claims.sub).await?;
-
-    log::debug!(
-        target: targets::AUTH,
-        "get_recover called user_id={}",
-        claims.sub
-    );
-
     let code = two_factor::get_or_create_recovery_code(&db, &claims.sub).await?;
-
-    log::info!(
-        target: targets::AUTH,
-        "get_recover success user_id={}",
-        claims.sub
-    );
-
     notify::notify_background(
         &state.ctx,
         state.env.clone(),
         NotifyEvent::TwoFactorRecoveryCodeView,
         NotifyContext {
-            user_id: Some(claims.sub.clone()),
-            user_email: Some(claims.email.clone()),
+            user_id: Some(claims.sub),
+            user_email: Some(claims.email),
             meta: notify::extract_request_meta(&headers),
             ..Default::default()
         },
     );
-
     Ok(Json(json!({
         "code": code,
         "object": "twoFactorRecover"
@@ -1207,73 +274,30 @@ pub async fn recover(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<RecoverTwoFactorData>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
-
-    log::info!(
-        target: targets::AUTH,
-        "recover called email={}",
-        payload.email
-    );
-
-    let result: Option<serde_json::Value> = db
+    let normalized_email = crate::auth::normalize_email(&payload.email);
+    let user_id = db
         .prepare("SELECT id FROM users WHERE email = ?1")
-        .bind(&[crate::auth::normalize_email(&payload.email).into()])?
-        .first(None)
+        .bind(&[normalized_email.into()])?
+        .first::<String>(Some("id"))
         .await
-        .map_err(|_| AppError::Database)?;
-
-    let Some(row) = result else {
-        log::warn!(
-            target: targets::AUTH,
-            "recover failed: user not found email={}",
-            payload.email
-        );
-        return Err(AppError::Unauthorized(
-            "Username or password is incorrect. Try again.".to_string(),
-        ));
-    };
-
-    let user_id = row
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+        .map_err(|_| AppError::Database)?
+        .ok_or_else(|| {
+            AppError::Unauthorized("Username or password is incorrect. Try again.".to_string())
+        })?;
     if !password::verify_user_password(&db, &user_id, &payload.master_password_hash).await? {
-        log::warn!(
-            target: targets::AUTH,
-            "recover failed: password mismatch email={}",
-            payload.email
-        );
         return Err(AppError::Unauthorized(
             "Username or password is incorrect. Try again.".to_string(),
         ));
     }
-
-    let recovery_valid =
-        two_factor::verify_recovery_code(&db, &user_id, &payload.recovery_code).await?;
-    if !recovery_valid {
-        log::warn!(
-            target: targets::AUTH,
-            "recover failed: invalid recovery code email={}",
-            payload.email
-        );
+    if !two_factor::verify_recovery_code(&db, &user_id, &payload.recovery_code).await? {
         return Err(AppError::BadRequest(
             "Recovery code is incorrect. Try again.".to_string(),
         ));
     }
-
     two_factor::delete_all_two_factors(&db, &user_id).await?;
     two_factor::clear_recovery_code(&db, &user_id).await?;
-
-    log::info!(
-        target: targets::AUTH,
-        "recover success: all 2fa removed user_id={} email={}",
-        user_id,
-        payload.email
-    );
-
-    let meta = notify::extract_request_meta(&headers);
     notify::notify_background(
         &state.ctx,
         state.env.clone(),
@@ -1281,10 +305,59 @@ pub async fn recover(
         NotifyContext {
             user_id: Some(user_id),
             user_email: Some(payload.email),
-            meta,
+            meta: notify::extract_request_meta(&headers),
             ..Default::default()
         },
     );
-
     Ok(Json(json!({})))
+}
+
+pub async fn process_incomplete_notifications(env: &worker::Env) -> Result<usize, AppError> {
+    use crate::db::models::two_factor_incomplete::TwoFactorIncomplete;
+
+    let time_limit = TwoFactorIncomplete::time_limit_minutes(env);
+    if time_limit <= 0 || !notify::is_webhook_configured(env) {
+        return Ok(0);
+    }
+    let db = db::get_db(env)?;
+    let threshold = (Utc::now() - Duration::minutes(time_limit))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let logins = TwoFactorIncomplete::find_logins_before(&db, &threshold).await?;
+    let mut delivered = 0;
+    for login in logins {
+        let email = db
+            .prepare("SELECT email FROM users WHERE id = ?1")
+            .bind(&[login.user_id.clone().into()])?
+            .first::<String>(Some("email"))
+            .await
+            .map_err(|_| AppError::Database)?;
+        let Some(email) = email else {
+            login.delete(&db).await?;
+            continue;
+        };
+        let notification = notify::Notification::event(
+            NotifyEvent::LoginFailed,
+            NotifyContext {
+                user_id: Some(login.user_id.clone()),
+                user_email: Some(email),
+                device_identifier: Some(login.device_id.clone()),
+                device_name: Some(login.device_name.clone()),
+                device_type: Some(login.device_type),
+                detail: Some(format!(
+                    "Two-factor login started at {} was not completed within {time_limit} minutes",
+                    login.login_time
+                )),
+                meta: notify::RequestMeta {
+                    ip: Some(login.ip_address.clone()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        if notify::dispatch(env, notification).await.is_ok() {
+            login.delete(&db).await?;
+            delivered += 1;
+        }
+    }
+    Ok(delivered)
 }

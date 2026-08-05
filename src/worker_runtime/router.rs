@@ -112,10 +112,22 @@ pub fn api_router_with_keys(
         )
         .route("/api/accounts/revision-date", get(accounts::revision_date))
         .route("/api/accounts/password-hint", post(accounts::password_hint))
-        .route("/api/accounts/request-otp", post(accounts::request_otp))
-        .route("/accounts/request-otp", post(accounts::request_otp))
-        .route("/api/accounts/verify-otp", post(accounts::verify_otp))
-        .route("/accounts/verify-otp", post(accounts::verify_otp))
+        .route(
+            "/api/accounts/request-otp",
+            post(two_factor::protected_actions::request_otp),
+        )
+        .route(
+            "/accounts/request-otp",
+            post(two_factor::protected_actions::request_otp),
+        )
+        .route(
+            "/api/accounts/verify-otp",
+            post(two_factor::protected_actions::verify_otp),
+        )
+        .route(
+            "/accounts/verify-otp",
+            post(two_factor::protected_actions::verify_otp),
+        )
         .route(
             "/api/accounts/verify-password",
             post(accounts::verify_password),
@@ -230,27 +242,30 @@ pub fn api_router_with_keys(
         )
         .route(
             "/api/two-factor/get-authenticator",
-            post(two_factor::get_authenticator),
+            post(two_factor::authenticator::get_authenticator),
         )
         .route(
             "/api/two-factor/authenticator",
-            post(two_factor::activate_authenticator)
-                .put(two_factor::activate_authenticator_put)
-                .delete(two_factor::disable_authenticator_vw),
+            post(two_factor::authenticator::activate_authenticator)
+                .put(two_factor::authenticator::activate_authenticator_put)
+                .delete(two_factor::authenticator::disable_authenticator),
         )
         .route(
             "/api/two-factor/authenticator/request",
-            post(two_factor::authenticator_request),
+            post(two_factor::authenticator::authenticator_request),
         )
         .route(
             "/api/two-factor/authenticator/enable",
-            post(two_factor::authenticator_enable),
+            post(two_factor::authenticator::authenticator_enable),
         )
         .route(
             "/api/two-factor/authenticator/disable",
-            post(two_factor::authenticator_disable),
+            post(two_factor::authenticator::authenticator_disable),
         )
-        .route("/api/two-factor/get-email", post(two_factor::get_email))
+        .route(
+            "/api/two-factor/get-email",
+            post(two_factor::email::get_email),
+        )
         .route("/api/two-factor/get-duo", post(two_factor::duo::get_duo))
         .route(
             "/api/two-factor/duo",
@@ -279,10 +294,13 @@ pub fn api_router_with_keys(
                 .put(two_factor::webauthn::two_factor_put_webauthn)
                 .delete(two_factor::webauthn::two_factor_delete_webauthn),
         )
-        .route("/api/two-factor/send-email", post(two_factor::send_email))
+        .route(
+            "/api/two-factor/send-email",
+            post(two_factor::email::send_email),
+        )
         .route(
             "/api/two-factor/email",
-            put(two_factor::verify_email).delete(two_factor::disable_email),
+            put(two_factor::email::verify_email).delete(two_factor::email::disable_email),
         )
         .route(
             "/api/two-factor/disable",
@@ -292,11 +310,11 @@ pub fn api_router_with_keys(
         .route("/api/two-factor/recover", post(two_factor::recover))
         .route(
             "/two-factor/send-email-login",
-            post(two_factor::send_email_login),
+            post(two_factor::email::send_email_login),
         )
         .route(
             "/api/two-factor/send-email-login",
-            post(two_factor::send_email_login),
+            post(two_factor::email::send_email_login),
         )
         .route(
             "/api/emergency-access/trusted",

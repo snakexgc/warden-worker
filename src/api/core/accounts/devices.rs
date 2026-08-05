@@ -130,7 +130,7 @@ pub async fn knowndevice(
 #[serde(rename_all = "camelCase")]
 pub struct PushTokenRequest {
     #[serde(rename = "pushToken")]
-    _push_token: String,
+    push_token: String,
 }
 
 #[worker::send]
@@ -139,7 +139,7 @@ pub async fn device_token(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
     Path(device_identifier): Path<String>,
-    Json(_payload): Json<PushTokenRequest>,
+    Json(payload): Json<PushTokenRequest>,
 ) -> Result<Json<()>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
@@ -147,20 +147,42 @@ pub async fn device_token(
 
     let inferred_name = infer_device_name(&headers);
     let inferred_type = infer_device_type(&headers);
+    let row = db
+        .prepare(
+            "SELECT device_type, push_uuid FROM devices
+             WHERE user_id = ?1 AND device_identifier = ?2 LIMIT 1",
+        )
+        .bind(&[claims.sub.clone().into(), device_identifier.clone().into()])?
+        .first::<Value>(None)
+        .await
+        .map_err(|_| AppError::Database)?
+        .ok_or_else(|| AppError::NotFound("Device not found".to_string()))?;
+    let device_type = inferred_type
+        .or_else(|| row.get("device_type").and_then(Value::as_i64))
+        .unwrap_or(0) as i32;
+    let push_uuid = row
+        .get("push_uuid")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(crate::api::push::new_push_uuid);
     let result = db
         .prepare(
             "UPDATE devices SET
            updated_at = ?1,
            device_name = COALESCE(?2, device_name),
-           device_type = COALESCE(?3, device_type)
-         WHERE user_id = ?4 AND device_identifier = ?5",
+           device_type = COALESCE(?3, device_type),
+           push_token = ?4,
+           push_uuid = ?5
+         WHERE user_id = ?6 AND device_identifier = ?7",
         )
         .bind(&[
             Utc::now().to_rfc3339().into(),
             js_opt_string(inferred_name),
             js_opt_i64(inferred_type),
-            claims.sub.into(),
-            device_identifier.into(),
+            payload.push_token.clone().into(),
+            push_uuid.clone().into(),
+            claims.sub.clone().into(),
+            device_identifier.clone().into(),
         ])?
         .run()
         .await
@@ -169,6 +191,15 @@ pub async fn device_token(
         return Err(AppError::NotFound("Device not found".to_string()));
     }
 
+    crate::api::push::register_push_device(
+        &state.env,
+        &claims.sub,
+        &device_identifier,
+        device_type,
+        &payload.push_token,
+        &push_uuid,
+    )
+    .await?;
     Ok(Json(()))
 }
 
@@ -176,10 +207,38 @@ pub async fn device_token(
 pub async fn clear_device_token(
     claims: Claims,
     State(state): State<Arc<AppState>>,
-    Path(_device_identifier): Path<String>,
+    Path(device_identifier): Path<String>,
 ) -> Result<Json<()>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
+    device::ensure_table(&db).await?;
+    let push_uuid = db
+        .prepare(
+            "SELECT push_uuid FROM devices
+             WHERE user_id = ?1 AND device_identifier = ?2 LIMIT 1",
+        )
+        .bind(&[claims.sub.clone().into(), device_identifier.clone().into()])?
+        .first::<Value>(None)
+        .await
+        .map_err(|_| AppError::Database)?
+        .and_then(|row| {
+            row.get("push_uuid")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    db.prepare(
+        "UPDATE devices SET push_token = NULL, updated_at = ?1
+         WHERE user_id = ?2 AND device_identifier = ?3",
+    )
+    .bind(&[
+        Utc::now().to_rfc3339().into(),
+        claims.sub.into(),
+        device_identifier.into(),
+    ])?
+    .run()
+    .await
+    .map_err(|_| AppError::Database)?;
+    crate::api::push::unregister_push_device(&state.env, push_uuid.as_deref()).await?;
     Ok(Json(()))
 }
 

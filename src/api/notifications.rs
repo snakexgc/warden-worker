@@ -391,7 +391,7 @@ pub async fn proxy_notifications_request(env: &Env, req: Request) -> Result<Resp
 }
 
 pub async fn publish_auth_request(env: &Env, user_id: &str, auth_request_id: &str) -> Result<()> {
-    dispatch_internal(
+    let realtime = dispatch_internal(
         env,
         INTERNAL_AUTH_REQUEST_PATH,
         &AuthEventPayload {
@@ -399,11 +399,15 @@ pub async fn publish_auth_request(env: &Env, user_id: &str, auth_request_id: &st
             auth_request_id: auth_request_id.to_string(),
         },
     )
-    .await
+    .await;
+    if let Err(error) = crate::api::push::push_auth_request(env, user_id, auth_request_id).await {
+        log::warn!("failed to publish auth request through push relay: {error}");
+    }
+    realtime
 }
 
 pub async fn publish_auth_response(env: &Env, user_id: &str, auth_request_id: &str) -> Result<()> {
-    dispatch_internal(
+    let realtime = dispatch_internal(
         env,
         INTERNAL_AUTH_RESPONSE_PATH,
         &AuthEventPayload {
@@ -411,7 +415,11 @@ pub async fn publish_auth_response(env: &Env, user_id: &str, auth_request_id: &s
             auth_request_id: auth_request_id.to_string(),
         },
     )
-    .await
+    .await;
+    if let Err(error) = crate::api::push::push_auth_response(env, user_id, auth_request_id).await {
+        log::warn!("failed to publish auth response through push relay: {error}");
+    }
+    realtime
 }
 
 pub async fn publish_cipher_update(
@@ -422,7 +430,7 @@ pub async fn publish_cipher_update(
     revision_date: &str,
     acting_device_id: Option<&str>,
 ) -> Result<()> {
-    publish_vault_update(
+    let realtime = publish_vault_update(
         env,
         update_type,
         user_id,
@@ -433,7 +441,20 @@ pub async fn publish_cipher_update(
         None,
         None,
     )
+    .await;
+    if let Err(error) = crate::api::push::push_cipher_update(
+        env,
+        update_type as i32,
+        user_id,
+        cipher_id,
+        revision_date,
+        acting_device_id,
+    )
     .await
+    {
+        log::warn!("failed to publish cipher update through push relay: {error}");
+    }
+    realtime
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -469,7 +490,7 @@ pub async fn publish_folder_update(
     revision_date: &str,
     acting_device_id: Option<&str>,
 ) -> Result<()> {
-    publish_vault_update(
+    let realtime = publish_vault_update(
         env,
         update_type,
         user_id,
@@ -480,7 +501,20 @@ pub async fn publish_folder_update(
         None,
         None,
     )
+    .await;
+    if let Err(error) = crate::api::push::push_folder_update(
+        env,
+        update_type as i32,
+        user_id,
+        folder_id,
+        revision_date,
+        acting_device_id,
+    )
     .await
+    {
+        log::warn!("failed to publish folder update through push relay: {error}");
+    }
+    realtime
 }
 
 pub async fn publish_send_update(
@@ -490,7 +524,7 @@ pub async fn publish_send_update(
     send_id: &str,
     revision_date: &str,
 ) -> Result<()> {
-    publish_vault_update(
+    let realtime = publish_vault_update(
         env,
         update_type,
         user_id,
@@ -501,7 +535,14 @@ pub async fn publish_send_update(
         None,
         None,
     )
-    .await
+    .await;
+    if let Err(error) =
+        crate::api::push::push_send_update(env, update_type as i32, user_id, send_id, revision_date)
+            .await
+    {
+        log::warn!("failed to publish Send update through push relay: {error}");
+    }
+    realtime
 }
 
 pub async fn publish_user_update(
@@ -511,7 +552,7 @@ pub async fn publish_user_update(
     revision_date: &str,
     acting_device_id: Option<&str>,
 ) -> Result<()> {
-    publish_vault_update(
+    let realtime = publish_vault_update(
         env,
         update_type,
         user_id,
@@ -522,7 +563,19 @@ pub async fn publish_user_update(
         None,
         None,
     )
+    .await;
+    if let Err(error) = crate::api::push::push_user_update(
+        env,
+        update_type as i32,
+        user_id,
+        revision_date,
+        acting_device_id,
+    )
     .await
+    {
+        log::warn!("failed to publish user update through push relay: {error}");
+    }
+    realtime
 }
 
 pub fn publish_cipher_update_background(

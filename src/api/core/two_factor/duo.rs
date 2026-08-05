@@ -25,10 +25,10 @@ const DUO_EXPIRE: i64 = 300;
 const APP_EXPIRE: i64 = 3600;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct DuoData {
-    host: String,
-    ik: String,
-    sk: String,
+pub(crate) struct DuoData {
+    pub(crate) host: String,
+    pub(crate) ik: String,
+    pub(crate) sk: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,6 +48,15 @@ fn env_value(env: &Env, name: &str) -> Option<String> {
         .or_else(|| env.var(name).ok().map(|value| value.to_string()))
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+pub(crate) fn use_iframe(env: &Env) -> bool {
+    env_value(env, "DUO_USE_IFRAME").is_some_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 fn global_duo_data(env: &Env) -> Option<DuoData> {
@@ -100,6 +109,16 @@ async fn configured_data(
             .map_err(|_| AppError::Internal),
         None => Ok(None),
     }
+}
+
+pub(crate) async fn configured_duo_data(
+    db: &D1Database,
+    env: &Env,
+    user_id: &str,
+) -> Result<DuoData, AppError> {
+    configured_data(db, env, user_id)
+        .await?
+        .ok_or_else(|| AppError::BadRequest("Can't fetch Duo keys".to_string()))
 }
 
 async fn duo_api_check(data: &DuoData) -> Result<(), AppError> {
@@ -304,9 +323,7 @@ pub async fn generate_duo_signature(
     db: &D1Database,
     env: &Env,
 ) -> Result<(String, String), AppError> {
-    let data = configured_data(db, env, user_id)
-        .await?
-        .ok_or_else(|| AppError::BadRequest("Can't fetch Duo keys".to_string()))?;
+    let data = configured_duo_data(db, env, user_id).await?;
     let akey = env_value(env, "DUO_AKEY")
         .ok_or_else(|| AppError::BadRequest("DUO_AKEY is required for Duo login".to_string()))?;
     let now = Utc::now().timestamp();

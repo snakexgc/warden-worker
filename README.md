@@ -138,9 +138,11 @@ Worker 已支持动态生成 `GET /css/vaultwarden.css`，可通过环境变量�
 紧急访问、Duo 与 YubiKey OTP 的服务端配置：
 
 - `EMERGENCY_ACCESS_ALLOWED`：是否启用紧急访问 API，默认 `true`；等待期由现有每 5 分钟 Cron 推进。
-- Duo 全局配置使用 Secrets `DUO_HOST`、`DUO_IKEY`、`DUO_SKEY`、`DUO_AKEY`。用户也可以保存自己的 Host/IKey/SKey，但签名登录仍要求服务器级 `DUO_AKEY`。
+- `INCOMPLETE_2FA_TIME_LIMIT`：密码校验成功后未完成二步验证的告警等待分钟数，默认 `3`，设为 `0` 可关闭。
+- Duo Universal Prompt（OIDC）默认使用 Secrets `DUO_HOST`、`DUO_IKEY`、`DUO_SKEY`，并要求配置公开 HTTPS `DOMAIN`。仅已有的 Traditional Prompt 集成需要设置 `DUO_USE_IFRAME=true` 和服务器级 `DUO_AKEY`；用户仍可保存自己的 Host/IKey/SKey。
 - YubiKey OTP 使用 Secrets `YUBICO_CLIENT_ID`、`YUBICO_SECRET_KEY`；可选 `YUBICO_SERVER`，默认使用 Yubico OTP 2.0 官方 HTTPS 端点。
 - 配置外部二步验证 Secrets 后，再分别开启 `VW_CSS_DUO_ENABLED`、`VW_CSS_YUBICO_ENABLED`，以在 Web Vault 中显示入口。
+- 移动端 Push Relay 默认关闭。启用时设置 `PUSH_ENABLED=true`，以 Secrets 配置 `PUSH_INSTALLATION_ID`、`PUSH_INSTALLATION_KEY`；可选 `PUSH_RELAY_URI`、`PUSH_IDENTITY_URI` 默认使用 Bitwarden 官方 HTTPS 服务。
 - `VW_CSS_LOAD_USER_CSS`：是否加载自定义 CSS（默认 `true`）
 - `VW_CSS_USER`：自定义 CSS 文本（可放到 Worker Secret，优先读取 Secret）
 

@@ -6,12 +6,15 @@ pub mod collection;
 pub mod device;
 pub mod emergency_access;
 pub mod event;
+pub mod favorite;
 pub mod folder;
 pub mod group;
 pub mod org_policy;
 pub mod organization;
 pub mod send;
 pub mod two_factor;
+pub mod two_factor_duo_context;
+pub mod two_factor_incomplete;
 pub mod user;
 
 pub use attachment::Attachment;

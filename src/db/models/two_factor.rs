@@ -777,6 +777,7 @@ pub async fn delete_all_two_factors(db: &D1Database, user_id: &str) -> Result<()
     delete_email_2fa(db, user_id).await?;
     crate::worker_runtime::webauthn::disable_webauthn(db, user_id).await?;
     delete_external_two_factor(db, user_id, None).await?;
+    super::two_factor_incomplete::TwoFactorIncomplete::delete_all_by_user(db, user_id).await?;
     Ok(())
 }
 

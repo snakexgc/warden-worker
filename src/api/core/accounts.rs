@@ -29,8 +29,6 @@ use crate::{
     extensions::notify::{self, NotifyContext, NotifyEvent},
 };
 
-const PROTECTED_ACTION_OTP_SIZE: u8 = 6;
-const PROTECTED_ACTION_OTP_REQUEST_COOLDOWN_SECONDS: i64 = 30;
 const REGISTER_ISSUER: &str = "warden-worker.register";
 const INVITE_ISSUER: &str = "warden-worker.org-invite";
 
@@ -1553,90 +1551,10 @@ pub struct SendVerificationEmailRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct VerifyOtpRequest {
-    #[serde(rename = "OTP", alias = "otp")]
-    pub otp: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct SecretVerificationRequest {
     #[serde(alias = "MasterPasswordHash")]
     pub master_password_hash: Option<String>,
     pub otp: Option<String>,
-}
-
-#[worker::send]
-pub async fn request_otp(
-    claims: Claims,
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, AppError> {
-    if !notify::is_email_webhook_configured(&state.env) {
-        return Err(AppError::BadRequest(
-            "Email verification is not configured on server".to_string(),
-        ));
-    }
-
-    let db = db::get_db(&state.env)?;
-    claims.verify_security_stamp(&db).await?;
-
-    if let Some(existing) = two_factor::get_protected_action_otp(&db, &claims.sub).await? {
-        let elapsed = Utc::now().timestamp().saturating_sub(existing.token_sent);
-        if elapsed < PROTECTED_ACTION_OTP_REQUEST_COOLDOWN_SECONDS {
-            return Err(AppError::BadRequest(format!(
-                "Please wait {} seconds before requesting another code.",
-                PROTECTED_ACTION_OTP_REQUEST_COOLDOWN_SECONDS - elapsed
-            )));
-        }
-    }
-
-    let user_row: Option<Value> = db
-        .prepare("SELECT email FROM users WHERE id = ?1")
-        .bind(&[claims.sub.clone().into()])?
-        .first(None)
-        .await
-        .map_err(|_| AppError::Database)?;
-    let email = user_row
-        .and_then(|r| {
-            r.get("email")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
-        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
-
-    let token = two_factor::generate_email_token(PROTECTED_ACTION_OTP_SIZE);
-    let otp_data = two_factor::ProtectedActionOtpData::new(token.clone());
-    let now = Utc::now().to_rfc3339();
-    two_factor::upsert_protected_action_otp(&db, &claims.sub, &otp_data, &now).await?;
-
-    notify::send_email_token_background(
-        &state.ctx,
-        state.env.clone(),
-        email,
-        token,
-        notify::EmailType::TwoFactorLogin,
-    );
-
-    Ok(Json(json!({})))
-}
-
-#[worker::send]
-pub async fn verify_otp(
-    claims: Claims,
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<VerifyOtpRequest>,
-) -> Result<Json<Value>, AppError> {
-    if !notify::is_email_webhook_configured(&state.env) {
-        return Err(AppError::BadRequest(
-            "Email verification is not configured on server".to_string(),
-        ));
-    }
-
-    let db = db::get_db(&state.env)?;
-    claims.verify_security_stamp(&db).await?;
-    two_factor::validate_protected_action_otp(&db, &claims.sub, &payload.otp, true).await?;
-
-    Ok(Json(json!({})))
 }
 
 #[worker::send]

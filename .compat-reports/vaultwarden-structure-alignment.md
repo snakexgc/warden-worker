@@ -29,10 +29,11 @@ src/
       organizations.rs
       public.rs
       sends.rs
-      two_factor/{mod.rs,duo.rs,webauthn.rs,yubikey.rs}
+      two_factor/{authenticator.rs,duo.rs,duo_oidc.rs,email.rs,mod.rs,protected_actions.rs,webauthn.rs,yubikey.rs}
     icons.rs
     identity.rs
     notifications.rs
+    push.rs
     web.rs
   db/
     mod.rs
@@ -45,12 +46,15 @@ src/
       device.rs
       emergency_access.rs
       event.rs
+      favorite.rs
       folder.rs
       group.rs
       org_policy.rs
       organization.rs
       send.rs
       two_factor.rs
+      two_factor_duo_context.rs
+      two_factor_incomplete.rs
       user.rs
   crypto/
     password.rs
@@ -85,11 +89,16 @@ src/
 | `api/core/two_factor/mod.rs` | `api/core/two_factor/mod.rs` | `worker_runtime/webauthn.rs` | 2FA 模块层级一致 |
 | `api/core/two_factor/webauthn.rs` | `api/core/two_factor/webauthn.rs` | `worker_runtime/webauthn.rs` | 端点与 Workers 协议实现分离 |
 | `api/core/two_factor/duo.rs` | `api/core/two_factor/duo.rs` | 无 | Auth API 与旧版签名流程使用 Workers fetch |
+| `api/core/two_factor/duo_oidc.rs` | `api/core/two_factor/duo_oidc.rs` | `lib.rs` Cron | Universal Prompt 使用 Workers fetch，state/nonce 存入 D1 |
+| `api/core/two_factor/authenticator.rs` | 同名文件 | 无 | TOTP 管理端点从公共模块拆出 |
+| `api/core/two_factor/email.rs` | 同名文件 | `extensions/notify/*` | Email 2FA 端点保留 Auth Request/密钥登录兼容 |
+| `api/core/two_factor/protected_actions.rs` | 同名文件 | 无 | 受保护操作 OTP 从 accounts 拆出 |
 | `api/core/two_factor/yubikey.rs` | `api/core/two_factor/yubikey.rs` | 无 | Yubico OTP 2.0 请求和响应签名校验 |
 | `api/core/mod.rs` | `api/core/mod.rs` | `meta/*` | config、domains、HIBP、alive 等由 core 统一导出 |
 | `api/identity.rs` | `api/identity.rs` | `worker_runtime/jwt.rs` | 身份端点保持同名，边缘 JWT 实现隔离 |
 | `api/icons.rs` | `api/icons.rs` | 无 | 同名职责 |
 | `api/notifications.rs` | `api/notifications.rs` | `extensions/notify/*` | 实时通知与 Webhook/Telegram 分离 |
+| `api/push.rs` | `api/push.rs` | `api/notifications.rs` | Bitwarden Push Relay 使用 Workers fetch，并复用现有实时通知调用点 |
 | `api/web.rs` | `api/web.rs` | `entry.js`、Workers Assets | 静态资源由 Cloudflare Assets 接管 |
 
 ## 模型边界
@@ -111,7 +120,7 @@ src/
 
 - Vaultwarden 使用 Rocket、SQLite/MySQL/PostgreSQL 和文件系统；本项目使用 Axum、D1、R2 和 Durable Objects，框架装配不能逐行复用。
 - `imports.rs`、`meta/*` 以及 accounts/ciphers 的子文件用于控制 Workers 单文件体积，但其公开职责由 Vaultwarden 对应主模块统一暴露。
-- `emergency_access.rs`、`public.rs`、`two_factor/duo.rs` 和 `two_factor/yubikey.rs` 已按上游文件职责补入；SSO、SCIM、Provider、SMTP 和 Push 仍不创建空实现。
+- `emergency_access.rs`、`public.rs`、完整 two-factor 子文件和 `api/push.rs` 已按上游文件职责补入；SSO、SCIM、Provider、SMTP 与服务端 admin 页面仍不创建空实现。
 - 后续同步上游时，优先比较同名主文件；任何平台差异必须进入 `extensions`、`worker_runtime` 或对应主文件的补充子模块。
 
 ## 维护约束

@@ -94,6 +94,16 @@ pub async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
         Ok(_) => {}
         Err(err) => log::error!("scheduled emergency access timeout job failed: {err}"),
     }
+    match api::core::two_factor::process_incomplete_notifications(&env).await {
+        Ok(count) if count > 0 => {
+            log::info!("scheduled incomplete two-factor notification processed {count} rows")
+        }
+        Ok(_) => {}
+        Err(err) => log::error!("scheduled incomplete two-factor notification failed: {err}"),
+    }
+    if let Err(err) = api::core::two_factor::duo_oidc::purge_duo_contexts(&env).await {
+        log::error!("scheduled Duo OIDC context cleanup failed: {err}");
+    }
     if event.cron() == "0 3 * * *" {
         match api::core::sends::purge_expired_sends(&env).await {
             Ok(count) => log::info!("scheduled cleanup purged {count} expired Sends"),
