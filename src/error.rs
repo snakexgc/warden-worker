@@ -16,6 +16,10 @@ pub enum AppError {
     #[error("Not found: {0}")]
     NotFound(String),
 
+    /// 真正需要 404 的资源缺失（对齐 Vaultwarden 中显式 `err_code!(..., NotFound)` 的端点）
+    #[error("Resource not found: {0}")]
+    ResourceNotFound(String),
+
     #[error("Invalid request: {0}")]
     BadRequest(String),
 
@@ -98,7 +102,9 @@ impl IntoResponse for AppError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Database error".to_string(),
             ),
-            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
+            // 对齐 Vaultwarden：业务 `err!` 默认 HTTP 400，`NotFound` 表示"资源不存在/不属于当前用户"类业务错误
+            AppError::NotFound(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            AppError::ResourceNotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             AppError::UnprocessableEntity(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg.clone()),
             AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),

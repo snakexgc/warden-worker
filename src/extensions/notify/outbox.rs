@@ -48,6 +48,7 @@ pub async fn enqueue_action_link(
             ActionLinkType::Registration => "registration",
             ActionLinkType::OrganizationInvite => "organization_invite",
             ActionLinkType::EmergencyAccessInvite => "emergency_access_invite",
+            ActionLinkType::DeleteAccount => "delete_account",
         },
         hex::encode(sha2::Sha256::digest(url.as_bytes()))
     );

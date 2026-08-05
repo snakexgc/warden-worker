@@ -269,6 +269,7 @@ pub enum ActionLinkType {
     Registration,
     OrganizationInvite,
     EmergencyAccessInvite,
+    DeleteAccount,
 }
 
 #[derive(Debug, Clone)]

@@ -39,6 +39,25 @@ impl PasswordOrOtpData {
         db: &worker::D1Database,
         user_id: &str,
     ) -> Result<(), AppError> {
+        self.validate_with_delete(db, user_id, true).await
+    }
+
+    /// 对齐 Vaultwarden：`get_*` 类端点使用 `delete_if_valid=false`，不消耗受保护操作 OTP，
+    /// 允许"先取 key、再以同一 OTP 激活"的上游流程。
+    pub(crate) async fn validate_get(
+        &self,
+        db: &worker::D1Database,
+        user_id: &str,
+    ) -> Result<(), AppError> {
+        self.validate_with_delete(db, user_id, false).await
+    }
+
+    async fn validate_with_delete(
+        &self,
+        db: &worker::D1Database,
+        user_id: &str,
+        delete_if_valid: bool,
+    ) -> Result<(), AppError> {
         match (&self.master_password_hash, &self.otp) {
             (Some(master_password_hash), None) => {
                 if !password::verify_user_password(db, user_id, master_password_hash).await? {
@@ -46,12 +65,12 @@ impl PasswordOrOtpData {
                         target: targets::AUTH,
                         "PasswordOrOtpData.validate: password mismatch user_id={user_id}"
                     );
-                    return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+                    return Err(AppError::BadRequest("Invalid credentials".to_string()));
                 }
                 Ok(())
             }
             (None, Some(otp)) => {
-                two_factor::validate_protected_action_otp(db, user_id, otp, true).await
+                two_factor::validate_protected_action_otp(db, user_id, otp, delete_if_valid).await
             }
             _ => Err(AppError::BadRequest("No validation provided".to_string())),
         }
@@ -197,6 +216,27 @@ pub async fn disable_twofactor(
             )));
         }
     }
+
+    // 对齐 Vaultwarden enforce_2fa_policy：移除最后一个 2FA 后，
+    // 撤销用户在启用了 Two-Factor Authentication（策略 type=0）组织中的非 Owner/Admin 成员身份
+    let remaining = two_factor::is_authenticator_enabled(&db, &claims.sub).await?
+        || two_factor::is_email_2fa_enabled(&db, &claims.sub).await?
+        || two_factor::is_external_two_factor_enabled(
+            &db,
+            &claims.sub,
+            two_factor::TWO_FACTOR_PROVIDER_DUO,
+        )
+        .await?
+        || two_factor::is_external_two_factor_enabled(
+            &db,
+            &claims.sub,
+            two_factor::TWO_FACTOR_PROVIDER_YUBIKEY,
+        )
+        .await?
+        || webauthn_runtime::is_webauthn_enabled(&db, &claims.sub).await?;
+    if !remaining {
+        enforce_2fa_policy(&db, &state.env, &claims.sub).await?;
+    }
     let provider_name = match provider_type {
         two_factor::TWO_FACTOR_PROVIDER_AUTHENTICATOR => "authenticator",
         two_factor::TWO_FACTOR_PROVIDER_EMAIL => "email",
@@ -242,7 +282,7 @@ pub async fn get_recover(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    payload.validate(&db, &claims.sub).await?;
+    payload.validate_get(&db, &claims.sub).await?;
     let code = two_factor::get_or_create_recovery_code(&db, &claims.sub).await?;
     notify::notify_background(
         &state.ctx,
@@ -284,10 +324,10 @@ pub async fn recover(
         .await
         .map_err(|_| AppError::Database)?
         .ok_or_else(|| {
-            AppError::Unauthorized("Username or password is incorrect. Try again.".to_string())
+            AppError::BadRequest("Username or password is incorrect. Try again.".to_string())
         })?;
     if !password::verify_user_password(&db, &user_id, &payload.master_password_hash).await? {
-        return Err(AppError::Unauthorized(
+        return Err(AppError::BadRequest(
             "Username or password is incorrect. Try again.".to_string(),
         ));
     }
@@ -360,4 +400,64 @@ pub async fn process_incomplete_notifications(env: &worker::Env) -> Result<usize
         }
     }
     Ok(delivered)
+}
+
+/// 对齐 Vaultwarden `enforce_2fa_policy`：
+/// 用户移除最后一个 2FA 后，撤销其在启用了 "Two-Factor Authentication"（策略 type=0）
+/// 组织中的非 Owner/Admin 成员身份，并记录组织成员撤销事件。
+const TWO_FACTOR_POLICY_REVOKE_OFFSET: i32 = 128;
+const TWO_FACTOR_POLICY_MEMBER_USER: i32 = 2;
+const TWO_FACTOR_POLICY_MEMBER_MANAGER: i32 = 3;
+
+async fn enforce_2fa_policy(
+    db: &worker::D1Database,
+    env: &worker::Env,
+    user_id: &str,
+) -> Result<(), AppError> {
+    let rows: Vec<Value> = db
+        .prepare(
+            "SELECT m.id AS membership_id, m.organization_id, m.member_type
+             FROM users_organizations m
+             JOIN org_policies p ON p.organization_id = m.organization_id
+             WHERE m.user_id = ?1 AND m.status = 2 AND p.type = 0 AND p.enabled = 1",
+        )
+        .bind(&[user_id.into()])?
+        .all()
+        .await
+        .map_err(|_| AppError::Database)?
+        .results()?;
+    for row in rows {
+        let Some(member_type) = row
+            .get("member_type")
+            .and_then(Value::as_i64)
+            .map(|value| value as i32)
+        else {
+            continue;
+        };
+        // 策略只适用于非 Owner/Admin 成员
+        if member_type != TWO_FACTOR_POLICY_MEMBER_USER
+            && member_type != TWO_FACTOR_POLICY_MEMBER_MANAGER
+        {
+            continue;
+        }
+        let Some(membership_id) = row.get("membership_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(org_id) = row.get("organization_id").and_then(Value::as_str) else {
+            continue;
+        };
+        db.prepare(
+            "UPDATE users_organizations SET status = status - ?1, updated_at = ?2 WHERE id = ?3",
+        )
+        .bind(&[
+            TWO_FACTOR_POLICY_REVOKE_OFFSET.into(),
+            db::now_rfc3339_millis().into(),
+            membership_id.into(),
+        ])?
+        .run()
+        .await
+        .map_err(|_| AppError::Database)?;
+        super::events::log_event(db, env, 1511, Some(user_id), Some(org_id), None, user_id).await?;
+    }
+    Ok(())
 }

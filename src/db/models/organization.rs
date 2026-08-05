@@ -34,7 +34,7 @@ pub struct OrganizationApiKey {
 }
 
 impl Organization {
-    pub fn to_json(&self, events_enabled: bool, groups_enabled: bool) -> Value {
+    pub fn to_json(&self, events_enabled: bool, groups_enabled: bool, mail_enabled: bool) -> Value {
         json!({
             "id": self.id,
             "name": self.name,
@@ -62,7 +62,7 @@ impl Organization {
             "usePam": false,
             "usePhishingBlocker": false,
             "hasPublicAndPrivateKeys": self.private_key.is_some() && self.public_key.is_some(),
-            "useResetPassword": true,
+            "useResetPassword": mail_enabled,
             "allowAdminAccessToAllCollectionItems": true,
             "limitCollectionCreation": true,
             "limitCollectionDeletion": true,
@@ -136,6 +136,7 @@ impl Membership {
         org: &Organization,
         events_enabled: bool,
         groups_enabled: bool,
+        mail_enabled: bool,
     ) -> Value {
         let client_type = self.client_type();
         let custom_full_access = client_type == 4 && self.access_all != 0;
@@ -174,7 +175,7 @@ impl Membership {
             "selfHost": true,
             "hasPublicAndPrivateKeys": org.private_key.is_some() && org.public_key.is_some(),
             "resetPasswordEnrolled": self.reset_password_key.is_some(),
-            "useResetPassword": true,
+            "useResetPassword": mail_enabled,
             "ssoBound": false,
             "useSso": false,
             "useKeyConnector": false,
@@ -263,7 +264,7 @@ mod tests {
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         };
-        let value = membership.profile_json(&org, false, false);
+        let value = membership.profile_json(&org, false, false, false);
         assert_eq!(value["organizationUserId"], "membership");
         assert_eq!(value["object"], "profileOrganization");
         assert_eq!(value["type"], MEMBER_TYPE_OWNER);

@@ -16,6 +16,11 @@ pub async fn get_icon(
 ) -> Result<Response, AppError> {
     let domain = path.strip_suffix("/icon.png").unwrap_or(&path).to_string();
 
+    // 对齐 Vaultwarden get_valid_host：只允许合法主机名字符，拒绝路径穿越/注入
+    if !valid_icon_domain(&domain) {
+        return Err(AppError::BadRequest("Invalid icon domain".to_string()));
+    }
+
     let target_url = format!("https://vault.bitwarden.com/icons/{}/icon.png", domain);
 
     let request =
@@ -51,4 +56,14 @@ pub async fn get_icon(
     );
 
     Ok(response)
+}
+
+/// 校验图标域名是否为一个合法的主机名（仅字母数字、点、连字符）。
+fn valid_icon_domain(domain: &str) -> bool {
+    if domain.is_empty() || domain.len() > 253 || domain.starts_with('.') || domain.ends_with('.') {
+        return false;
+    }
+    domain
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
 }

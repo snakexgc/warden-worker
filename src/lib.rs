@@ -109,6 +109,14 @@ pub async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
             Ok(count) => log::info!("scheduled cleanup purged {count} expired Sends"),
             Err(err) => log::error!("scheduled expired Send cleanup failed: {err}"),
         }
+        match api::core::ciphers::purge_trashed_ciphers(&env).await {
+            Ok(count) => log::info!("scheduled cleanup purged {count} trashed ciphers"),
+            Err(err) => log::error!("scheduled trashed cipher cleanup failed: {err}"),
+        }
+        match api::core::events::cleanup_old_events(&env).await {
+            Ok(count) => log::info!("scheduled cleanup removed {count} old audit events"),
+            Err(err) => log::error!("scheduled audit event cleanup failed: {err}"),
+        }
         if let Err(err) = extensions::notify::outbox::purge_expired(&env).await {
             log::error!("scheduled notification/token cleanup failed: {err}");
         }

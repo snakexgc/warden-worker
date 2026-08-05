@@ -40,7 +40,7 @@ pub async fn config(
           "api": format!("{domain}/api"),
           "identity": format!("{domain}/identity"),
           "notifications": format!("{domain}/notifications"),
-          "sso": null,
+          "sso": "",
           "cloudRegion": null,
         },
         "push": {
@@ -82,7 +82,8 @@ pub async fn apple_app_site_association(State(_state): State<Arc<AppState>>) -> 
 
 #[worker::send]
 pub async fn now(State(_state): State<Arc<AppState>>) -> Json<String> {
-    Json(Utc::now().to_rfc3339())
+    // 对齐 Vaultwarden format_date：固定微秒 + Z
+    Json(Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string())
 }
 
 #[worker::send]
@@ -93,7 +94,9 @@ pub async fn alive(State(state): State<Arc<AppState>>) -> Result<Json<String>, A
         .await
         .map_err(|_| AppError::Database)?
         .ok_or(AppError::Database)?;
-    Ok(Json(Utc::now().to_rfc3339()))
+    Ok(Json(
+        Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string(),
+    ))
 }
 
 #[worker::send]

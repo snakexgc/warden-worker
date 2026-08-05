@@ -224,7 +224,7 @@ pub async fn clear_device_token(
                 .map(str::to_string)
         });
     db.prepare(
-        "UPDATE devices SET push_token = NULL, updated_at = ?1
+        "UPDATE devices SET push_token = NULL, refresh_token = NULL, updated_at = ?1
          WHERE user_id = ?2 AND device_identifier = ?3",
     )
     .bind(&[

@@ -165,10 +165,10 @@ pub struct RotateUserAccountKeysRequest {
 #[serde(rename_all = "camelCase")]
 struct RotateAccountUnlockData {
     #[serde(default)]
-    emergency_access_unlock_data: Vec<Value>,
+    emergency_access_unlock_data: serde_json::Map<String, Value>,
     master_password_unlock_data: RotateMasterPasswordUnlockData,
     #[serde(default)]
-    organization_account_recovery_unlock_data: Vec<Value>,
+    organization_account_recovery_unlock_data: serde_json::Map<String, Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -604,9 +604,9 @@ pub async fn register(
         ensure_email_allowed(&state.env, &email)?;
     }
 
-    let signup_verification_required = env_bool(&state.env, "SIGNUPS_VERIFY", true);
+    let signup_verification_required = env_bool(&state.env, "SIGNUPS_VERIFY", false);
     if signup_verification_required && invite_claims.is_none() && verification.is_none() {
-        return Err(AppError::Unauthorized(
+        return Err(AppError::BadRequest(
             "Email verification token is required".to_string(),
         ));
     }
@@ -769,7 +769,7 @@ fn ensure_email_allowed(env: &worker::Env, email: &str) -> Result<(), AppError> 
     {
         Ok(())
     } else {
-        Err(AppError::Unauthorized("Not allowed to signup".to_string()))
+        Err(AppError::BadRequest("Not allowed to signup".to_string()))
     }
 }
 
@@ -793,10 +793,10 @@ async fn validate_registration_token(
         &DecodingKey::from_secret(state.jwt_keys.access_secret.as_ref()),
         &Validation::default(),
     )
-    .map_err(|_| AppError::Unauthorized("Invalid email verification token".to_string()))?
+    .map_err(|_| AppError::BadRequest("Invalid email verification token".to_string()))?
     .claims;
     if claims.iss != REGISTER_ISSUER || !claims.verified || claims.sub != email {
-        return Err(AppError::Unauthorized(
+        return Err(AppError::BadRequest(
             "Email verification token does not match email".to_string(),
         ));
     }
@@ -812,7 +812,7 @@ async fn validate_registration_token(
         .await
         .map_err(|_| AppError::Database)?;
     if stored.is_none() {
-        return Err(AppError::Unauthorized(
+        return Err(AppError::BadRequest(
             "Email verification token is expired or already used".to_string(),
         ));
     }
@@ -844,10 +844,10 @@ async fn validate_org_invite_registration(
         &DecodingKey::from_secret(state.jwt_keys.access_secret.as_ref()),
         &Validation::default(),
     )
-    .map_err(|_| AppError::Unauthorized("Invalid organization invitation".to_string()))?
+    .map_err(|_| AppError::BadRequest("Invalid organization invitation".to_string()))?
     .claims;
     if claims.iss != INVITE_ISSUER || claims.email != email || claims.member_id != membership_id {
-        return Err(AppError::Unauthorized(
+        return Err(AppError::BadRequest(
             "Organization invitation does not match registration".to_string(),
         ));
     }
@@ -870,7 +870,7 @@ async fn validate_org_invite_registration(
         .and_then(Value::as_str)
         != Some(email)
     {
-        return Err(AppError::Unauthorized(
+        return Err(AppError::BadRequest(
             "Organization invitation is no longer valid".to_string(),
         ));
     }
@@ -905,7 +905,7 @@ pub async fn change_master_password(
     let user: User = serde_json::from_value(user).map_err(|_| AppError::Internal)?;
 
     if !password::verify_user_password(&db, &user.id, &payload.master_password_hash).await? {
-        return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+        return Err(AppError::BadRequest("Invalid credentials".to_string()));
     }
 
     let now = Utc::now().to_rfc3339();
@@ -954,6 +954,8 @@ pub async fn change_master_password(
     .run()
     .await
     .map_err(|_| AppError::Database)?;
+
+    super::events::log_user_event(&db, &state.env, 1001, &claims.sub).await?;
 
     crate::api::notifications::publish_user_update_background(
         &state.ctx,
@@ -1013,7 +1015,7 @@ pub async fn change_email(
     let user: User = serde_json::from_value(user).map_err(|_| AppError::Internal)?;
 
     if !password::verify_user_password(&db, &user.id, &payload.master_password_hash).await? {
-        return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+        return Err(AppError::BadRequest("Invalid credentials".to_string()));
     }
 
     if user.email_new.as_deref() != Some(new_email.as_str()) {
@@ -1117,7 +1119,7 @@ pub async fn post_kdf(
     };
 
     if !password::verify_user_password(&db, &user.id, provided_old_hash).await? {
-        return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+        return Err(AppError::BadRequest("Invalid credentials".to_string()));
     }
 
     let (
@@ -1254,7 +1256,7 @@ pub async fn rotate_user_account_keys(
     )
     .await?
     {
-        return Err(AppError::Unauthorized("Invalid password".to_string()));
+        return Err(AppError::BadRequest("Invalid password".to_string()));
     }
 
     let user: User = db
@@ -1280,19 +1282,62 @@ pub async fn rotate_user_account_keys(
             "Changing the asymmetric keypair is not possible during key rotation".to_string(),
         ));
     }
-    if !payload
+    // 对齐 Vaultwarden：key rotation 时同步重加密紧急访问 key 与组织恢复（reset password）key
+    for (emergency_id, data) in &payload.account_unlock_data.emergency_access_unlock_data {
+        let key_encrypted = data
+            .get("keyEncrypted")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AppError::BadRequest("keyEncrypted is required".to_string()))?;
+        let owned: Option<String> = db
+            .prepare("SELECT id FROM emergency_access WHERE id = ?1 AND grantor_uuid = ?2")
+            .bind(&[emergency_id.clone().into(), claims.sub.clone().into()])?
+            .first(Some("id"))
+            .await
+            .map_err(|_| AppError::Database)?;
+        if owned.is_none() {
+            return Err(AppError::BadRequest(
+                "Emergency access doesn't exist or is not owned by the user".to_string(),
+            ));
+        }
+        db.prepare("UPDATE emergency_access SET key_encrypted = ?1 WHERE id = ?2")
+            .bind(&[key_encrypted.into(), emergency_id.clone().into()])?
+            .run()
+            .await
+            .map_err(|_| AppError::Database)?;
+    }
+    for (org_id, data) in &payload
         .account_unlock_data
-        .emergency_access_unlock_data
-        .is_empty()
-        || !payload
-            .account_unlock_data
-            .organization_account_recovery_unlock_data
-            .is_empty()
+        .organization_account_recovery_unlock_data
     {
-        return Err(AppError::BadRequest(
-            "Organization recovery and emergency access are not available in this personal vault"
-                .to_string(),
-        ));
+        let reset_password_key = data
+            .get("resetPasswordKey")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AppError::BadRequest("resetPasswordKey is required".to_string()))?;
+        let owned: Option<String> = db
+            .prepare(
+                "SELECT id FROM users_organizations WHERE organization_id = ?1 AND user_id = ?2",
+            )
+            .bind(&[org_id.clone().into(), claims.sub.clone().into()])?
+            .first(Some("id"))
+            .await
+            .map_err(|_| AppError::Database)?;
+        if owned.is_none() {
+            return Err(AppError::BadRequest(
+                "User is not part of organization".to_string(),
+            ));
+        }
+        db.prepare(
+            "UPDATE users_organizations SET reset_password_key = ?1
+             WHERE organization_id = ?2 AND user_id = ?3",
+        )
+        .bind(&[
+            reset_password_key.into(),
+            org_id.clone().into(),
+            claims.sub.clone().into(),
+        ])?
+        .run()
+        .await
+        .map_err(|_| AppError::Database)?;
     }
 
     let existing_ciphers = owned_ids(
@@ -1707,10 +1752,10 @@ pub async fn registration_verification_clicked(
         &DecodingKey::from_secret(state.jwt_keys.access_secret.as_bytes()),
         &Validation::default(),
     )
-    .map_err(|_| AppError::Unauthorized("Invalid email verification token".to_string()))?;
+    .map_err(|_| AppError::BadRequest("Invalid email verification token".to_string()))?;
     let email = crate::auth::normalize_email(&payload.email);
     if token.claims.iss != REGISTER_ISSUER || !token.claims.verified || token.claims.sub != email {
-        return Err(AppError::Unauthorized("Email does not match".to_string()));
+        return Err(AppError::BadRequest("Email does not match".to_string()));
     }
     let db = db::get_db(&state.env)?;
     let valid: Option<Value> = db
@@ -1727,7 +1772,7 @@ pub async fn registration_verification_clicked(
         .await
         .map_err(|_| AppError::Database)?;
     if valid.is_none() {
-        return Err(AppError::Unauthorized(
+        return Err(AppError::BadRequest(
             "Email verification token is expired or already used".to_string(),
         ));
     }
@@ -1755,30 +1800,54 @@ pub async fn post_delete_recover(
 ) -> Result<Json<Value>, AppError> {
     crate::api::identity::enforce_unauthenticated_rate_limit(&state, &headers).await?;
 
-    if notify::is_email_webhook_configured(&state.env) {
-        let email = data.email.trim().to_lowercase();
-        if !email.is_empty() {
-            let db = db::get_db(&state.env)?;
-            let user: Option<Value> = db
-                .prepare("SELECT id FROM users WHERE email = ?1")
-                .bind(&[email.into()])?
-                .first(None)
-                .await
-                .map_err(|_| AppError::Database)?;
-
-            if let Some(user) = user
-                && let Some(user_id) = user.get("id").and_then(|v| v.as_str())
-            {
-                log::info!("Delete recover requested for user {user_id}");
-            }
-        }
-
-        Ok(Json(json!({})))
-    } else {
-        Err(AppError::BadRequest(
+    if !notify::is_email_webhook_configured(&state.env) {
+        return Err(AppError::BadRequest(
             "Please contact the administrator to delete your account".to_string(),
-        ))
+        ));
     }
+    let email = data.email.trim().to_lowercase();
+    if email.is_empty() {
+        return Ok(Json(json!({})));
+    }
+    let db = db::get_db(&state.env)?;
+    let user: Option<Value> = db
+        .prepare("SELECT id FROM users WHERE email = ?1")
+        .bind(&[email.clone().into()])?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?;
+
+    // 对齐 Vaultwarden：向注册邮箱投递删除恢复链接
+    if let Some(user) = user
+        && let Some(user_id) = user.get("id").and_then(|v| v.as_str())
+    {
+        let now = Utc::now();
+        let claims = crate::auth::BasicJwtClaims {
+            nbf: now.timestamp() as usize,
+            exp: (now + chrono::Duration::hours(6)).timestamp() as usize,
+            iss: "warden-worker.delete-recover".to_string(),
+            sub: user_id.to_string(),
+        };
+        let token = jsonwebtoken::encode(
+            &jsonwebtoken::Header::default(),
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(state.jwt_keys.access_secret.as_ref()),
+        )
+        .map_err(|_| AppError::Internal)?;
+        let url = state.public_url(&format!("/#/recover-delete?userId={user_id}&token={token}"));
+        let outbox_id = notify::enqueue_action_link(
+            &state.env,
+            &email,
+            &url,
+            notify::ActionLinkType::DeleteAccount,
+            None,
+        )
+        .await?;
+        notify::deliver_outbox_background(&state.ctx, state.env.clone(), outbox_id);
+        log::info!("Delete recover requested for user {user_id}");
+    }
+
+    Ok(Json(json!({})))
 }
 
 #[worker::send]
@@ -1856,7 +1925,7 @@ async fn verify_user_password(
     password_hash: &str,
 ) -> Result<(), AppError> {
     if !password::verify_user_password(db, user_id, password_hash).await? {
-        return Err(AppError::Unauthorized("Invalid password".to_string()));
+        return Err(AppError::BadRequest("Invalid password".to_string()));
     }
 
     Ok(())
@@ -1946,12 +2015,12 @@ pub async fn get_public_key(
         .first(None)
         .await
         .map_err(|_| AppError::Database)?;
-    let user = user.ok_or_else(|| AppError::NotFound("User doesn't exist".to_string()))?;
+    let user = user.ok_or_else(|| AppError::ResourceNotFound("User doesn't exist".to_string()))?;
     let public_key = user
         .get("public_key")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| AppError::NotFound("User has no public_key".to_string()))?;
+        .ok_or_else(|| AppError::ResourceNotFound("User has no public_key".to_string()))?;
     Ok(Json(json!({
         "userId": user.get("id").cloned().unwrap_or(Value::Null),
         "publicKey": public_key,
@@ -2125,7 +2194,7 @@ pub async fn post_email_token(
     let new_email = payload.new_email.to_lowercase();
 
     if !password::verify_user_password(&db, &claims.sub, &payload.master_password_hash).await? {
-        return Err(AppError::Unauthorized("Invalid password".to_string()));
+        return Err(AppError::BadRequest("Invalid password".to_string()));
     }
 
     let existing: Option<Value> = db

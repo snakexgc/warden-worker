@@ -490,7 +490,7 @@ pub(crate) async fn member_has_full_access(
     member_has_group_full_access(db, member).await
 }
 
-fn require_owner(member: &Membership) -> Result<(), AppError> {
+pub(crate) fn require_owner(member: &Membership) -> Result<(), AppError> {
     require_confirmed(member)?;
     if member.is_owner() {
         Ok(())
@@ -503,7 +503,8 @@ fn require_owner(member: &Membership) -> Result<(), AppError> {
 
 fn require_collection_manager(member: &Membership) -> Result<(), AppError> {
     require_confirmed(member)?;
-    if member.is_admin() || (member.member_type == MEMBER_TYPE_MANAGER && member.access_all != 0) {
+    // 对齐 Vaultwarden ManagerHeadersLoose：Manager/Admin/Owner 均可，不要求 access_all
+    if member.member_type != MEMBER_TYPE_USER {
         Ok(())
     } else {
         Err(AppError::Forbidden(
@@ -559,7 +560,13 @@ pub async fn get_organizations(
     let organizations = rows
         .into_iter()
         .filter_map(|row| serde_json::from_value::<Organization>(row).ok())
-        .map(|org| org.to_json(events_enabled(&state.env), groups_enabled(&state.env)))
+        .map(|org| {
+            org.to_json(
+                events_enabled(&state.env),
+                groups_enabled(&state.env),
+                notify::is_email_webhook_configured(&state.env),
+            )
+        })
         .collect();
     Ok(Json(Value::Array(organizations)))
 }
@@ -585,6 +592,7 @@ pub async fn create_organization(
     let _ = data.plan_type;
     let now = db::now_rfc3339_millis();
     let org_id = Uuid::new_v4().to_string();
+    let org_id_for_event = org_id.clone();
     let member_id = Uuid::new_v4().to_string();
     let collection_id = Uuid::new_v4().to_string();
     let (private_key, public_key) = data
@@ -648,9 +656,21 @@ pub async fn create_organization(
     .await
     .map_err(|_| AppError::Database)?;
 
+    super::events::log_event(
+        &db,
+        &state.env,
+        1600,
+        None,
+        Some(&org_id_for_event),
+        None,
+        &claims.sub,
+    )
+    .await?;
+
     Ok(Json(org.to_json(
         events_enabled(&state.env),
         groups_enabled(&state.env),
+        notify::is_email_webhook_configured(&state.env),
     )))
 }
 
@@ -669,6 +689,7 @@ pub async fn get_organization(
     Ok(Json(org.to_json(
         events_enabled(&state.env),
         groups_enabled(&state.env),
+        notify::is_email_webhook_configured(&state.env),
     )))
 }
 
@@ -704,9 +725,20 @@ pub async fn update_organization(
     .map_err(|_| AppError::Database)?;
     touch_organization_members(&db, &org_id).await?;
     let org = load_organization(&db, &org_id).await?;
+    super::events::log_event(
+        &db,
+        &state.env,
+        1600,
+        None,
+        Some(&org_id),
+        None,
+        &claims.sub,
+    )
+    .await?;
     Ok(Json(org.to_json(
         events_enabled(&state.env),
         groups_enabled(&state.env),
+        notify::is_email_webhook_configured(&state.env),
     )))
 }
 
@@ -740,7 +772,35 @@ pub async fn set_organization_keys(
     .run()
     .await
     .map_err(|_| AppError::Database)?;
-    touch_organization_members(&db, &org_id).await?;
+    let revision = touch_organization_members(&db, &org_id).await?;
+    // 对齐 Vaultwarden：组织密钥变更后向全部已确认成员广播 SyncOrgKeys
+    let members: Vec<Value> = db
+        .prepare(
+            "SELECT user_id FROM users_organizations
+             WHERE organization_id = ?1 AND status = 2",
+        )
+        .bind(&[org_id.clone().into()])?
+        .all()
+        .await
+        .map_err(|_| AppError::Database)?
+        .results()?;
+    for member in members {
+        let Some(user_id) = member.get("user_id").and_then(Value::as_str) else {
+            continue;
+        };
+        notifications::publish_user_update_background(
+            &state.ctx,
+            state.env.clone(),
+            UpdateType::SyncOrgKeys,
+            user_id.to_string(),
+            revision.clone(),
+            if user_id == claims.sub {
+                claims.device.clone()
+            } else {
+                None
+            },
+        );
+    }
     Ok(Json(json!({
         "object": "organizationKeys",
         "publicKey": data.public_key,
@@ -875,14 +935,25 @@ pub async fn delete_organization(
         .as_deref()
         .ok_or_else(|| AppError::BadRequest("masterPasswordHash is required".to_string()))?;
     if !password::verify_user_password(&db, &claims.sub, master_password_hash).await? {
-        return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+        return Err(AppError::BadRequest("Invalid credentials".to_string()));
     }
+    let org_id_for_event = org_id.clone();
     db.prepare("DELETE FROM organizations WHERE id = ?1")
         .bind(&[org_id.into()])?
         .run()
         .await
         .map_err(|_| AppError::Database)?;
     db::update_user_revision(&db, &claims.sub).await?;
+    super::events::log_event(
+        &db,
+        &state.env,
+        1600,
+        None,
+        Some(&org_id_for_event),
+        None,
+        &claims.sub,
+    )
+    .await?;
     Ok(Json(json!({})))
 }
 
@@ -1022,6 +1093,16 @@ pub async fn leave_organization(
     require_confirmed(&member)?;
     delete_membership_preserving_owner(&db, &org_id, &member.id).await?;
     db::update_user_revision(&db, &claims.sub).await?;
+    super::events::log_event(
+        &db,
+        &state.env,
+        1516,
+        Some(&claims.sub),
+        Some(&org_id),
+        None,
+        &claims.sub,
+    )
+    .await?;
     Ok(Json(json!({})))
 }
 
@@ -1311,6 +1392,16 @@ pub async fn create_collection(
     }
     db.batch(statements).await.map_err(|_| AppError::Database)?;
     touch_organization_members(&db, &org_id).await?;
+    super::events::log_event(
+        &db,
+        &state.env,
+        1300,
+        None,
+        Some(&org_id),
+        None,
+        &claims.sub,
+    )
+    .await?;
     Ok(Json(collection.to_json()))
 }
 
@@ -1438,6 +1529,16 @@ pub async fn update_collection(
     }
     db.batch(statements).await.map_err(|_| AppError::Database)?;
     touch_organization_members(&db, &org_id).await?;
+    super::events::log_event(
+        &db,
+        &state.env,
+        1301,
+        None,
+        Some(&org_id),
+        None,
+        &claims.sub,
+    )
+    .await?;
     let collection = Collection {
         id: collection_id,
         organization_id: org_id,
@@ -1467,6 +1568,16 @@ pub async fn delete_collection(
         .await
         .map_err(|_| AppError::Database)?;
     touch_organization_members(&db, &org_id).await?;
+    super::events::log_event(
+        &db,
+        &state.env,
+        1302,
+        None,
+        Some(&org_id),
+        None,
+        &claims.sub,
+    )
+    .await?;
     Ok(Json(json!({})))
 }
 
@@ -1887,6 +1998,16 @@ pub async fn edit_member(
     }
     db.batch(statements).await.map_err(|_| AppError::Database)?;
     touch_organization_members(&db, &org_id).await?;
+    super::events::log_event(
+        &db,
+        &state.env,
+        1502,
+        Some(&target.user_id),
+        Some(&org_id),
+        None,
+        &claims.sub,
+    )
+    .await?;
     Ok(Json(json!({})))
 }
 
@@ -2163,6 +2284,16 @@ pub async fn invite_members(
             );
         }
         db.batch(statements).await.map_err(|_| AppError::Database)?;
+        super::events::log_event(
+            &db,
+            &state.env,
+            1500,
+            None,
+            Some(&org_id),
+            None,
+            &claims.sub,
+        )
+        .await?;
         send_invite_link(
             &state,
             &org,
@@ -2289,7 +2420,7 @@ pub async fn accept_invite(
         &DecodingKey::from_secret(state.jwt_keys.access_secret.as_ref()),
         &Validation::default(),
     )
-    .map_err(|_| AppError::Unauthorized("Invalid organization invitation".to_string()))?
+    .map_err(|_| AppError::BadRequest("Invalid organization invitation".to_string()))?
     .claims;
     if invite.iss != INVITE_ISSUER
         || invite.email != claims.email
@@ -2297,7 +2428,7 @@ pub async fn accept_invite(
         || invite.org_id != org_id
         || invite.member_id != member_id
     {
-        return Err(AppError::Unauthorized(
+        return Err(AppError::BadRequest(
             "Organization invitation does not match the current account".to_string(),
         ));
     }
@@ -2383,6 +2514,16 @@ pub async fn accept_invite(
         .await
         .map_err(|_| AppError::Database)?;
     db::update_user_revision(&db, &claims.sub).await?;
+    super::events::log_event(
+        &db,
+        &state.env,
+        1501,
+        Some(&claims.sub),
+        Some(&org_id),
+        None,
+        &claims.sub,
+    )
+    .await?;
     Ok(Json(json!({})))
 }
 
@@ -2398,8 +2539,19 @@ pub async fn confirm_invite(
     claims.verify_security_stamp(&db).await?;
     let actor = load_membership(&db, &claims.sub, &org_id).await?;
     require_admin(&actor)?;
+    let target_user_id = load_member_user(&db, &org_id, &member_id).await?.user_id;
     confirm_invite_impl(&db, &actor, &org_id, &member_id, data.key).await?;
     touch_organization_members(&db, &org_id).await?;
+    super::events::log_event(
+        &db,
+        &state.env,
+        1501,
+        Some(&target_user_id),
+        Some(&org_id),
+        None,
+        &claims.sub,
+    )
+    .await?;
     Ok(Json(json!({})))
 }
 
@@ -2561,8 +2713,19 @@ pub async fn revoke_member(
     claims.verify_security_stamp(&db).await?;
     let actor = load_membership(&db, &claims.sub, &org_id).await?;
     require_admin(&actor)?;
+    let target = load_member_user(&db, &org_id, &member_id).await?;
     revoke_member_impl(&db, &actor, &org_id, &member_id).await?;
     touch_organization_members(&db, &org_id).await?;
+    super::events::log_event(
+        &db,
+        &state.env,
+        1511,
+        Some(&target.user_id),
+        Some(&org_id),
+        None,
+        &claims.sub,
+    )
+    .await?;
     Ok(Json(json!({})))
 }
 
@@ -2638,8 +2801,19 @@ pub async fn restore_member(
     claims.verify_security_stamp(&db).await?;
     let actor = load_membership(&db, &claims.sub, &org_id).await?;
     require_admin(&actor)?;
+    let target = load_member_user(&db, &org_id, &member_id).await?;
     restore_member_impl(&db, &actor, &org_id, &member_id).await?;
     touch_organization_members(&db, &org_id).await?;
+    super::events::log_event(
+        &db,
+        &state.env,
+        1512,
+        Some(&target.user_id),
+        Some(&org_id),
+        None,
+        &claims.sub,
+    )
+    .await?;
     Ok(Json(json!({})))
 }
 
@@ -2741,6 +2915,16 @@ pub async fn delete_member(
     delete_membership_preserving_owner(&db, &org_id, &member_id).await?;
     db::update_user_revision(&db, &target.user_id).await?;
     touch_organization_members(&db, &org_id).await?;
+    super::events::log_event(
+        &db,
+        &state.env,
+        1503,
+        Some(&target.user_id),
+        Some(&org_id),
+        None,
+        &claims.sub,
+    )
+    .await?;
     Ok(Json(json!({})))
 }
 
@@ -2772,6 +2956,16 @@ pub async fn bulk_delete_members(
             }
             delete_membership_preserving_owner(&db, &org_id, &member_id).await?;
             db::update_user_revision(&db, &target.user_id).await?;
+            super::events::log_event(
+                &db,
+                &state.env,
+                1503,
+                Some(&target.user_id),
+                Some(&org_id),
+                None,
+                &claims.sub,
+            )
+            .await?;
             Ok::<(), AppError>(())
         }
         .await;
@@ -3211,6 +3405,16 @@ pub async fn create_group(
     statements.extend(group_relation_statements(&db, &group.id, &request)?);
     db.batch(statements).await.map_err(|_| AppError::Database)?;
     touch_organization_members(&db, &org_id).await?;
+    super::events::log_event(
+        &db,
+        &state.env,
+        1400,
+        None,
+        Some(&org_id),
+        None,
+        &claims.sub,
+    )
+    .await?;
     Ok(Json(group.to_json()))
 }
 
@@ -3285,6 +3489,16 @@ pub async fn update_group(
     statements.extend(group_relation_statements(&db, &group.id, &request)?);
     db.batch(statements).await.map_err(|_| AppError::Database)?;
     touch_organization_members(&db, &org_id).await?;
+    super::events::log_event(
+        &db,
+        &state.env,
+        1401,
+        None,
+        Some(&org_id),
+        None,
+        &claims.sub,
+    )
+    .await?;
     Ok(Json(group.to_json()))
 }
 
@@ -3306,6 +3520,16 @@ pub async fn delete_group(
         .await
         .map_err(|_| AppError::Database)?;
     touch_organization_members(&db, &org_id).await?;
+    super::events::log_event(
+        &db,
+        &state.env,
+        1402,
+        None,
+        Some(&org_id),
+        None,
+        &claims.sub,
+    )
+    .await?;
     Ok(Json(json!({})))
 }
 
@@ -3400,6 +3624,16 @@ pub async fn put_group_members(
     statements.extend(group_relation_statements(&db, &group_id, &request)?);
     db.batch(statements).await.map_err(|_| AppError::Database)?;
     touch_organization_members(&db, &org_id).await?;
+    super::events::log_event(
+        &db,
+        &state.env,
+        1504,
+        None,
+        Some(&org_id),
+        None,
+        &claims.sub,
+    )
+    .await?;
     Ok(Json(json!({})))
 }
 
@@ -3465,10 +3699,10 @@ pub async fn list_policies_by_invite_token(
         &DecodingKey::from_secret(state.jwt_keys.access_secret.as_ref()),
         &Validation::default(),
     )
-    .map_err(|_| AppError::Unauthorized("Invalid organization invitation".to_string()))?
+    .map_err(|_| AppError::BadRequest("Invalid organization invitation".to_string()))?
     .claims;
     if invite.iss != INVITE_ISSUER || invite.org_id != org_id {
-        return Err(AppError::Unauthorized(
+        return Err(AppError::BadRequest(
             "Organization invitation does not match the requested organization".to_string(),
         ));
     }
@@ -3666,6 +3900,16 @@ pub async fn put_policy(
     .await
     .map_err(|_| AppError::Database)?;
     touch_organization_members(&db, &org_id).await?;
+    super::events::log_event(
+        &db,
+        &state.env,
+        1700,
+        None,
+        Some(&org_id),
+        None,
+        &claims.sub,
+    )
+    .await?;
     Ok(Json(policy.to_json()))
 }
 
@@ -3848,7 +4092,12 @@ pub(crate) async fn profile_organizations(
                 .unwrap_or_default()
                 .to_string(),
         };
-        output.push(membership.profile_json(&org, events_enabled(env), groups_enabled(env)));
+        output.push(membership.profile_json(
+            &org,
+            events_enabled(env),
+            groups_enabled(env),
+            notify::is_email_webhook_configured(env),
+        ));
     }
     Ok(output)
 }

@@ -65,7 +65,7 @@ pub async fn get_email(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    payload.validate(&db, &claims.sub).await?;
+    payload.validate_get(&db, &claims.sub).await?;
 
     let (enabled, email) = match two_factor::get_email_2fa(&db, &claims.sub).await? {
         Some((enabled, data)) => {
@@ -239,7 +239,7 @@ pub async fn send_email_login(
         .first::<String>(Some("user_id"))
         .await
         .map_err(|_| AppError::Database)?
-        .ok_or_else(|| AppError::Unauthorized("Username or password is incorrect".to_string()))?
+        .ok_or_else(|| AppError::BadRequest("Username or password is incorrect".to_string()))?
     };
     issue_email_login_token(&db, &state, &user_id).await?;
     Ok(Json(json!({})))
@@ -261,7 +261,7 @@ async fn authenticate_email_request(
         .first::<String>(Some("id"))
         .await
         .map_err(|_| AppError::Database)?
-        .ok_or_else(|| AppError::Unauthorized("Username or password is incorrect".to_string()))?;
+        .ok_or_else(|| AppError::BadRequest("Username or password is incorrect".to_string()))?;
 
     if let Some(master_password_hash) = payload
         .master_password_hash
@@ -269,7 +269,7 @@ async fn authenticate_email_request(
         .filter(|hash| !hash.is_empty())
     {
         if !password::verify_user_password(db, &user_id, master_password_hash).await? {
-            return Err(AppError::Unauthorized(
+            return Err(AppError::BadRequest(
                 "Username or password is incorrect".to_string(),
             ));
         }
@@ -285,7 +285,7 @@ async fn authenticate_email_request(
         .auth_request_access_code
         .as_deref()
         .filter(|code| !code.is_empty())
-        .ok_or_else(|| AppError::Unauthorized("AuthRequest doesn't exist".to_string()))?;
+        .ok_or_else(|| AppError::BadRequest("AuthRequest doesn't exist".to_string()))?;
     auth_request::purge_expired(db).await?;
     let request: Value = db
         .prepare(
@@ -296,13 +296,13 @@ async fn authenticate_email_request(
         .first(None)
         .await
         .map_err(|_| AppError::Database)?
-        .ok_or_else(|| AppError::Unauthorized("AuthRequest doesn't exist".to_string()))?;
+        .ok_or_else(|| AppError::BadRequest("AuthRequest doesn't exist".to_string()))?;
     if request
         .get("authentication_date")
         .and_then(Value::as_str)
         .is_some()
     {
-        return Err(AppError::Unauthorized(
+        return Err(AppError::BadRequest(
             "AuthRequest doesn't exist".to_string(),
         ));
     }
@@ -328,7 +328,7 @@ async fn authenticate_email_request(
         || crate::api::identity::client_ip_from_headers(headers) != expected_ip
         || !constant_time_eq(expected_hash.as_bytes(), actual_hash.as_bytes())
     {
-        return Err(AppError::Unauthorized(
+        return Err(AppError::BadRequest(
             "AuthRequest doesn't exist".to_string(),
         ));
     }

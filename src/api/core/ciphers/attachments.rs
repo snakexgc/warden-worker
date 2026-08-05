@@ -271,6 +271,16 @@ pub async fn create_attachment_v2(
 
     let mut cipher: Cipher = cipher_db.into();
     enrich_cipher(&db, &state, &mut cipher).await?;
+    super::super::events::log_event(
+        &db,
+        &state.env,
+        1103,
+        None,
+        cipher.organization_id.as_deref(),
+        Some(&cipher_id),
+        &claims.sub,
+    )
+    .await?;
     let response_key = if payload.admin_request.unwrap_or(false) {
         "cipherMiniResponse"
     } else {
@@ -419,6 +429,16 @@ pub async fn create_attachment_legacy(
     .await?
     .into();
     enrich_cipher(&db, &state, &mut cipher).await?;
+    super::super::events::log_event(
+        &db,
+        &state.env,
+        1103,
+        None,
+        cipher.organization_id.as_deref(),
+        Some(&cipher_id),
+        &claims.sub,
+    )
+    .await?;
     Ok(Json(
         serde_json::to_value(cipher).map_err(|_| AppError::Internal)?,
     ))
@@ -575,6 +595,16 @@ pub async fn delete_attachment(
     .await?
     .into();
     enrich_cipher(&db, &state, &mut cipher).await?;
+    super::super::events::log_event(
+        &db,
+        &state.env,
+        1104,
+        None,
+        cipher.organization_id.as_deref(),
+        Some(&cipher_id),
+        &claims.sub,
+    )
+    .await?;
     Ok(Json(json!({ "cipher": cipher })))
 }
 

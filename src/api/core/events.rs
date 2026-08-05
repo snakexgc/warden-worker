@@ -93,6 +93,81 @@ fn event_statement(
         ])?)
 }
 
+/// 服务端审计事件写入（对齐 Vaultwarden `log_event`）。
+/// 仅在事件记录启用时写入；device_type/ip 由客户端上报事件使用，服务端事件暂不采集。
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn log_event(
+    db: &D1Database,
+    env: &worker::Env,
+    event_type: i32,
+    user_id: Option<&str>,
+    organization_id: Option<&str>,
+    cipher_id: Option<&str>,
+    acting_user_id: &str,
+) -> Result<(), AppError> {
+    if !super::organizations::events_enabled(env) {
+        return Ok(());
+    }
+    let date = db::now_rfc3339_millis();
+    db.prepare(
+        "INSERT INTO events
+         (id, type, user_id, organization_id, cipher_id, collection_id, group_id,
+          membership_id, device_type, ip_address, acting_user_id, date)
+         VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, NULL, NULL, ?6, ?7)",
+    )
+    .bind(&[
+        Uuid::new_v4().to_string().into(),
+        event_type.into(),
+        user_id.map(str::to_string).into(),
+        organization_id.map(str::to_string).into(),
+        cipher_id.map(str::to_string).into(),
+        acting_user_id.into(),
+        date.into(),
+    ])?
+    .run()
+    .await
+    .map_err(|_| AppError::Database)?;
+    Ok(())
+}
+
+/// 用户维度审计事件（对齐 Vaultwarden `log_user_event`），如登录、改密等。
+pub(crate) async fn log_user_event(
+    db: &D1Database,
+    env: &worker::Env,
+    event_type: i32,
+    user_id: &str,
+) -> Result<(), AppError> {
+    log_event(db, env, event_type, Some(user_id), None, None, user_id).await
+}
+
+/// 对齐 Vaultwarden `event_cleanup_job`：删除早于保留期的审计事件（默认 7 天）。
+pub async fn cleanup_old_events(env: &worker::Env) -> Result<u64, AppError> {
+    let db = db::get_db(env)?;
+    let retention_days: i64 = env
+        .var("EVENT_CLEANUP_SCHEDULE_DAYS")
+        .ok()
+        .and_then(|value| value.to_string().trim().parse().ok())
+        .unwrap_or(7)
+        .max(1);
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(retention_days.max(1));
+    let cutoff = cutoff
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        .to_string();
+    let result = db
+        .prepare("DELETE FROM events WHERE date < ?1")
+        .bind(&[cutoff.into()])?
+        .run()
+        .await
+        .map_err(|_| AppError::Database)?;
+    let changes = result
+        .meta()
+        .ok()
+        .flatten()
+        .and_then(|meta| meta.changes)
+        .unwrap_or(0) as u64;
+    Ok(changes)
+}
+
 /// Persist client audit events only after resolving their organization scope from server-side data.
 #[worker::send]
 pub async fn post_events_collect(
@@ -285,15 +360,26 @@ pub async fn get_cipher_events(
             json!({"data": [], "object": "list", "continuationToken": null}),
         ));
     }
-    let cipher =
-        super::ciphers::get_cipher_dbmodel_with_access(&db, &cipher_id, &claims.sub, true).await?;
-    let Some(org_id) = cipher.organization_id else {
-        return Ok(Json(
+    let empty = || {
+        Ok(Json(
             json!({"data": [], "object": "list", "continuationToken": null}),
-        ));
+        ))
     };
-    let member = super::organizations::load_membership(&db, &claims.sub, &org_id).await?;
-    super::organizations::require_admin(&member)?;
+    // 对齐 Vaultwarden：无访问权限时返回空列表，而不是 404/403
+    let Ok(cipher) =
+        super::ciphers::get_cipher_dbmodel_with_access(&db, &cipher_id, &claims.sub, true).await
+    else {
+        return empty();
+    };
+    let Some(org_id) = cipher.organization_id else {
+        return empty();
+    };
+    let Ok(member) = super::organizations::load_membership(&db, &claims.sub, &org_id).await else {
+        return empty();
+    };
+    if super::organizations::require_admin(&member).is_err() {
+        return empty();
+    }
     let events = query_events(&db, "cipher_id = ?1", &cipher_id, &range).await?;
     Ok(Json(events))
 }
@@ -314,20 +400,27 @@ pub async fn get_member_events(
             json!({"data": [], "object": "list", "continuationToken": null}),
         ));
     }
-    let member_exists: Option<i32> = db
+    let member_user: Option<String> = db
         .prepare(
-            "SELECT 1 AS found FROM users_organizations
+            "SELECT user_id FROM users_organizations
              WHERE id = ?1 AND organization_id = ?2",
         )
         .bind(&[member_id.clone().into(), org_id.into()])?
-        .first(Some("found"))
+        .first(Some("user_id"))
         .await
         .map_err(|_| AppError::Database)?;
-    if member_exists.is_none() {
+    let Some(member_user) = member_user else {
         return Err(AppError::NotFound(
             "Organization member not found".to_string(),
         ));
-    }
-    let events = query_events(&db, "membership_id = ?1", &member_id, &range).await?;
+    };
+    // 对齐 Vaultwarden：成员事件按 user_uuid 或 act_user_uuid 匹配
+    let events = query_events(
+        &db,
+        "(user_id = ?1 OR acting_user_id = ?1)",
+        &member_user,
+        &range,
+    )
+    .await?;
     Ok(Json(events))
 }

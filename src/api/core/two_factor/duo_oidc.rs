@@ -171,7 +171,7 @@ impl DuoClient {
 
     async fn exchange_code(&self, code: &str, username: &str, nonce: &str) -> Result<(), AppError> {
         if code.is_empty() {
-            return Err(AppError::Unauthorized(
+            return Err(AppError::BadRequest(
                 "Empty Duo authorization code".to_string(),
             ));
         }
@@ -208,7 +208,7 @@ impl DuoClient {
                 claims.preferred_username.as_bytes(),
             )
         {
-            return Err(AppError::Unauthorized(
+            return Err(AppError::BadRequest(
                 "Error validating Duo authorization".to_string(),
             ));
         }
@@ -299,18 +299,18 @@ pub async fn validate_duo_login(
 ) -> Result<(), AppError> {
     let (code, state) = token
         .split_once('|')
-        .ok_or_else(|| AppError::Unauthorized("Invalid Duo response".to_string()))?;
+        .ok_or_else(|| AppError::BadRequest("Invalid Duo response".to_string()))?;
     if code.is_empty() || state.is_empty() || state.contains('|') {
-        return Err(AppError::Unauthorized("Invalid Duo response".to_string()));
+        return Err(AppError::BadRequest("Invalid Duo response".to_string()));
     }
     let context = TwoFactorDuoContext::take(db, state)
         .await?
-        .ok_or_else(|| AppError::Unauthorized("Invalid or expired Duo state".to_string()))?;
+        .ok_or_else(|| AppError::BadRequest("Invalid or expired Duo state".to_string()))?;
     if !constant_time_eq::constant_time_eq(email.as_bytes(), context.user_email.as_bytes())
         || !constant_time_eq::constant_time_eq(state.as_bytes(), context.state.as_bytes())
         || context.exp <= Utc::now().timestamp()
     {
-        return Err(AppError::Unauthorized(
+        return Err(AppError::BadRequest(
             "Error validating Duo authentication".to_string(),
         ));
     }

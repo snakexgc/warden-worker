@@ -141,7 +141,7 @@ async fn verify_yubikey_otp(env: &Env, otp: &str) -> Result<(), AppError> {
         || response_params.get("otp").map(String::as_str) != Some(otp)
         || response_params.get("nonce").map(String::as_str) != Some(nonce.as_str())
     {
-        return Err(AppError::Unauthorized(
+        return Err(AppError::BadRequest(
             "Failed to verify YubiKey OTP".to_string(),
         ));
     }
@@ -193,7 +193,7 @@ pub async fn generate_yubikey(
     yubico_credentials(&state.env)?;
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    data.validate(&db, &claims.sub).await?;
+    data.validate_get(&db, &claims.sub).await?;
     let data = two_factor::get_external_two_factor(
         &db,
         &claims.sub,
@@ -302,7 +302,7 @@ pub async fn validate_yubikey_login(
     two_factor_data: &str,
 ) -> Result<(), AppError> {
     if response.len() != 44 {
-        return Err(AppError::Unauthorized(
+        return Err(AppError::BadRequest(
             "Invalid YubiKey OTP length".to_string(),
         ));
     }
@@ -310,9 +310,9 @@ pub async fn validate_yubikey_login(
         serde_json::from_str(two_factor_data).map_err(|_| AppError::Internal)?;
     let response_id = response
         .get(..12)
-        .ok_or_else(|| AppError::Unauthorized("Invalid YubiKey OTP".to_string()))?;
+        .ok_or_else(|| AppError::BadRequest("Invalid YubiKey OTP".to_string()))?;
     if !metadata.keys.iter().any(|key| key == response_id) {
-        return Err(AppError::Unauthorized(
+        return Err(AppError::BadRequest(
             "Given YubiKey is not registered".to_string(),
         ));
     }

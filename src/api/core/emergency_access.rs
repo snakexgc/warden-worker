@@ -627,14 +627,14 @@ pub async fn accept_invite(
         &DecodingKey::from_secret(state.jwt_keys.access_secret.as_ref()),
         &Validation::default(),
     )
-    .map_err(|_| AppError::Unauthorized("Invalid emergency access invitation".to_string()))?
+    .map_err(|_| AppError::BadRequest("Invalid emergency access invitation".to_string()))?
     .claims;
     if invite.iss != INVITE_ISSUER
         || invite.emer_id != id
         || normalize_email(&invite.email) != normalize_email(&claims.email)
         || invite.sub != claims.sub
     {
-        return Err(AppError::Unauthorized(
+        return Err(AppError::BadRequest(
             "Emergency access invitation does not match the current account".to_string(),
         ));
     }
@@ -657,7 +657,7 @@ pub async fn accept_invite(
     let grantor = load_user(&db, &emergency.grantor_uuid).await?;
     let grantor_name = grantor.name.unwrap_or_else(|| grantor.email.clone());
     if invite.grantor_email != grantor.email || invite.grantor_name != grantor_name {
-        return Err(AppError::Unauthorized(
+        return Err(AppError::BadRequest(
             "Emergency access invitation is no longer valid".to_string(),
         ));
     }

@@ -1,12 +1,15 @@
 use axum::extract::DefaultBodyLimit;
 use axum::{
-    Router,
+    Json, Router,
     extract::State as AxumState,
     response::Html,
     routing::{delete, get, post, put},
 };
+use serde_json::Value;
 use std::sync::Arc;
 use worker::{Context, Env};
+
+use crate::error::AppError;
 
 use crate::api::{
     core::{
@@ -667,7 +670,7 @@ pub fn api_router_with_keys(
         .route("/api/sync", get(ciphers::sync))
         // Ciphers CRUD
         .route("/api/ciphers/create", post(ciphers::create_cipher))
-        .route("/api/ciphers/purge", post(ciphers::purge_personal_vault))
+        .route("/api/ciphers/purge", post(ciphers::purge_ciphers))
         .route(
             "/api/ciphers/{cipher_id}/attachment/v2",
             post(ciphers::create_attachment_v2),
@@ -878,5 +881,11 @@ pub fn api_router_with_keys(
             post(two_factor::webauthn::delete_credential),
         )
         .route("/api/d1/usage", get(usage::d1_usage))
+        .fallback(api_not_found)
         .with_state(app_state)
+}
+
+/// 对齐 Vaultwarden `api_not_found` catcher：未匹配路由返回标准 JSON 错误（404）。
+async fn api_not_found() -> Result<Json<Value>, AppError> {
+    Err(AppError::ResourceNotFound("API not found".to_string()))
 }

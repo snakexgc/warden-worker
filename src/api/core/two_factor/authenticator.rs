@@ -105,7 +105,7 @@ pub async fn get_authenticator(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    payload.validate(&db, &claims.sub).await?;
+    payload.validate_get(&db, &claims.sub).await?;
 
     let enabled = two_factor::is_authenticator_enabled(&db, &claims.sub).await?;
     let key = if enabled {
@@ -197,7 +197,7 @@ pub async fn disable_authenticator(
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     if !password::verify_user_password(&db, &claims.sub, &payload.master_password_hash).await? {
-        return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+        return Err(AppError::BadRequest("Invalid credentials".to_string()));
     }
 
     if let Some(secret_enc) = two_factor::get_authenticator_secret_enc(&db, &claims.sub).await? {

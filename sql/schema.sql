@@ -438,6 +438,7 @@ CREATE TABLE IF NOT EXISTS devices (
     device_name TEXT,
     device_type INTEGER,
     remember_token_hash TEXT,
+    refresh_token TEXT,
     push_token TEXT,
     push_uuid TEXT,
     created_at TEXT NOT NULL,

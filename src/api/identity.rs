@@ -118,6 +118,36 @@ fn update_device_background(
     });
 }
 
+/// 同步写入（或新建）设备的设备级 refresh token，并刷新 updated_at。
+/// 供登录/刷新时绑定设备使用；设备删除或登出（clear-token）后刷新流程即失效。
+async fn upsert_device_refresh_token(
+    db: &worker::D1Database,
+    user_id: &str,
+    device_identifier: &str,
+    refresh_token: &str,
+) -> Result<(), AppError> {
+    let now = Utc::now().to_rfc3339();
+    db.prepare(
+        "INSERT INTO devices (id, user_id, device_identifier, created_at, updated_at, refresh_token)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(user_id, device_identifier) DO UPDATE SET
+           updated_at = excluded.updated_at,
+           refresh_token = excluded.refresh_token",
+    )
+    .bind(&[
+        Uuid::new_v4().to_string().into(),
+        user_id.into(),
+        device_identifier.into(),
+        now.clone().into(),
+        now.into(),
+        refresh_token.into(),
+    ])?
+    .run()
+    .await
+    .map_err(|_| AppError::Database)?;
+    Ok(())
+}
+
 #[derive(Debug, Default)]
 pub struct TokenRequest {
     grant_type: String,
@@ -279,6 +309,17 @@ struct WebAuthnPrfOptionPayload {
     encrypted_user_key: String,
 }
 
+/// JWT issuer：优先使用配置的 DOMAIN，与 Vaultwarden 的 `iss = CONFIG.domain()` 对齐。
+fn token_issuer(state: &Arc<AppState>) -> String {
+    state
+        .env
+        .secret("DOMAIN")
+        .ok()
+        .and_then(|secret| secret.as_ref().as_string())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "warden-worker".to_string())
+}
+
 async fn generate_tokens_and_response(
     user: User,
     state: &Arc<AppState>,
@@ -293,13 +334,18 @@ async fn generate_tokens_and_response(
         sub: user.id.clone(),
         exp,
         nbf: now.timestamp() as usize,
+        iss: token_issuer(state),
         premium: true,
         name: user.name.clone().unwrap_or_else(|| "User".to_string()),
         email: user.email.clone(),
         email_verified: true,
         amr: vec!["Application".into()],
-        security_stamp: Some(user.security_stamp.clone()),
+        sstamp: user.security_stamp.clone(),
         device: device_identifier.clone(),
+        devicetype: None,
+        client_id: Some("undefined".to_string()),
+        scope: Some(vec!["api".into(), "offline_access".into()]),
+        token: None,
     };
 
     let jwt_keys = state.jwt_keys.clone();
@@ -309,19 +355,36 @@ async fn generate_tokens_and_response(
         &EncodingKey::from_secret(jwt_keys.access_secret.as_ref()),
     )?;
 
+    // 设备级 refresh token：登录时同步写入 devices.refresh_token，
+    // 设备删除/登出后刷新流程会因设备记录或 token 不匹配而失效（对齐 Vaultwarden RefreshJwtClaims.token）
+    let device_refresh_token = match device_identifier.as_deref() {
+        Some(device_identifier) => {
+            let db = db::get_db(&state.env)?;
+            let token = Uuid::new_v4().to_string();
+            upsert_device_refresh_token(&db, &user.id, device_identifier, &token).await?;
+            Some(token)
+        }
+        None => None,
+    };
+
     let refresh_expires_in = Duration::days(30);
     let refresh_exp = (now + refresh_expires_in).timestamp() as usize;
     let refresh_claims = Claims {
         sub: user.id.clone(),
         exp: refresh_exp,
         nbf: now.timestamp() as usize,
+        iss: token_issuer(state),
         premium: true,
         name: user.name.unwrap_or_else(|| "User".to_string()),
         email: user.email.clone(),
         email_verified: true,
         amr: vec!["Application".into()],
-        security_stamp: Some(user.security_stamp.clone()),
+        sstamp: user.security_stamp.clone(),
         device: device_identifier,
+        devicetype: None,
+        client_id: Some("undefined".to_string()),
+        scope: Some(vec!["api".into(), "offline_access".into()]),
+        token: device_refresh_token,
     };
     let refresh_token = encode(
         &Header::default(),
@@ -402,13 +465,18 @@ async fn generate_api_key_tokens_response(
         sub: user.id.clone(),
         exp: (now + expires_in).timestamp() as usize,
         nbf: now.timestamp() as usize,
+        iss: token_issuer(state),
         premium: true,
         name: user.name.clone().unwrap_or_else(|| "User".to_string()),
         email: user.email.clone(),
         email_verified: user.email_verified,
         amr: vec!["Application".into()],
-        security_stamp: Some(user.security_stamp.clone()),
+        sstamp: user.security_stamp.clone(),
         device: Some(device_identifier),
+        devicetype: None,
+        client_id: Some("api".to_string()),
+        scope: Some(vec!["api".into()]),
+        token: None,
     };
     let access_token = encode(
         &Header::default(),
@@ -997,14 +1065,12 @@ pub async fn token(
                     .first::<Value>(None)
                     .await
                     .map_err(|_| AppError::Database)?
-                    .ok_or_else(|| AppError::Unauthorized("Invalid client_id".to_string()))
+                    .ok_or_else(|| AppError::BadRequest("Invalid client_id".to_string()))
                     .and_then(|value| {
                         serde_json::from_value(value).map_err(|_| AppError::Internal)
                     })?;
                 if !constant_time_eq(api_key.api_key.as_bytes(), client_secret.as_bytes()) {
-                    return Err(AppError::Unauthorized(
-                        "Incorrect client_secret".to_string(),
-                    ));
+                    return Err(AppError::BadRequest("Incorrect client_secret".to_string()));
                 }
                 let response =
                     generate_organization_api_key_tokens_response(&api_key, &state).await?;
@@ -1041,9 +1107,7 @@ pub async fn token(
                         ..Default::default()
                     },
                 );
-                return Err(AppError::Unauthorized(
-                    "Incorrect client_secret".to_string(),
-                ));
+                return Err(AppError::BadRequest("Incorrect client_secret".to_string()));
             }
 
             let user_id = user.id.clone();
@@ -1124,7 +1188,7 @@ pub async fn token(
                 .bind(&[username.clone().into()])?
                 .first(None)
                 .await
-                .map_err(|_| AppError::Unauthorized("Invalid credentials".to_string()))?
+                .map_err(|_| AppError::Database)?
             {
                 Some(v) => v,
                 None => {
@@ -1141,7 +1205,7 @@ pub async fn token(
                             ..Default::default()
                         },
                     );
-                    return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+                    return Ok(invalid_grant_response("Invalid username or password"));
                 }
             };
             let user: User = serde_json::from_value(user_val).map_err(|_| AppError::Internal)?;
@@ -1174,7 +1238,7 @@ pub async fn token(
                     })
                     .unwrap_or(false);
                 if !approved {
-                    return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+                    return Ok(invalid_grant_response("Invalid username or password"));
                 }
 
                 let already_authenticated = ar_row
@@ -1182,7 +1246,7 @@ pub async fn token(
                     .and_then(|v| v.as_str())
                     .is_some();
                 if already_authenticated {
-                    return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+                    return Ok(invalid_grant_response("Invalid username or password"));
                 }
 
                 let request_device_identifier = ar_row
@@ -1204,19 +1268,19 @@ pub async fn token(
                     .as_deref()
                     .ok_or_else(|| AppError::Unauthorized("Invalid credentials".to_string()))?;
                 if payload_device_identifier != request_device_identifier {
-                    return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+                    return Ok(invalid_grant_response("Invalid username or password"));
                 }
 
                 let payload_device_type = payload
                     .device_type
                     .ok_or_else(|| AppError::Unauthorized("Invalid credentials".to_string()))?;
                 if payload_device_type != request_device_type {
-                    return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+                    return Ok(invalid_grant_response("Invalid username or password"));
                 }
 
                 let current_ip = client_ip_from_headers(&headers);
                 if current_ip != request_ip {
-                    return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+                    return Ok(invalid_grant_response("Invalid username or password"));
                 }
 
                 // Verify access code
@@ -1228,7 +1292,7 @@ pub async fn token(
                 let access_code = payload.access_code.as_deref().unwrap_or(&password_hash);
                 let candidate_hash = sha256_hex(access_code);
                 if !constant_time_eq(stored_hash.as_bytes(), candidate_hash.as_bytes()) {
-                    return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+                    return Ok(invalid_grant_response("Invalid username or password"));
                 }
 
                 db.prepare(
@@ -2023,6 +2087,17 @@ pub async fn token(
             let device_identifier = payload.device_identifier.clone();
             let device_name = payload.device_name.clone();
             let device_type = payload.device_type;
+            // 登录成功：写入 UserLoggedIn 服务端审计事件（对齐 Vaultwarden）
+            super::core::events::log_event(
+                &db,
+                &state.env,
+                1000,
+                Some(&user.id),
+                None,
+                None,
+                &user.id,
+            )
+            .await?;
             log::info!(
                 target: targets::AUTH,
                 "token login device id={:?} type={:?} name={:?} 2fa_provider={:?} remember={:?}",
@@ -2183,21 +2258,9 @@ pub async fn token(
                 }
             };
 
-            let stamp = match refresh_claims.security_stamp {
-                Some(s) => s,
-                None => {
-                    return Ok((
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({
-                            "error": "invalid_grant",
-                            "error_description": "Missing security stamp"
-                        })),
-                    )
-                        .into_response());
-                }
-            };
+            let stamp = &refresh_claims.sstamp;
 
-            if stamp != user.security_stamp {
+            if stamp != &user.security_stamp {
                 return Ok((
                     StatusCode::BAD_REQUEST,
                     Json(json!({
@@ -2206,6 +2269,29 @@ pub async fn token(
                     })),
                 )
                     .into_response());
+            }
+
+            // 设备级刷新校验：refresh token 绑定设备记录，设备删除/登出（clear-token）后刷新立即失效
+            if let (Some(device_identifier), Some(expected_token)) = (
+                effective_device_identifier.as_deref(),
+                refresh_claims.token.as_deref(),
+            ) {
+                let device: Option<Value> = db
+                    .prepare(
+                        "SELECT refresh_token FROM devices
+                         WHERE user_id = ?1 AND device_identifier = ?2",
+                    )
+                    .bind(&[user.id.clone().into(), device_identifier.into()])?
+                    .first(None)
+                    .await
+                    .map_err(|_| AppError::Database)?;
+                let device_token = device
+                    .as_ref()
+                    .and_then(|row| row.get("refresh_token"))
+                    .and_then(Value::as_str);
+                if device_token != Some(expected_token) {
+                    return Ok(invalid_grant_response("Device is no longer available"));
+                }
             }
 
             let full_response = generate_tokens_and_response(

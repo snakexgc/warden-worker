@@ -33,7 +33,7 @@ impl SecretVerificationData {
         match (&self.master_password_hash, &self.otp) {
             (Some(master_password_hash), None) => {
                 if !password::verify_user_password(db, user_id, master_password_hash).await? {
-                    return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+                    return Err(AppError::BadRequest("Invalid credentials".to_string()));
                 }
                 Ok(())
             }

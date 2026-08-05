@@ -96,14 +96,22 @@ pub struct Claims {
     pub sub: String,
     pub exp: usize,
     pub nbf: usize,
+    pub iss: String,
 
     pub premium: bool,
     pub name: String,
     pub email: String,
     pub email_verified: bool,
     pub amr: Vec<String>,
-    pub security_stamp: Option<String>,
+
+    // 对齐 Vaultwarden LoginJwtClaims：security stamp 字段名为 sstamp
+    pub sstamp: String,
     pub device: Option<String>,
+    pub devicetype: Option<String>,
+    pub client_id: Option<String>,
+    pub scope: Option<Vec<String>>,
+    // 设备级 refresh token（Vaultwarden RefreshJwtClaims.token）：设备删除/登出后刷新立即失效
+    pub token: Option<String>,
 }
 
 impl FromRequestParts<Arc<AppState>> for Claims {
@@ -149,10 +157,7 @@ impl FromRequestParts<Arc<AppState>> for Claims {
 
 impl Claims {
     pub async fn verify_security_stamp(&self, db: &D1Database) -> Result<(), AppError> {
-        let token_stamp = self
-            .security_stamp
-            .as_deref()
-            .ok_or_else(|| AppError::Unauthorized("Missing security stamp".to_string()))?;
+        let token_stamp = &self.sstamp;
 
         let user_val: Option<Value> = db
             .prepare("SELECT security_stamp FROM users WHERE id = ?1")

@@ -239,15 +239,70 @@ pub(crate) async fn get_accessible_ciphers(
     Ok(ciphers)
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationPurgeQuery {
+    organization: Option<String>,
+}
+
 #[worker::send]
-pub async fn purge_personal_vault(
+pub async fn purge_ciphers(
     claims: Claims,
     State(state): State<Arc<AppState>>,
+    Query(query): Query<OrganizationPurgeQuery>,
     Json(payload): Json<super::accounts::SecretVerificationRequest>,
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     super::accounts::validate_password_or_otp(&db, &claims.sub, &payload).await?;
+
+    // 对齐 Vaultwarden purge_org_vault：携带 organization 参数时清空指定组织保险库，仅 Owner 可执行
+    if let Some(org_id) = query.organization {
+        if !super::organizations::organizations_enabled(&state.env) {
+            return Err(AppError::NotFound(
+                "Organization support is disabled".to_string(),
+            ));
+        }
+        let member = super::organizations::load_membership(&db, &claims.sub, &org_id).await?;
+        super::organizations::require_owner(&member)?;
+        let rows: Vec<Value> = db
+            .prepare("SELECT id FROM ciphers WHERE organization_id = ?1")
+            .bind(&[org_id.clone().into()])?
+            .all()
+            .await
+            .map_err(|_| AppError::Database)?
+            .results()?;
+        for row in rows {
+            let Some(cipher_id) = row.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            attachments::delete_cipher_attachments_from_r2(&state.env, &db, cipher_id).await?;
+        }
+        db.prepare("DELETE FROM ciphers WHERE organization_id = ?1")
+            .bind(&[org_id.clone().into()])?
+            .run()
+            .await
+            .map_err(|_| AppError::Database)?;
+        finish_organization_batch_mutation(
+            &db,
+            &state,
+            &org_id,
+            &claims.sub,
+            claims.device.as_deref(),
+        )
+        .await?;
+        super::events::log_event(
+            &db,
+            &state.env,
+            1601,
+            None,
+            Some(&org_id),
+            None,
+            &claims.sub,
+        )
+        .await?;
+        return Ok(Json(json!({})));
+    }
 
     attachments::delete_user_attachments_from_r2(&state.env, &db, &claims.sub).await?;
     db.prepare("DELETE FROM ciphers WHERE user_id = ?1")
@@ -274,6 +329,36 @@ pub async fn purge_personal_vault(
 
 fn now_string() -> String {
     db::now_rfc3339_millis()
+}
+
+/// 对齐 Vaultwarden `purge_trashed_ciphers`：清理软删除超过 30 天的密码项（含 R2 附件）。
+pub async fn purge_trashed_ciphers(env: &worker::Env) -> Result<u64, AppError> {
+    let db = db::get_db(env)?;
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+    let cutoff = cutoff
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        .to_string();
+    let rows: Vec<Value> = db
+        .prepare("SELECT id FROM ciphers WHERE deleted_at IS NOT NULL AND deleted_at < ?1")
+        .bind(&[cutoff.clone().into()])?
+        .all()
+        .await
+        .map_err(|_| AppError::Database)?
+        .results()?;
+    for row in &rows {
+        let Some(cipher_id) = row.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        attachments::delete_cipher_attachments_from_r2(env, &db, cipher_id).await?;
+    }
+    let result = db
+        .prepare("DELETE FROM ciphers WHERE deleted_at IS NOT NULL AND deleted_at < ?1")
+        .bind(&[cutoff.into()])?
+        .run()
+        .await
+        .map_err(|_| AppError::Database)?;
+    let _ = result;
+    Ok(rows.len() as u64)
 }
 
 async fn finish_cipher_mutation(
@@ -914,6 +999,17 @@ pub async fn share_cipher(
         payload.collection_ids,
     )
     .await?;
+    let db = db::get_db(&state.env)?;
+    super::events::log_event(
+        &db,
+        &state.env,
+        1105,
+        None,
+        cipher.organization_id.as_deref(),
+        Some(&cipher_id),
+        &claims.sub,
+    )
+    .await?;
     notify::notify_background(
         &state.ctx,
         state.env.clone(),
@@ -996,6 +1092,18 @@ pub async fn create_cipher(
 
     let cipher =
         create_cipher_inner(claims, &state, payload.cipher, payload.collection_ids).await?;
+
+    let db = db::get_db(&state.env)?;
+    super::events::log_event(
+        &db,
+        &state.env,
+        1100,
+        None,
+        cipher.organization_id.as_deref(),
+        Some(&cipher.id),
+        &user_id,
+    )
+    .await?;
 
     notify::notify_background(
         &state.ctx,
@@ -1205,6 +1313,17 @@ pub async fn update_cipher(
     }
     attachments::enrich_cipher(&db, &state, &mut cipher).await?;
 
+    super::events::log_event(
+        &db,
+        &state.env,
+        1101,
+        None,
+        existing_cipher.organization_id.as_deref(),
+        Some(&cipher.id),
+        &claims.sub,
+    )
+    .await?;
+
     let meta = notify::extract_request_meta(&headers);
     notify::notify_background(
         &state.ctx,
@@ -1296,6 +1415,17 @@ pub async fn soft_delete_cipher(
         .await?;
     }
 
+    super::events::log_event(
+        &db,
+        &state.env,
+        1115,
+        None,
+        organization_id.as_deref(),
+        Some(&id),
+        &claims.sub,
+    )
+    .await?;
+
     let meta = notify::extract_request_meta(&headers);
     notify::notify_background(
         &state.ctx,
@@ -1384,6 +1514,17 @@ pub async fn restore_cipher(
         )
         .await?;
     }
+
+    super::events::log_event(
+        &db,
+        &state.env,
+        1116,
+        None,
+        organization_id.as_deref(),
+        Some(&id),
+        &claims.sub,
+    )
+    .await?;
 
     let meta = notify::extract_request_meta(&headers);
     notify::notify_background(

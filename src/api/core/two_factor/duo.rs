@@ -186,7 +186,7 @@ pub async fn get_duo(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    data.validate(&db, &claims.sub).await?;
+    data.validate_get(&db, &claims.sub).await?;
     let stored =
         two_factor::get_external_two_factor(&db, &claims.sub, two_factor::TWO_FACTOR_PROVIDER_DUO)
             .await?;
@@ -341,26 +341,26 @@ fn parse_duo_values(
 ) -> Result<String, AppError> {
     let parts = value.split('|').collect::<Vec<_>>();
     if parts.len() != 3 || parts[0] != prefix {
-        return Err(AppError::Unauthorized("Invalid Duo response".to_string()));
+        return Err(AppError::BadRequest("Invalid Duo response".to_string()));
     }
     let expected = hmac_sha1_hex(key, &format!("{}|{}", parts[0], parts[1]))?;
     if !constant_time_eq::constant_time_eq(expected.as_bytes(), parts[2].as_bytes()) {
-        return Err(AppError::Unauthorized("Invalid Duo signature".to_string()));
+        return Err(AppError::BadRequest("Invalid Duo signature".to_string()));
     }
     let decoded = STANDARD
         .decode(parts[1])
-        .map_err(|_| AppError::Unauthorized("Invalid Duo response".to_string()))?;
+        .map_err(|_| AppError::BadRequest("Invalid Duo response".to_string()))?;
     let decoded = String::from_utf8(decoded)
-        .map_err(|_| AppError::Unauthorized("Invalid Duo response".to_string()))?;
+        .map_err(|_| AppError::BadRequest("Invalid Duo response".to_string()))?;
     let fields = decoded.split('|').collect::<Vec<_>>();
     if fields.len() != 3 || fields[1] != ikey {
-        return Err(AppError::Unauthorized("Invalid Duo response".to_string()));
+        return Err(AppError::BadRequest("Invalid Duo response".to_string()));
     }
     let expiry = fields[2]
         .parse::<i64>()
-        .map_err(|_| AppError::Unauthorized("Invalid Duo response".to_string()))?;
+        .map_err(|_| AppError::BadRequest("Invalid Duo response".to_string()))?;
     if now >= expiry {
-        return Err(AppError::Unauthorized("Expired Duo response".to_string()));
+        return Err(AppError::BadRequest("Expired Duo response".to_string()));
     }
     Ok(fields[0].to_string())
 }
@@ -374,19 +374,19 @@ pub async fn validate_duo_login(
 ) -> Result<(), AppError> {
     let (auth, app) = response
         .split_once(':')
-        .ok_or_else(|| AppError::Unauthorized("Invalid Duo response".to_string()))?;
+        .ok_or_else(|| AppError::BadRequest("Invalid Duo response".to_string()))?;
     let data = configured_data(db, env, user_id)
         .await?
-        .ok_or_else(|| AppError::Unauthorized("Duo is not configured".to_string()))?;
+        .ok_or_else(|| AppError::BadRequest("Duo is not configured".to_string()))?;
     let akey = env_value(env, "DUO_AKEY")
-        .ok_or_else(|| AppError::Unauthorized("Duo is not configured".to_string()))?;
+        .ok_or_else(|| AppError::BadRequest("Duo is not configured".to_string()))?;
     let now = Utc::now().timestamp();
     let auth_user = parse_duo_values(&data.sk, auth, &data.ik, "AUTH", now)?;
     let app_user = parse_duo_values(&akey, app, &data.ik, "APP", now)?;
     if !constant_time_eq::constant_time_eq(auth_user.as_bytes(), app_user.as_bytes())
         || !constant_time_eq::constant_time_eq(auth_user.as_bytes(), email.as_bytes())
     {
-        return Err(AppError::Unauthorized(
+        return Err(AppError::BadRequest(
             "Error validating Duo authentication".to_string(),
         ));
     }

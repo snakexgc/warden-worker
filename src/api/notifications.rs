@@ -88,6 +88,7 @@ pub enum UpdateType {
     SyncFolderDelete = 3,
     SyncCiphers = 4,
     SyncVault = 5,
+    SyncOrgKeys = 6,
     SyncFolderCreate = 7,
     SyncFolderUpdate = 8,
     SyncSettings = 10,
@@ -241,7 +242,7 @@ impl NotificationsHub {
         let token_data = decode::<Claims>(&access_token, &decoding_key, &Validation::default())
             .map_err(|_| Error::RustError("Invalid token".to_string()))?;
 
-        let token_stamp = token_data.claims.security_stamp.as_deref().unwrap_or("");
+        let token_stamp = token_data.claims.sstamp.as_str();
         let db = self
             .env
             .d1("vaultsql")
