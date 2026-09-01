@@ -212,10 +212,16 @@ struct RotateFolderData {
 #[serde(rename_all = "camelCase")]
 pub struct ChangeMasterPasswordRequest {
     pub master_password_hash: String,
-    pub new_master_password_hash: String,
     pub master_password_hint: Option<String>,
-    #[serde(alias = "key")]
-    pub user_symmetric_key: String,
+    #[serde(default)]
+    pub authentication_data: Option<AuthenticationData>,
+    #[serde(default)]
+    pub unlock_data: Option<UnlockData>,
+    // Legacy fields retained for older clients.
+    #[serde(default)]
+    pub new_master_password_hash: Option<String>,
+    #[serde(default, alias = "key")]
+    pub user_symmetric_key: Option<String>,
     #[serde(default)]
     pub user_asymmetric_keys: Option<KeyData>,
     #[serde(default)]
@@ -226,6 +232,46 @@ pub struct ChangeMasterPasswordRequest {
     pub kdf_memory: Option<i32>,
     #[serde(default)]
     pub kdf_parallelism: Option<i32>,
+}
+
+fn resolve_password_change_data<'a>(
+    payload: &'a ChangeMasterPasswordRequest,
+    user_email: &str,
+) -> Result<(&'a str, &'a str), AppError> {
+    if let (Some(unlock_data), Some(authentication_data)) =
+        (&payload.unlock_data, &payload.authentication_data)
+    {
+        if authentication_data.kdf != unlock_data.kdf {
+            return Err(AppError::BadRequest(
+                "KDF settings must be equal for authentication and unlock".to_string(),
+            ));
+        }
+
+        if user_email != authentication_data.salt || user_email != unlock_data.salt {
+            return Err(AppError::BadRequest(
+                "Invalid master password salt".to_string(),
+            ));
+        }
+
+        return Ok((
+            authentication_data
+                .master_password_authentication_hash
+                .as_str(),
+            unlock_data.master_key_wrapped_user_key.as_str(),
+        ));
+    }
+
+    if let (Some(new_master_password_hash), Some(user_symmetric_key)) = (
+        &payload.new_master_password_hash,
+        &payload.user_symmetric_key,
+    ) {
+        return Ok((
+            new_master_password_hash.as_str(),
+            user_symmetric_key.as_str(),
+        ));
+    }
+
+    Err(AppError::BadRequest("Invalid request!".to_string()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -726,13 +772,10 @@ pub async fn change_master_password(
     headers: HeaderMap,
     Json(payload): Json<ChangeMasterPasswordRequest>,
 ) -> Result<Json<Value>, AppError> {
-    if payload.master_password_hash.is_empty() || payload.new_master_password_hash.is_empty() {
+    if payload.master_password_hash.is_empty() {
         return Err(AppError::BadRequest(
             "Missing masterPasswordHash".to_string(),
         ));
-    }
-    if payload.user_symmetric_key.is_empty() {
-        return Err(AppError::BadRequest("Missing userSymmetricKey".to_string()));
     }
 
     let db = db::get_db(&state.env)?;
@@ -748,6 +791,17 @@ pub async fn change_master_password(
 
     if !password::verify_user_password(&db, &user.id, &payload.master_password_hash).await? {
         return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+    }
+
+    let (new_master_password_hash, user_symmetric_key) =
+        resolve_password_change_data(&payload, &user.email)?;
+    if new_master_password_hash.is_empty() {
+        return Err(AppError::BadRequest(
+            "Missing newMasterPasswordHash".to_string(),
+        ));
+    }
+    if user_symmetric_key.is_empty() {
+        return Err(AppError::BadRequest("Missing userSymmetricKey".to_string()));
     }
 
     let now = Utc::now().to_rfc3339();
@@ -771,8 +825,7 @@ pub async fn change_master_password(
         validate_kdf(kdf_type, kdf_iterations, kdf_memory_in, kdf_parallelism_in)?;
 
     let existing_salt = user.password_iterations.and(user.password_salt.as_deref());
-    let server_password =
-        password::hash_password(&payload.new_master_password_hash, existing_salt).await?;
+    let server_password = password::hash_password(new_master_password_hash, existing_salt).await?;
 
     db.prepare(
         "UPDATE users SET master_password_hash = ?1, master_password_hint = ?2, key = ?3, private_key = ?4, public_key = ?5, kdf_type = ?6, kdf_iterations = ?7, kdf_memory = ?8, kdf_parallelism = ?9, security_stamp = ?10, updated_at = ?11, password_salt = ?12, password_iterations = ?13 WHERE id = ?14",
@@ -780,7 +833,7 @@ pub async fn change_master_password(
     .bind(&[
         server_password.hash.into(),
         to_js_val(master_password_hint),
-        payload.user_symmetric_key.into(),
+        user_symmetric_key.to_string().into(),
         private_key.into(),
         public_key.into(),
         kdf_type.into(),
@@ -2177,7 +2230,97 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(payload.user_symmetric_key, "wrapped-user-key");
+        assert_eq!(
+            payload.user_symmetric_key.as_deref(),
+            Some("wrapped-user-key")
+        );
+        assert_eq!(
+            resolve_password_change_data(&payload, "user@example.com").unwrap(),
+            ("new-hash", "wrapped-user-key")
+        );
+    }
+
+    #[test]
+    fn change_password_accepts_new_authentication_and_unlock_data() {
+        let payload: ChangeMasterPasswordRequest = serde_json::from_value(json!({
+            "masterPasswordHash": "old-hash",
+            "masterPasswordHint": "hint",
+            "authenticationData": {
+                "salt": "user@example.com",
+                "kdf": {
+                    "kdfType": 0,
+                    "iterations": 600000,
+                    "memory": null,
+                    "parallelism": null
+                },
+                "masterPasswordAuthenticationHash": "new-hash"
+            },
+            "unlockData": {
+                "salt": "user@example.com",
+                "kdf": {
+                    "kdfType": 0,
+                    "iterations": 600000,
+                    "memory": null,
+                    "parallelism": null
+                },
+                "masterKeyWrappedUserKey": "wrapped-user-key"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            resolve_password_change_data(&payload, "user@example.com").unwrap(),
+            ("new-hash", "wrapped-user-key")
+        );
+    }
+
+    #[test]
+    fn change_password_rejects_mismatched_new_kdf_data() {
+        let payload: ChangeMasterPasswordRequest = serde_json::from_value(json!({
+            "masterPasswordHash": "old-hash",
+            "masterPasswordHint": null,
+            "authenticationData": {
+                "salt": "user@example.com",
+                "kdf": { "kdfType": 0, "iterations": 600000 },
+                "masterPasswordAuthenticationHash": "new-hash"
+            },
+            "unlockData": {
+                "salt": "user@example.com",
+                "kdf": { "kdfType": 0, "iterations": 600001 },
+                "masterKeyWrappedUserKey": "wrapped-user-key"
+            }
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            resolve_password_change_data(&payload, "user@example.com"),
+            Err(AppError::BadRequest(message))
+                if message == "KDF settings must be equal for authentication and unlock"
+        ));
+    }
+
+    #[test]
+    fn change_password_rejects_invalid_new_salt() {
+        let payload: ChangeMasterPasswordRequest = serde_json::from_value(json!({
+            "masterPasswordHash": "old-hash",
+            "masterPasswordHint": null,
+            "authenticationData": {
+                "salt": "other@example.com",
+                "kdf": { "kdfType": 0, "iterations": 600000 },
+                "masterPasswordAuthenticationHash": "new-hash"
+            },
+            "unlockData": {
+                "salt": "other@example.com",
+                "kdf": { "kdfType": 0, "iterations": 600000 },
+                "masterKeyWrappedUserKey": "wrapped-user-key"
+            }
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            resolve_password_change_data(&payload, "user@example.com"),
+            Err(AppError::BadRequest(message)) if message == "Invalid master password salt"
+        ));
     }
 
     #[test]
