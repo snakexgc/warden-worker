@@ -88,7 +88,6 @@ pub struct PreloginKdfSettings {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegisterRequest {
-    pub name: Option<String>,
     pub email: String,
     #[serde(flatten)]
     credentials: RegisterCredentials,
@@ -118,25 +117,34 @@ struct RegisterCredentialsLegacy {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RegisterCredentialsCurrent {
+    #[serde(alias = "MasterPasswordAuthentication")]
     master_password_authentication: RegisterMasterPasswordAuthentication,
+    #[serde(alias = "MasterPasswordUnlock")]
     master_password_unlock: RegisterMasterPasswordUnlock,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RegisterMasterPasswordAuthentication {
+    #[serde(alias = "Kdf")]
     kdf: RegisterKdfData,
+    #[serde(alias = "Salt")]
     salt: String,
-    #[serde(alias = "masterPasswordAuthenticationHash")]
+    #[serde(
+        alias = "masterPasswordAuthenticationHash",
+        alias = "MasterPasswordAuthenticationHash"
+    )]
     hash: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RegisterMasterPasswordUnlock {
+    #[serde(alias = "Kdf")]
     kdf: RegisterKdfData,
+    #[serde(alias = "Salt")]
     salt: String,
-    #[serde(alias = "masterKeyWrappedUserKey")]
+    #[serde(alias = "masterKeyWrappedUserKey", alias = "MasterKeyWrappedUserKey")]
     key: String,
 }
 
@@ -256,6 +264,37 @@ mod tests {
         assert_eq!(payload.user_symmetric_key(), "wrapped-key");
         assert!(payload.current_format_is_valid("user@example.com"));
         assert!(!payload.current_format_is_valid("other@example.com"));
+    }
+
+    #[test]
+    fn register_request_accepts_android_2026_9_password_objects() {
+        let mut body = serde_json::json!({
+            "email": "user@example.com",
+            "emailVerificationToken": "verification-token",
+            "userAsymmetricKeys": { "publicKey": "public", "encryptedPrivateKey": "private" },
+            "MasterPasswordAuthentication": {
+                "Kdf": { "kdfType": 0, "iterations": 600000 },
+                "Salt": "user@example.com",
+                "MasterPasswordAuthenticationHash": "hash"
+            },
+            "MasterPasswordUnlock": {
+                "kdf": { "kdfType": 0, "iterations": 600000 },
+                "salt": "user@example.com",
+                "masterKeyWrappedUserKey": "wrapped-key"
+            }
+        });
+        let payload: RegisterRequest = serde_json::from_value(body.clone()).unwrap();
+        assert_eq!(payload.master_password_hash(), "hash");
+        assert_eq!(payload.user_symmetric_key(), "wrapped-key");
+        assert_eq!(
+            payload.email_verification_token.as_deref(),
+            Some("verification-token")
+        );
+        assert!(payload.current_format_is_valid("user@example.com"));
+
+        body["MasterPasswordUnlock"]["kdf"]["iterations"] = serde_json::json!(600001);
+        let payload: RegisterRequest = serde_json::from_value(body).unwrap();
+        assert!(!payload.current_format_is_valid("user@example.com"));
     }
 
     #[test]

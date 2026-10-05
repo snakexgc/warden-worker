@@ -4,7 +4,6 @@ const PERSONAL_VAULT_HEAVY_DO_NAME = "personal-vault";
 // verifier (PBKDF2-HMAC-SHA256, 600,000 iterations). They must execute inside
 // HeavyDo so the Free-plan entry Worker only performs lightweight routing.
 const PASSWORD_HEAVY_DO_PATHS = new Set([
-  "/identity/accounts/register",
   "/identity/accounts/register/finish",
   "/identity/connect/token",
   "/api/accounts/password",
@@ -15,6 +14,7 @@ const PASSWORD_HEAVY_DO_PATHS = new Set([
   "/api/accounts/delete",
   "/api/accounts",
   "/api/accounts/set-password",
+  "/api/accounts/key-management/rotate-user-account-keys",
 ]);
 
 const HEAVY_DO_PREFIXES = [

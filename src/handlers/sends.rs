@@ -22,8 +22,8 @@ use crate::{
     error::AppError,
     logging::targets,
     models::send::{
-        SEND_TYPE_FILE, SEND_TYPE_TEXT, SendAccessData, SendDBModel, SendData, SendFileDBModel,
-        send_to_json, send_to_json_access, uuid_from_access_id,
+        SEND_TYPE_FILE, SEND_TYPE_TEXT, SendDBModel, SendData, SendFileDBModel, send_to_json,
+        send_to_json_access, uuid_from_access_id,
     },
     notifications::{self, UpdateType},
     notify::{self, NotifyContext, NotifyEvent},
@@ -159,90 +159,33 @@ fn validate_deletion_date(deletion_date: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+const ROTATE_SEND_KEY_SQL: &str =
+    "UPDATE sends SET key = ?1, updated_at = ?2 WHERE id = ?3 AND user_id = ?4";
+
 pub(crate) async fn rotate_send_data(
     db: &worker::D1Database,
     user_id: &str,
     payload: SendData,
     now: &str,
 ) -> Result<(), AppError> {
-    let send_id = payload._id.clone().ok_or_else(|| {
+    let send_id = payload._id.ok_or_else(|| {
         AppError::BadRequest("Send id is required during key rotation".to_string())
     })?;
-    let existing = get_send_by_id_and_user(db, &send_id, user_id)
-        .await?
-        .ok_or_else(|| AppError::BadRequest("Send doesn't exist".to_string()))?;
-    if existing.r#type != payload.r#type {
-        return Err(AppError::BadRequest("Cannot change send type".to_string()));
+    // Send content stays encrypted with its existing key; rotation only rewraps it.
+    let result = db
+        .prepare(ROTATE_SEND_KEY_SQL)
+        .bind(&[
+            payload.key.into(),
+            now.into(),
+            send_id.into(),
+            user_id.into(),
+        ])?
+        .run()
+        .await
+        .map_err(|_| AppError::Database)?;
+    if result.meta()?.and_then(|meta| meta.changes).unwrap_or(0) != 1 {
+        return Err(AppError::BadRequest("Send doesn't exist".to_string()));
     }
-    reject_unsupported_email_verification(&payload)?;
-    validate_deletion_date(&payload.deletion_date)?;
-
-    let name = payload.name.clone();
-    let notes = payload.notes.clone();
-    let password = payload.password.clone();
-    let max_access_count = payload.max_access_count;
-    let expiration_date = payload.expiration_date.clone();
-    let deletion_date = payload.deletion_date.clone();
-    let disabled = payload.disabled;
-    let hide_email = payload.hide_email;
-    let (send_type, key, data) = extract_send_payload_data(payload)?;
-    let data = serde_json::to_string(&data).map_err(|_| AppError::Internal)?;
-
-    let (password_hash, password_salt, password_iter) = if let Some(password) = password {
-        let salt = new_salt_b64();
-        let hash = hash_password(&password, &salt, SEND_PASSWORD_ITERATIONS)?;
-        (Some(hash), Some(salt), Some(SEND_PASSWORD_ITERATIONS))
-    } else {
-        (
-            existing.password_hash,
-            existing.password_salt,
-            existing.password_iter,
-        )
-    };
-
-    db.prepare(
-        "UPDATE sends SET type = ?1, name = ?2, notes = ?3, data = ?4, key = ?5,
-         password_hash = ?6, password_salt = ?7, password_iter = ?8,
-         max_access_count = ?9, updated_at = ?10, expiration_date = ?11,
-         deletion_date = ?12, disabled = ?13, hide_email = ?14
-         WHERE id = ?15 AND user_id = ?16",
-    )
-    .bind(&[
-        send_type.into(),
-        name.into(),
-        notes
-            .map(Into::into)
-            .unwrap_or(worker::wasm_bindgen::JsValue::NULL),
-        data.into(),
-        key.into(),
-        password_hash
-            .map(Into::into)
-            .unwrap_or(worker::wasm_bindgen::JsValue::NULL),
-        password_salt
-            .map(Into::into)
-            .unwrap_or(worker::wasm_bindgen::JsValue::NULL),
-        password_iter
-            .map(Into::into)
-            .unwrap_or(worker::wasm_bindgen::JsValue::NULL),
-        max_access_count
-            .map(Into::into)
-            .unwrap_or(worker::wasm_bindgen::JsValue::NULL),
-        now.into(),
-        expiration_date
-            .map(Into::into)
-            .unwrap_or(worker::wasm_bindgen::JsValue::NULL),
-        deletion_date.into(),
-        (if disabled { 1 } else { 0 }).into(),
-        hide_email
-            .map(|value| if value { 1 } else { 0 })
-            .map(Into::into)
-            .unwrap_or(worker::wasm_bindgen::JsValue::NULL),
-        send_id.into(),
-        user_id.into(),
-    ])?
-    .run()
-    .await
-    .map_err(|_| AppError::Database)?;
     Ok(())
 }
 
@@ -718,24 +661,59 @@ pub(crate) async fn purge_expired_sends(env: &worker::Env) -> Result<usize, AppE
     Ok(purged)
 }
 
+const REGISTER_SEND_ACCESS_SQL: &str = "UPDATE sends
+     SET access_count = access_count + 1, updated_at = ?1
+     WHERE id = ?2
+       AND (max_access_count IS NULL OR access_count < max_access_count)";
+
 async fn register_send_access(
     db: &worker::D1Database,
     send_id: &str,
 ) -> Result<Option<String>, AppError> {
     let revision = now_rfc3339_millis();
     let result = db
-        .prepare(
-            "UPDATE sends
-             SET access_count = access_count + 1, updated_at = ?1
-             WHERE id = ?2
-               AND (max_access_count IS NULL OR access_count < max_access_count)",
-        )
+        .prepare(REGISTER_SEND_ACCESS_SQL)
         .bind(&[revision.clone().into(), send_id.into()])?
         .run()
         .await
         .map_err(|_| AppError::Database)?;
     let changed = result.meta()?.and_then(|meta| meta.changes).unwrap_or(0);
     Ok((changed == 1).then_some(revision))
+}
+
+async fn count_send_access(
+    db: &worker::D1Database,
+    state: &Arc<AppState>,
+    send: &mut SendDBModel,
+) -> Result<(), AppError> {
+    let revision = register_send_access(db, &send.id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Send not found".to_string()))?;
+    send.access_count += 1;
+    send.updated_at = revision;
+    finish_send_mutation(
+        db,
+        state,
+        &send.user_id,
+        &send.id,
+        &send.updated_at,
+        UpdateType::SyncSendUpdate,
+    )
+    .await
+}
+
+fn validate_send_file_id(send: &SendDBModel, file_id: &str) -> Result<(), AppError> {
+    if send.r#type != SEND_TYPE_FILE {
+        return Err(AppError::BadRequest(
+            "Send is not a file type send.".to_string(),
+        ));
+    }
+    let data: Value = serde_json::from_str(&send.data)
+        .map_err(|_| AppError::NotFound("Send not found".to_string()))?;
+    if data.get("id").and_then(Value::as_str) != Some(file_id) {
+        return Err(AppError::NotFound("Send not found".to_string()));
+    }
+    Ok(())
 }
 
 async fn get_creator_identifier(
@@ -784,34 +762,6 @@ fn validate_send_access(send: &SendDBModel) -> Result<(), AppError> {
         return Err(AppError::NotFound("Send not found".to_string()));
     }
 
-    Ok(())
-}
-
-fn validate_send_password(send: &SendDBModel, password: Option<String>) -> Result<(), AppError> {
-    let Some(stored_hash_b64) = send.password_hash.as_deref() else {
-        log::debug!(target: targets::AUTH, "send.password_check.skip send_id={} reason=no_password_hash", send.id);
-        return Ok(());
-    };
-    let Some(stored_salt_b64) = send.password_salt.as_deref() else {
-        log::error!(target: targets::AUTH, "send.password_check.error send_id={} reason=missing_salt", send.id);
-        return Err(AppError::Internal);
-    };
-
-    let Some(password) = password else {
-        log::warn!(target: targets::AUTH, "send.password_check.fail send_id={} reason=password_not_provided", send.id);
-        return Err(AppError::Unauthorized("Password not provided".to_string()));
-    };
-    let candidate = match send.password_iter {
-        Some(iterations) if iterations > 0 => {
-            hash_password(&password, stored_salt_b64, iterations)?
-        }
-        _ => hash_password_legacy(&password, stored_salt_b64)?,
-    };
-    if !constant_time_eq(stored_hash_b64.as_bytes(), candidate.as_bytes()) {
-        log::warn!(target: targets::AUTH, "send.password_check.fail send_id={} reason=password_mismatch", send.id);
-        return Err(AppError::BadRequest("Invalid password".to_string()));
-    }
-    log::debug!(target: targets::AUTH, "send.password_check.ok send_id={}", send.id);
     Ok(())
 }
 
@@ -914,24 +864,6 @@ pub async fn issue_send_access_token(
             ));
         }
     }
-
-    let Some(revision) = register_send_access(&db, &send.id).await? else {
-        return Ok(send_access_token_error(
-            StatusCode::NOT_FOUND,
-            "invalid_grant",
-            "send_id_invalid",
-            "Send has reached its maximum access count",
-        ));
-    };
-    finish_send_mutation(
-        &db,
-        state,
-        &send.user_id,
-        &send.id,
-        &revision,
-        UpdateType::SyncSendUpdate,
-    )
-    .await?;
 
     let now = Utc::now();
     let expires_in = chrono::Duration::minutes(SEND_ACCESS_TOKEN_TTL_MINUTES);
@@ -1150,7 +1082,7 @@ pub async fn post_send(
 
     if payload.r#type == SEND_TYPE_FILE {
         return Err(AppError::BadRequest(
-            "File sends should use /api/sends/file".to_string(),
+            "File sends should use /api/sends/file/v2".to_string(),
         ));
     }
 
@@ -1255,178 +1187,6 @@ pub async fn post_send(
             send_id: Some(send_id),
             detail: Some(format!("type={send_type}")),
             meta,
-            ..Default::default()
-        },
-    );
-    Ok(Json(send_to_json(&send)))
-}
-
-#[worker::send]
-pub async fn post_send_file_legacy(
-    claims: Claims,
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    mut multipart: Multipart,
-) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&state.env)?;
-    claims.verify_security_stamp(&db).await?;
-    let file_id = Uuid::new_v4().to_string();
-    let send_id = Uuid::new_v4().to_string();
-    let object_key = format!("sends/{}/{}/{}", claims.sub, send_id, file_id);
-    let bucket = state
-        .env
-        .bucket(SEND_FILES_BUCKET_BINDING)
-        .map_err(|_| AppError::Internal)?;
-    let committed = async {
-        let mut model = None;
-        let mut encrypted_file_name = None;
-        let mut uploaded_size = None;
-        while let Some(mut field) = multipart
-            .next_field()
-            .await
-            .map_err(|_| AppError::BadRequest("Invalid multipart".to_string()))?
-        {
-            match field.name() {
-                Some("model") => {
-                    model = Some(field.text().await.map_err(|_| {
-                        AppError::BadRequest("Invalid send model".to_string())
-                    })?);
-                }
-                Some("data") => {
-                    if uploaded_size.is_some() {
-                        return Err(AppError::BadRequest(
-                            "Multiple file data fields are not supported".to_string(),
-                        ));
-                    }
-                    encrypted_file_name = field.file_name().map(str::to_string);
-                    uploaded_size = Some(r2_file::upload_field(&bucket, &object_key, &mut field).await?);
-                }
-                _ => {}
-            }
-        }
-
-        let model = model.ok_or_else(|| AppError::BadRequest("Missing send model".to_string()))?;
-        let payload: SendData = serde_json::from_str(&model)
-            .map_err(|_| AppError::BadRequest("Invalid send model".to_string()))?;
-        reject_unsupported_email_verification(&payload)?;
-        if payload.r#type != SEND_TYPE_FILE {
-            return Err(AppError::BadRequest(
-                "Send content is not a file".to_string(),
-            ));
-        }
-        validate_deletion_date(&payload.deletion_date)?;
-        let encrypted_file_name = encrypted_file_name
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| AppError::BadRequest("No filename provided".to_string()))?;
-        let file_length = uploaded_size
-            .ok_or_else(|| AppError::BadRequest("Missing file data".to_string()))?
-            as i64;
-        check_storage_quota(&db, file_length).await?;
-
-        let name = payload.name.clone();
-        let notes = payload.notes.clone();
-        let password = payload.password.clone();
-        let max_access_count = payload.max_access_count;
-        let expiration_date = payload.expiration_date.clone();
-        let deletion_date = payload.deletion_date.clone();
-        let disabled = payload.disabled;
-        let hide_email = payload.hide_email;
-        let (send_type, key, mut data_value) = extract_send_payload_data(payload)?;
-        if let Some(obj) = data_value.as_object_mut() {
-            obj.insert("id".to_string(), Value::String(file_id.clone()));
-            obj.insert("size".to_string(), Value::Number(file_length.into()));
-            obj.insert(
-                "sizeName".to_string(),
-                Value::String(display_size(file_length)),
-            );
-        }
-
-        let now = now_rfc3339_millis();
-        let data_str = serde_json::to_string(&data_value).map_err(|_| AppError::Internal)?;
-        let password_salt = password
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .map(|_| new_salt_b64());
-        let password_hash = match (password.as_deref(), password_salt.as_deref()) {
-            (Some(password), Some(salt)) => {
-                Some(hash_password(password, salt, SEND_PASSWORD_ITERATIONS)?)
-            }
-            _ => None,
-        };
-        let password_iter = password_hash.as_ref().map(|_| SEND_PASSWORD_ITERATIONS);
-        let send_stmt = query!(
-            &db,
-            "INSERT INTO sends (id, user_id, organization_id, type, name, notes, data, key, password_hash, password_salt, password_iter, max_access_count, access_count, created_at, updated_at, expiration_date, deletion_date, disabled, hide_email)
-             VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13, ?14, ?15, ?16, ?17)",
-            send_id,
-            claims.sub,
-            send_type,
-            name,
-            notes,
-            data_str,
-            key,
-            password_hash,
-            password_salt,
-            password_iter,
-            max_access_count,
-            now,
-            now,
-            expiration_date,
-            deletion_date,
-            if disabled { 1 } else { 0 },
-            hide_email.map(|value| if value { 1 } else { 0 })
-        )
-        .map_err(|_| AppError::Database)?;
-        let file_stmt = query!(
-            &db,
-            "INSERT INTO send_files (id, send_id, user_id, file_name, size, mime, data_base64, r2_object_key, storage_type, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, ?6, 'r2', ?7, ?8)",
-            file_id,
-            send_id,
-            claims.sub,
-            encrypted_file_name,
-            file_length as f64,
-            object_key,
-            now,
-            now
-        )
-        .map_err(|_| AppError::Database)?;
-        db.batch(vec![send_stmt, file_stmt])
-            .await
-            .map_err(|_| AppError::Database)?;
-        Ok::<_, AppError>((send_type, encrypted_file_name))
-    }
-    .await;
-    let (send_type, encrypted_file_name) = match committed {
-        Ok(result) => result,
-        Err(err) => {
-            let _ = bucket.delete(object_key).await;
-            return Err(err);
-        }
-    };
-
-    let send = get_send_by_id_and_user(&db, &send_id, &claims.sub)
-        .await?
-        .ok_or(AppError::Internal)?;
-    finish_send_mutation(
-        &db,
-        &state,
-        &claims.sub,
-        &send_id,
-        &send.updated_at,
-        UpdateType::SyncSendCreate,
-    )
-    .await?;
-    notify::notify_background(
-        &state.ctx,
-        state.env.clone(),
-        NotifyEvent::SendCreate,
-        NotifyContext {
-            user_id: Some(claims.sub),
-            user_email: Some(claims.email),
-            send_id: Some(send_id),
-            detail: Some(format!("type={send_type}, file={encrypted_file_name}")),
-            meta: notify::extract_request_meta(&headers),
             ..Default::default()
         },
     );
@@ -1983,79 +1743,16 @@ pub async fn post_access(
 ) -> Result<Json<Value>, AppError> {
     let send_id = send_id_from_access_token(&state, &headers)?;
     let db = db::get_db(&state.env)?;
-    let send = get_send_by_id(&db, &send_id)
+    let mut send = get_send_by_id(&db, &send_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Send not found".to_string()))?;
     validate_send_lifetime(&send)?;
+    if send.r#type == SEND_TYPE_TEXT {
+        count_send_access(&db, &state, &mut send).await?;
+    }
     let creator_identifier = get_creator_identifier(&db, &send).await?;
 
     log::info!(target: targets::AUTH, "send.access_token.success send_id={} type={}", send.id, send.r#type);
-    Ok(Json(send_to_json_access(&send, creator_identifier)))
-}
-
-#[worker::send]
-pub async fn post_access_legacy(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(access_id): Path<String>,
-    Json(payload): Json<SendAccessData>,
-) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&state.env)?;
-    let client_ip = request_client_ip(&headers);
-    log::info!(
-        target: targets::AUTH,
-        "send.access.request access_id={} ip={} has_password_payload={} has_turnstile_cookie={}",
-        access_id,
-        client_ip.as_deref().unwrap_or("unknown"),
-        payload.password.as_deref().map(str::trim).map(|s| !s.is_empty()).unwrap_or(false),
-        extract_send_access_cookie(&headers).is_some()
-    );
-    // Require Turnstile send-access pass (cookie set by /send-verify flow)
-    require_send_access_pass(&state, &headers).await?;
-    enforce_send_access_rate_limit(
-        &state,
-        format!(
-            "send_access:{}:{}",
-            access_id,
-            client_ip.as_deref().unwrap_or("unknown")
-        ),
-    )
-    .await?;
-
-    let send_id = uuid_from_access_id(&access_id)
-        .ok_or_else(|| AppError::NotFound("Send not found".to_string()))?;
-    let send = get_send_by_id(&db, &send_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Send not found".to_string()))?;
-
-    log::info!(
-        target: targets::AUTH,
-        "send.access.loaded send_id={} type={} stored_has_password={}",
-        send.id,
-        send.r#type,
-        send.password_hash.as_deref().is_some()
-    );
-
-    validate_send_access(&send)?;
-    validate_send_password(&send, payload.password)?;
-
-    if send.r#type == SEND_TYPE_TEXT {
-        let revision = register_send_access(&db, &send.id)
-            .await?
-            .ok_or_else(|| AppError::NotFound("Send not found".to_string()))?;
-        finish_send_mutation(
-            &db,
-            &state,
-            &send.user_id,
-            &send.id,
-            &revision,
-            UpdateType::SyncSendUpdate,
-        )
-        .await?;
-    }
-
-    let creator_identifier = get_creator_identifier(&db, &send).await?;
-    log::info!(target: targets::AUTH, "send.access.success send_id={} type={}", send.id, send.r#type);
     Ok(Json(send_to_json_access(&send, creator_identifier)))
 }
 
@@ -2067,10 +1764,11 @@ pub async fn post_access_file(
 ) -> Result<Json<Value>, AppError> {
     let send_id = send_id_from_access_token(&state, &headers)?;
     let db = db::get_db(&state.env)?;
-    let send = get_send_by_id(&db, &send_id)
+    let mut send = get_send_by_id(&db, &send_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Send not found".to_string()))?;
     validate_send_lifetime(&send)?;
+    validate_send_file_id(&send, &file_id)?;
 
     let file_exists: Option<i64> = db
         .prepare("SELECT 1 AS ok FROM send_files WHERE id = ?1 AND send_id = ?2 LIMIT 1")
@@ -2082,91 +1780,11 @@ pub async fn post_access_file(
         return Err(AppError::NotFound("Send not found".to_string()));
     }
 
+    count_send_access(&db, &state, &mut send).await?;
     let token = generate_download_token(&state, &send.id, &file_id).await?;
     let url = state.public_url(&format!("/api/sends/{}/{file_id}?t={token}", send.id));
 
     log::info!(target: targets::AUTH, "send.access_file_token.success send_id={} file_id={}", send.id, file_id);
-    Ok(Json(json!({
-        "object": "send-fileDownload",
-        "id": file_id,
-        "url": url
-    })))
-}
-
-#[worker::send]
-pub async fn post_access_file_legacy(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path((send_id, file_id)): Path<(String, String)>,
-    Json(payload): Json<SendAccessData>,
-) -> Result<Json<Value>, AppError> {
-    let db = db::get_db(&state.env)?;
-    let client_ip = request_client_ip(&headers);
-    log::info!(
-        target: targets::AUTH,
-        "send.access_file.request send_id={} file_id={} ip={} has_password_payload={} has_turnstile_cookie={}",
-        send_id,
-        file_id,
-        client_ip.as_deref().unwrap_or("unknown"),
-        payload.password.as_deref().map(str::trim).map(|s| !s.is_empty()).unwrap_or(false),
-        extract_send_access_cookie(&headers).is_some()
-    );
-    // Require Turnstile send-access pass (cookie set by the /send-verify flow)
-    require_send_access_pass(&state, &headers).await?;
-    enforce_send_access_rate_limit(
-        &state,
-        format!(
-            "send_access_file:{}:{}:{}",
-            send_id,
-            file_id,
-            client_ip.as_deref().unwrap_or("unknown")
-        ),
-    )
-    .await?;
-
-    let send = get_send_by_id(&db, &send_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Send not found".to_string()))?;
-
-    log::info!(
-        target: targets::AUTH,
-        "send.access_file.loaded send_id={} type={} stored_has_password={}",
-        send.id,
-        send.r#type,
-        send.password_hash.as_deref().is_some()
-    );
-
-    validate_send_access(&send)?;
-    validate_send_password(&send, payload.password)?;
-
-    let file_exists: Option<i64> = db
-        .prepare("SELECT 1 AS ok FROM send_files WHERE id = ?1 AND send_id = ?2 LIMIT 1")
-        .bind(&[file_id.clone().into(), send_id.clone().into()])?
-        .first(Some("ok"))
-        .await
-        .map_err(|_| AppError::Database)?;
-    if file_exists.is_none() {
-        return Err(AppError::NotFound("Send not found".to_string()));
-    }
-
-    let revision = register_send_access(&db, &send.id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Send not found".to_string()))?;
-    finish_send_mutation(
-        &db,
-        &state,
-        &send.user_id,
-        &send.id,
-        &revision,
-        UpdateType::SyncSendUpdate,
-    )
-    .await?;
-
-    let token = generate_download_token(&state, &send_id, &file_id).await?;
-    let url = state.public_url(&format!("/api/sends/{send_id}/{file_id}?t={token}"));
-
-    log::info!(target: targets::AUTH, "send.access_file.success send_id={} file_id={}", send_id, file_id);
-
     Ok(Json(json!({
         "object": "send-fileDownload",
         "id": file_id,
@@ -2286,7 +1904,7 @@ pub async fn download_send(
 mod tests {
     use super::{
         hash_password, hash_password_legacy, new_salt_b64, validate_deletion_date,
-        validate_send_access, validate_send_lifetime,
+        validate_send_access, validate_send_file_id, validate_send_lifetime,
     };
     use crate::models::send::{SEND_TYPE_TEXT, SendDBModel};
     use base64::{Engine as _, engine::general_purpose};
@@ -2329,10 +1947,10 @@ mod tests {
     }
 
     #[test]
-    fn issued_send_token_remains_usable_at_access_limit() {
+    fn send_access_limit_is_separate_from_its_validity_window() {
         let future =
             (Utc::now() + chrono::Duration::days(1)).to_rfc3339_opts(SecondsFormat::Millis, true);
-        let send = SendDBModel {
+        let mut send = SendDBModel {
             id: "send-id".to_string(),
             user_id: "user-id".to_string(),
             organization_id: None,
@@ -2356,5 +1974,15 @@ mod tests {
 
         assert!(validate_send_lifetime(&send).is_ok());
         assert!(validate_send_access(&send).is_err());
+        assert!(matches!(
+            validate_send_file_id(&send, "file-id"),
+            Err(crate::error::AppError::BadRequest(_))
+        ));
+        send.r#type = super::SEND_TYPE_FILE;
+        send.data = r#"{"id":"file-id"}"#.to_string();
+        assert!(validate_send_file_id(&send, "file-id").is_ok());
+        assert!(validate_send_file_id(&send, "another-file").is_err());
+        send.data = "invalid-json".to_string();
+        assert!(validate_send_file_id(&send, "file-id").is_err());
     }
 }

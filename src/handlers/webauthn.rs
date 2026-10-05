@@ -677,6 +677,7 @@ pub async fn webauthn_delete_credential(
         .flatten();
 
     webauthn::delete_webauthn_key(&db, &claims.sub, id).await?;
+    two_factor::clear_remember_tokens(&db, &claims.sub).await?;
 
     // Send notification
     let user_email: Option<String> = db
@@ -825,6 +826,7 @@ pub async fn delete_webauthn(
     .await?;
 
     webauthn::delete_webauthn_key(&db, &claims.sub, payload.id).await?;
+    two_factor::clear_remember_tokens(&db, &claims.sub).await?;
     if !webauthn::has_webauthn_credentials(&db, &claims.sub).await? {
         webauthn::set_webauthn_two_factor_enabled(&db, &claims.sub, false).await?;
     }

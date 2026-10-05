@@ -38,6 +38,39 @@ const SINGLE_USER_REGISTRATION_MESSAGE: &str =
     "Registration is closed because this vault already has an account";
 const SINGLE_USER_TRIGGER_ERROR: &str = "single-user vault already has an account";
 
+const SET_INITIAL_KEYPAIR_SQL: &str =
+    "UPDATE users SET private_key = ?1, public_key = ?2, updated_at = ?3 WHERE id = ?4
+     AND private_key = '' AND public_key = ''";
+
+fn registration_name(token: Option<&str>, email: &str, secret: &[u8]) -> Result<String, AppError> {
+    let token = token
+        .filter(|token| !token.trim().is_empty())
+        .ok_or_else(|| {
+            AppError::BadRequest("Registration is missing required parameters".to_string())
+        })?;
+    let claims = jsonwebtoken::decode::<RegisterVerifyClaims>(
+        token,
+        &jsonwebtoken::DecodingKey::from_secret(secret),
+        &jsonwebtoken::Validation::default(),
+    )
+    .map_err(|_| AppError::BadRequest("Invalid email verification token".to_string()))?
+    .claims;
+    if claims.sub != email {
+        return Err(AppError::BadRequest(
+            "Email verification token does not match email".to_string(),
+        ));
+    }
+    if claims.name.as_ref().is_some_and(|name| name.len() > 50) {
+        return Err(AppError::BadRequest(
+            "The field Name must be a string with a maximum length of 50.".to_string(),
+        ));
+    }
+    Ok(claims
+        .name
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| email.to_string()))
+}
+
 fn clean_password_hint(password_hint: Option<String>) -> Option<String> {
     match password_hint {
         None => None,
@@ -608,14 +641,11 @@ pub async fn prelogin(
 #[worker::send]
 pub async fn register(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<Value>, AppError> {
-    // Debug log
-    log::info!(
-        "Register payload: name={:?}, email={}",
-        payload.name,
-        payload.email
-    );
+    super::identity::enforce_unauthenticated_rate_limit(&state, &headers).await?;
+    log::info!("Register email={}", payload.email.escape_debug());
 
     let db = db::get_db(&state.env)?;
 
@@ -627,6 +657,11 @@ pub async fn register(
             "Unexpected RegisterData format".to_string(),
         ));
     }
+    let name = registration_name(
+        payload.email_verification_token.as_deref(),
+        &email,
+        state.jwt_keys.access_secret.as_ref(),
+    )?;
 
     let registration_kdf = payload.kdf();
     let kdf_type = registration_kdf.kdf;
@@ -652,24 +687,6 @@ pub async fn register(
         return Err(AppError::Unauthorized("Not allowed to signup".to_string()));
     }
     let now = Utc::now().to_rfc3339();
-
-    let jwt_keys = state.jwt_keys.clone();
-    let name_from_token = if let Some(token) = payload.email_verification_token.as_ref() {
-        use jsonwebtoken::{DecodingKey, Validation, decode};
-        let decoding_key = DecodingKey::from_secret(jwt_keys.access_secret.as_ref());
-        match decode::<RegisterVerifyClaims>(token, &decoding_key, &Validation::default()) {
-            Ok(token_data) if token_data.claims.sub == email => {
-                token_data.claims.name.filter(|n| !n.trim().is_empty())
-            }
-            _ => None,
-        }
-    } else {
-        None
-    };
-
-    let name = name_from_token
-        .or_else(|| payload.name.filter(|n| !n.trim().is_empty()))
-        .unwrap_or_else(|| email.clone());
 
     let (kdf_memory, kdf_parallelism) =
         validate_kdf(kdf_type, kdf_iterations, kdf_memory, kdf_parallelism)?;
@@ -745,8 +762,7 @@ pub async fn register(
     })?;
 
     Ok(Json(json!({
-        "object": "register",
-        "captchaBypassToken": ""
+        "object": "registerFinish"
     })))
 }
 
@@ -1308,14 +1324,13 @@ pub async fn rotate_user_account_keys(
     {
         return Err(AppError::BadRequest("Folder doesn't exist".to_string()));
     }
-    if payload
-        .account_data
-        .sends
-        .iter()
-        .filter_map(|send| send._id.as_ref())
-        .any(|id| !existing_sends.contains(id))
-    {
-        return Err(AppError::BadRequest("Send doesn't exist".to_string()));
+    for send in &payload.account_data.sends {
+        let id = send._id.as_ref().ok_or_else(|| {
+            AppError::BadRequest("Send id is required during key rotation".to_string())
+        })?;
+        if !existing_sends.contains(id) {
+            return Err(AppError::BadRequest("Send doesn't exist".to_string()));
+        }
     }
 
     let now = db::now_rfc3339_millis();
@@ -1627,7 +1642,7 @@ pub async fn send_verification_email(
     let exp = (now + Duration::hours(24)).timestamp() as usize;
 
     let claims = RegisterVerifyClaims {
-        sub: payload.email.to_lowercase(),
+        sub: crate::auth::normalize_email(&payload.email),
         name: payload.name.filter(|n| !n.trim().is_empty()),
         exp,
     };
@@ -1891,7 +1906,8 @@ pub async fn post_keys(
     claims.verify_security_stamp(&db).await?;
     let now = Utc::now().to_rfc3339();
 
-    db.prepare("UPDATE users SET private_key = ?1, public_key = ?2, updated_at = ?3 WHERE id = ?4")
+    let result = db
+        .prepare(SET_INITIAL_KEYPAIR_SQL)
         .bind(&[
             payload.encrypted_private_key.clone().into(),
             payload.public_key.clone().into(),
@@ -1901,6 +1917,12 @@ pub async fn post_keys(
         .run()
         .await
         .map_err(|_| AppError::Database)?;
+
+    if result.meta()?.and_then(|meta| meta.changes).unwrap_or(0) != 1 {
+        return Err(AppError::BadRequest(
+            "User has existing keypair".to_string(),
+        ));
+    }
 
     Ok(Json(json!({
         "privateKey": payload.encrypted_private_key,
@@ -2173,15 +2195,17 @@ pub async fn post_set_password(
     claims.verify_security_stamp(&db).await?;
 
     let user: Option<Value> = db
-        .prepare("SELECT private_key FROM users WHERE id = ?1")
+        .prepare("SELECT private_key, master_password_hash FROM users WHERE id = ?1")
         .bind(&[claims.sub.clone().into()])?
         .first(None)
         .await
         .map_err(|_| AppError::Database)?;
-    if let Some(user) = user
-        && let Some(private_key) = user.get("private_key").and_then(|v| v.as_str())
-        && !private_key.is_empty()
-    {
+    let user = user.ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+    if ["private_key", "master_password_hash"].iter().any(|field| {
+        user.get(*field)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+    }) {
         return Err(AppError::BadRequest(
             "Account already initialized, cannot set password".to_string(),
         ));
@@ -2238,14 +2262,84 @@ pub async fn post_set_password(
     two_factor::clear_remember_tokens(&db, &claims.sub).await?;
 
     Ok(Json(json!({
-        "object": "set-password",
-        "captchaBypassToken": ""
+        "object": "set-password"
     })))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn register_token(name: Option<String>, exp: usize, secret: &[u8]) -> String {
+        jsonwebtoken::encode(
+            &jsonwebtoken::Header::default(),
+            &RegisterVerifyClaims {
+                sub: "user@example.com".to_string(),
+                name,
+                exp,
+            },
+            &jsonwebtoken::EncodingKey::from_secret(secret),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn registration_requires_a_valid_token_bound_to_the_email() {
+        let secret = b"test-registration-secret";
+        let exp = (Utc::now() + chrono::Duration::hours(1)).timestamp() as usize;
+        let token = register_token(Some("Verified name".to_string()), exp, secret);
+        assert_eq!(
+            registration_name(Some(&token), "user@example.com", secret).unwrap(),
+            "Verified name"
+        );
+        assert!(registration_name(None, "user@example.com", secret).is_err());
+        assert!(registration_name(Some(" "), "user@example.com", secret).is_err());
+        assert!(registration_name(Some(&token), "other@example.com", secret).is_err());
+        assert!(registration_name(Some(&token), "user@example.com", b"wrong-secret").is_err());
+        let expired = register_token(
+            None,
+            (Utc::now() - chrono::Duration::hours(1)).timestamp() as usize,
+            secret,
+        );
+        assert!(registration_name(Some(&expired), "user@example.com", secret).is_err());
+    }
+
+    #[test]
+    fn registration_uses_token_name_and_enforces_its_length() {
+        let secret = b"test-registration-secret";
+        let exp = (Utc::now() + chrono::Duration::hours(1)).timestamp() as usize;
+        let token = register_token(None, exp, secret);
+        assert_eq!(
+            registration_name(Some(&token), "user@example.com", secret).unwrap(),
+            "user@example.com"
+        );
+        let token = register_token(Some("a".repeat(50)), exp, secret);
+        assert!(registration_name(Some(&token), "user@example.com", secret).is_ok());
+        let token = register_token(Some("a".repeat(51)), exp, secret);
+        assert!(registration_name(Some(&token), "user@example.com", secret).is_err());
+    }
+
+    #[test]
+    fn change_password_accepts_android_pascal_case_authentication_fields() {
+        let payload: ChangeMasterPasswordRequest = serde_json::from_value(json!({
+            "masterPasswordHash": "old-hash",
+            "authenticationData": {
+                "Salt": "user@example.com",
+                "Kdf": { "kdfType": 0, "iterations": 600000 },
+                "MasterPasswordAuthenticationHash": "new-hash"
+            },
+            "unlockData": {
+                "salt": "user@example.com",
+                "kdf": { "kdfType": 0, "iterations": 600000 },
+                "masterKeyWrappedUserKey": "wrapped-key"
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            resolve_password_change_data(&payload, "user@example.com").unwrap(),
+            ("new-hash", "wrapped-key")
+        );
+    }
 
     fn accept_headers(value: Option<&str>) -> HeaderMap {
         let mut headers = HeaderMap::new();

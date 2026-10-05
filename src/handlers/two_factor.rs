@@ -777,7 +777,7 @@ pub async fn send_email_login(
                 target: targets::AUTH,
                 "email 2fa login failed: invalid credentials. IP: {}. Username: {}.",
                 super::identity::client_ip_from_headers(&headers),
-                email
+                email.escape_debug()
             );
             return Err(AppError::Unauthorized(
                 "Username or password is incorrect".to_string(),
@@ -799,7 +799,7 @@ pub async fn send_email_login(
                     target: targets::AUTH,
                     "email 2fa login failed: invalid credentials. IP: {}. Username: {}.",
                     super::identity::client_ip_from_headers(&headers),
-                    email
+                    email.escape_debug()
                 );
                 return Err(AppError::Unauthorized(
                     "Username or password is incorrect".to_string(),
@@ -1117,17 +1117,6 @@ pub async fn disable_twofactor(
         "type": type_,
         "object": "twoFactorProvider"
     })))
-}
-
-// PUT 方法别名，与 vaultwarden 保持一致
-#[worker::send]
-pub async fn disable_twofactor_put(
-    claims: Claims,
-    state: State<Arc<AppState>>,
-    headers: HeaderMap,
-    payload: Json<DisableTwoFactorData>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    disable_twofactor(claims, state, headers, payload).await
 }
 
 #[worker::send]

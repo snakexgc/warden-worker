@@ -71,6 +71,8 @@ pub async fn config(
         "featureStates": {
             "pm-19148-innovation-archive": true,
             "pm-32413-multi-client-password-management": true,
+            "undetermined-cipher-scenario-logic": true,
+            "windows-native-credential-sync": true,
             "enable-basic-auth-response": true,
             "pm-34171-card-scanner": true,
             "pm-32009-new-item-types": true

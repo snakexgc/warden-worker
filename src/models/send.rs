@@ -133,15 +133,6 @@ pub struct SendData {
     pub _id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SendAccessData {
-    pub password: Option<String>,
-    /// Kept for deserialization compatibility; Turnstile is now enforced via cookie.
-    #[serde(rename = "cf-turnstile-response", alias = "cfTurnstileResponse")]
-    pub _cf_turnstile_response: Option<String>,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SendDBModel {
     pub id: String,
@@ -251,7 +242,7 @@ pub fn send_to_json_access(send: &SendDBModel, creator_identifier: Option<String
     }
 
     json!({
-        "id": send.id,
+        "id": access_id_from_uuid(&send.id),
         "type": send.r#type,
         "name": send.name,
         "text": if send.r#type == SEND_TYPE_TEXT { Some(&data_value) } else { None },
@@ -306,6 +297,15 @@ mod tests {
             value.get("authType").and_then(|v| v.as_i64()),
             Some(SEND_AUTH_TYPE_NONE as i64)
         );
+    }
+
+    #[test]
+    fn anonymous_send_response_uses_the_link_access_id() {
+        let send = base_send(None);
+        let value = super::send_to_json_access(&send, Some("user@example.com".to_string()));
+        assert_eq!(value["id"], "AAAAAAAAAAAAAAAAAAAAAQ");
+        assert_eq!(value["id"], send_to_json(&send)["accessId"]);
+        assert_eq!(value["creatorIdentifier"], "user@example.com");
     }
 
     #[test]

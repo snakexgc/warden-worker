@@ -2,7 +2,7 @@ use axum::http::HeaderMap;
 use axum::{Json, extract::State};
 use chrono::Utc;
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 use uuid::Uuid;
 use worker::{D1Database, query};
 
@@ -25,7 +25,7 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct CipherIdsRequest {
-    ids: Vec<String>,
+    ids: HashSet<String>,
 }
 
 #[worker::send]
@@ -1368,7 +1368,18 @@ pub async fn put_cipher_partial(
 
 #[cfg(test)]
 mod tests {
-    use super::{ArchiveUpdate, archive_update_for_full_cipher};
+    use super::{ArchiveUpdate, CipherIdsRequest, archive_update_for_full_cipher};
+
+    #[test]
+    fn bulk_cipher_ids_are_unique_before_any_mutation() {
+        let payload: CipherIdsRequest = serde_json::from_value(serde_json::json!({
+            "ids": ["cipher-1", "cipher-1", "cipher-2"]
+        }))
+        .unwrap();
+        assert_eq!(payload.ids.len(), 2);
+        assert!(payload.ids.contains("cipher-1"));
+        assert!(payload.ids.contains("cipher-2"));
+    }
 
     #[test]
     fn full_cipher_update_clears_archive_for_null_and_ignores_invalid_dates() {

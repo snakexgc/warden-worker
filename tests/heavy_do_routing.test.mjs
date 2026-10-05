@@ -8,7 +8,6 @@ import {
 } from "../src/heavy_do_routing.mjs";
 
 const PASSWORD_ENDPOINTS = [
-  "/identity/accounts/register",
   "/identity/accounts/register/finish",
   "/identity/connect/token",
   "/api/accounts/password",
@@ -19,6 +18,7 @@ const PASSWORD_ENDPOINTS = [
   "/api/accounts/delete",
   "/api/accounts",
   "/api/accounts/set-password",
+  "/api/accounts/key-management/rotate-user-account-keys",
   "/api/two-factor/authenticator/disable",
   "/api/webauthn/credential-id/delete",
 ];

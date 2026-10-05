@@ -76,9 +76,7 @@ pub fn api_router_with_keys(
             "/identity/accounts/prelogin/password",
             post(accounts::prelogin),
         )
-        .route("/api/accounts/prelogin", post(accounts::prelogin))
         .route("/api/accounts/prelogin/password", post(accounts::prelogin))
-        .route("/identity/accounts/register", post(accounts::register))
         .route(
             "/identity/accounts/register/finish",
             post(accounts::register),
@@ -272,7 +270,7 @@ pub fn api_router_with_keys(
         )
         .route(
             "/api/two-factor/disable",
-            post(two_factor::disable_twofactor).put(two_factor::disable_twofactor_put),
+            put(two_factor::disable_twofactor),
         )
         .route("/api/two-factor/get-recover", post(two_factor::get_recover))
         .route("/api/two-factor/recover", post(two_factor::recover))
@@ -285,17 +283,8 @@ pub fn api_router_with_keys(
             post(two_factor::send_email_login),
         )
         .route("/api/sends", get(sends::get_sends).post(sends::post_send))
-        .route(
-            "/api/sends/file",
-            post(sends::post_send_file_legacy)
-                .layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT_BYTES)),
-        )
         .route("/api/sends/file/v2", post(sends::post_send_file_v2))
         .route("/api/sends/access", post(sends::post_access))
-        .route(
-            "/api/sends/access/{access_id}",
-            post(sends::post_access_legacy),
-        )
         .route(
             "/api/sends/access/file/{file_id}",
             post(sends::post_access_file),
@@ -309,10 +298,6 @@ pub fn api_router_with_keys(
         .route(
             "/api/sends/{send_id}/remove-password",
             put(sends::put_remove_send_password),
-        )
-        .route(
-            "/api/sends/{send_id}/access/file/{file_id}",
-            post(sends::post_access_file_legacy),
         )
         .route("/api/sends/{send_id}/{file_id}", get(sends::download_send))
         .route(

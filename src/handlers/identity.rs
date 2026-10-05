@@ -8,7 +8,6 @@ use axum::{
 use chrono::{Duration, Utc};
 use constant_time_eq::constant_time_eq;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
-use semver::Version;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -205,7 +204,9 @@ fn parse_token_request(raw: &[u8]) -> Result<TokenRequest, AppError> {
                     Some(value.parse::<i32>().unwrap_or(14))
                 };
             }
-            "twofactortoken" => request.two_factor_token = Some(value),
+            "twofactortoken" => {
+                request.two_factor_token = (!value.trim().is_empty()).then_some(value)
+            }
             "twofactorprovider" => {
                 request.two_factor_provider = parse_optional_i32(&value, "twoFactorProvider")?
             }
@@ -287,7 +288,7 @@ async fn generate_tokens_and_response(
         premium: true,
         name: user.name.clone().unwrap_or_else(|| "User".to_string()),
         email: user.email.clone(),
-        email_verified: true,
+        email_verified: user.email_verified,
         amr: vec!["Application".into()],
         security_stamp: Some(user.security_stamp.clone()),
         device: device_identifier.clone(),
@@ -309,7 +310,7 @@ async fn generate_tokens_and_response(
         premium: true,
         name: user.name.unwrap_or_else(|| "User".to_string()),
         email: user.email.clone(),
-        email_verified: true,
+        email_verified: user.email_verified,
         amr: vec!["Application".into()],
         security_stamp: Some(user.security_stamp.clone()),
         device: device_identifier,
@@ -364,7 +365,6 @@ async fn generate_tokens_and_response(
         "Key": user.key,
         "MasterPasswordPolicy": { "Object": "masterPasswordPolicy" },
         "PrivateKey": user.private_key,
-        "ResetMasterPassword": false,
         "UserDecryptionOptions": user_decryption_options,
         "AccountKeys": {
             "publicKeyEncryptionKeyPair": {
@@ -423,7 +423,6 @@ async fn generate_api_key_tokens_response(
         "KdfIterations": user.kdf_iterations,
         "KdfMemory": kdf_memory,
         "KdfParallelism": kdf_parallelism,
-        "ResetMasterPassword": false,
         "ForcePasswordReset": false,
         "scope": "api",
         "AccountKeys": {
@@ -682,35 +681,6 @@ async fn get_email_2fa_display_info(
 
     let obscured = obscure_email(&email_data.email);
     Some((obscured, email_data.email))
-}
-
-fn client_needs_legacy_email_2fa_send(headers: &HeaderMap) -> bool {
-    let Some(version) = headers
-        .get("bitwarden-client-version")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return true;
-    };
-    Version::parse(version)
-        .map(|version| version < Version::new(2025, 5, 0))
-        .unwrap_or(true)
-}
-
-async fn maybe_send_legacy_email_2fa(
-    providers: &[i32],
-    user_id: &str,
-    headers: &HeaderMap,
-    state: &Arc<AppState>,
-    db: &worker::D1Database,
-) -> Result<(), AppError> {
-    if providers == [two_factor::TWO_FACTOR_PROVIDER_EMAIL]
-        && client_needs_legacy_email_2fa_send(headers)
-    {
-        super::two_factor::issue_email_login_token(db, state, user_id).await?;
-    }
-    Ok(())
 }
 
 fn obscure_email(email: &str) -> String {
@@ -1244,8 +1214,6 @@ pub async fn token(
 
                 if provider.is_none() && token.is_none() {
                     let Some(device_identifier) = payload.device_identifier.as_deref() else {
-                        maybe_send_legacy_email_2fa(&providers, &user.id, &headers, &state, &db)
-                            .await?;
                         let email_data =
                             get_email_2fa_display_info(&providers, &user.id, &state).await;
                         return Ok(two_factor_required_response(
@@ -1256,8 +1224,6 @@ pub async fn token(
                     let cookie_token = get_cookie(&headers, "twoFactorRemember")
                         .or_else(|| get_cookie(&headers, "TwoFactorRemember"));
                     let Some(cookie_token) = cookie_token.as_deref() else {
-                        maybe_send_legacy_email_2fa(&providers, &user.id, &headers, &state, &db)
-                            .await?;
                         let email_data =
                             get_email_2fa_display_info(&providers, &user.id, &state).await;
                         return Ok(two_factor_required_response(
@@ -1275,8 +1241,6 @@ pub async fn token(
                     )
                     .await?;
                     if !valid {
-                        maybe_send_legacy_email_2fa(&providers, &user.id, &headers, &state, &db)
-                            .await?;
                         let email_data =
                             get_email_2fa_display_info(&providers, &user.id, &state).await;
                         return Ok(two_factor_required_response(
@@ -2063,11 +2027,7 @@ pub async fn token(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        client_needs_legacy_email_2fa_send, effective_device_identifier, parse_token_request,
-        standard_refresh_response,
-    };
-    use axum::http::{HeaderMap, HeaderValue};
+    use super::{effective_device_identifier, parse_token_request, standard_refresh_response};
     use serde_json::json;
 
     #[test]
@@ -2084,6 +2044,18 @@ mod tests {
         assert_eq!(request.two_factor_token.as_deref(), Some("123456"));
         assert_eq!(request.two_factor_provider, Some(1));
         assert_eq!(request.two_factor_remember, Some(1));
+    }
+
+    #[test]
+    fn blank_two_factor_tokens_are_treated_as_missing() {
+        for form in [
+            "grant_type=password&twoFactorToken=",
+            "grant_type=password&twoFactorToken=+++",
+            "grant_type=password&twoFactorToken=%09%0A",
+        ] {
+            let request = parse_token_request(form.as_bytes()).unwrap();
+            assert!(request.two_factor_token.is_none());
+        }
     }
 
     #[test]
@@ -2114,26 +2086,5 @@ mod tests {
         }));
         assert_eq!(response.as_object().unwrap().len(), 5);
         assert!(response.get("Key").is_none());
-    }
-
-    #[test]
-    fn legacy_email_2fa_send_version_boundary() {
-        let mut headers = HeaderMap::new();
-        assert!(client_needs_legacy_email_2fa_send(&headers));
-        headers.insert(
-            "bitwarden-client-version",
-            HeaderValue::from_static("2025.4.9"),
-        );
-        assert!(client_needs_legacy_email_2fa_send(&headers));
-        headers.insert(
-            "bitwarden-client-version",
-            HeaderValue::from_static("2025.5.0"),
-        );
-        assert!(!client_needs_legacy_email_2fa_send(&headers));
-        headers.insert(
-            "bitwarden-client-version",
-            HeaderValue::from_static("2026.6.1"),
-        );
-        assert!(!client_needs_legacy_email_2fa_send(&headers));
     }
 }
