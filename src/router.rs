@@ -195,7 +195,10 @@ pub fn api_router_with_keys(
             "/api/accounts/delete-recover-token",
             post(accounts::post_delete_recover_token),
         )
-        .route("/api/accounts/keys", post(accounts::post_keys))
+        .route(
+            "/api/accounts/keys",
+            get(accounts::get_keys).post(accounts::post_keys),
+        )
         .route(
             "/api/users/{user_id}/public-key",
             get(accounts::get_public_key),

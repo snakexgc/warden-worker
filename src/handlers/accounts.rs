@@ -358,18 +358,24 @@ pub struct AvatarData {
     pub avatar_color: Option<String>,
 }
 
-fn profile_json(user: User, two_factor_enabled: bool) -> Value {
-    let account_keys = json!({
+/// Shared `accountKeys` payload used by profile, sync and
+/// `GET /api/accounts/keys` (upstream `895ec2b1`).
+pub(crate) fn account_keys_json(private_key: &str, public_key: &str) -> Value {
+    json!({
         "publicKeyEncryptionKeyPair": {
-            "wrappedPrivateKey": user.private_key.clone(),
-            "publicKey": user.public_key.clone(),
+            "wrappedPrivateKey": private_key,
+            "publicKey": public_key,
             "signedPublicKey": null,
             "object": "publicKeyEncryptionKeyPair"
         },
         "securityState": null,
         "signatureKeyPair": null,
         "object": "privateKeys"
-    });
+    })
+}
+
+fn profile_json(user: User, two_factor_enabled: bool) -> Value {
+    let account_keys = account_keys_json(&user.private_key, &user.public_key);
 
     json!({
         "id": user.id,
@@ -546,6 +552,48 @@ pub async fn revision_date(
     Ok(Json(millis))
 }
 
+type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+
+/// Returns an index in `0..len` derived from a keyed hash of the email so the
+/// same (unknown) email always gets the same KDF settings, preventing
+/// account-enumeration fingerprinting (upstream `895ec2b1`).
+fn prelogin_kdf_index(secret: &str, email: &str, len: usize) -> usize {
+    use hmac::Mac as _;
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("hmac accepts any key length");
+    mac.update(email.as_bytes());
+    let tag = mac.finalize().into_bytes();
+    let first8: [u8; 8] = tag[0..8].try_into().expect("tag has at least 8 bytes");
+    (u64::from_be_bytes(first8) as usize) % len
+}
+
+/// Like upstream, an unknown email gets KDF settings picked from a list of
+/// common ones by a keyed hash of the email, so they stay the same between
+/// requests. The default appears twice to give it more weight.
+fn unknown_email_kdf(secret: &str, email: &str) -> (i32, i32, Option<i32>, Option<i32>) {
+    const PBKDF2: i32 = crypto::KDF_TYPE_PBKDF2;
+    const ARGON2ID: i32 = crypto::KDF_TYPE_ARGON2ID;
+    const KDF_SETTINGS: [(i32, i32, Option<i32>, Option<i32>); 6] = [
+        (
+            KDF_TYPE_ARGON2ID,
+            3,
+            Some(crypto::ARGON2ID_MEMORY_DEFAULT_MB),
+            Some(crypto::ARGON2ID_PARALLELISM_DEFAULT),
+        ),
+        (
+            KDF_TYPE_ARGON2ID,
+            3,
+            Some(crypto::ARGON2ID_MEMORY_DEFAULT_MB),
+            Some(crypto::ARGON2ID_PARALLELISM_DEFAULT),
+        ),
+        (PBKDF2, 100_000, None, None),
+        (PBKDF2, 5_000, None, None),
+        (ARGON2ID, 3, Some(64), Some(4)),
+        (ARGON2ID, 6, Some(32), Some(4)),
+    ];
+    KDF_SETTINGS[prelogin_kdf_index(secret, email, KDF_SETTINGS.len())]
+}
+
 #[worker::send]
 pub async fn prelogin(
     State(state): State<Arc<AppState>>,
@@ -597,7 +645,7 @@ pub async fn prelogin(
             };
             log::info!(
                 "[KDF] prelogin response for email={}: kdf_type={} ({}), iterations={}, memory={:?}, parallelism={:?}",
-                email,
+                email.escape_debug(),
                 kdf_type,
                 kdf_name,
                 kdf_iterations,
@@ -608,15 +656,10 @@ pub async fn prelogin(
         }
         None => {
             log::info!(
-                "[KDF] prelogin response for email={}: user not found, returning defaults (Argon2id)",
-                email
+                "[KDF] prelogin response for email={}: user not found, returning keyed stable KDF",
+                email.escape_debug()
             );
-            (
-                KDF_TYPE_ARGON2ID,
-                3,
-                Some(crypto::ARGON2ID_MEMORY_DEFAULT_MB),
-                Some(crypto::ARGON2ID_PARALLELISM_DEFAULT),
-            )
+            unknown_email_kdf(&state.jwt_keys.access_secret, &email)
         }
     };
 
@@ -1862,6 +1905,21 @@ async fn cascade_delete_user_data(
 ) -> Result<(), AppError> {
     crate::handlers::sends::delete_user_send_files_from_r2(env, db, user_id).await?;
     crate::handlers::attachments::delete_user_attachments_from_r2(env, db, user_id).await?;
+    // Broadcast a logout before the row disappears so connected clients drop
+    // their session (upstream `e056359a`); failures only warn and never block
+    // the deletion itself.
+    let revision = db::now_rfc3339_millis();
+    if let Err(err) = crate::notifications::publish_user_update(
+        env,
+        crate::notifications::UpdateType::LogOut,
+        user_id,
+        &revision,
+        None,
+    )
+    .await
+    {
+        log::warn!("failed to publish user deletion logout: {err}");
+    }
     db.prepare("DELETE FROM users WHERE id = ?1")
         .bind(&[user_id.into()])?
         .run()
@@ -1894,6 +1952,41 @@ pub async fn get_tasks(
 pub struct KeysData {
     pub encrypted_private_key: String,
     pub public_key: String,
+}
+
+#[worker::send]
+pub async fn get_keys(
+    claims: Claims,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, AppError> {
+    let db = db::get_db(&state.env)?;
+    claims.verify_security_stamp(&db).await?;
+    let user: User = query!(&db, "SELECT * FROM users WHERE id = ?1", claims.sub)
+        .map_err(|_| AppError::Database)?
+        .first(None)
+        .await?
+        .ok_or(AppError::NotFound("User not found".to_string()))?;
+
+    // The SDK reads a 404 as the user having no key pair yet, so the empty
+    // string (schema is TEXT NOT NULL) must keep the 404 semantics
+    // (upstream `895ec2b1`).
+    if user.private_key.trim().is_empty() || user.public_key.trim().is_empty() {
+        return Err(AppError::NotFound("User has no key pair".to_string()));
+    }
+
+    let key = if user.key.is_empty() {
+        Value::Null
+    } else {
+        json!(user.key)
+    };
+
+    Ok(Json(json!({
+        "key": key,
+        "publicKey": user.public_key,
+        "privateKey": user.private_key,
+        "accountKeys": account_keys_json(&user.private_key, &user.public_key),
+        "object": "keys",
+    })))
 }
 
 #[worker::send]
@@ -2269,6 +2362,36 @@ pub async fn post_set_password(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_email_kdf_is_stable_for_the_same_email() {
+        let secret = "access-secret-for-tests";
+        let first = unknown_email_kdf(secret, "unknown@example.com");
+        let second = unknown_email_kdf(secret, "unknown@example.com");
+        assert_eq!(first, second);
+        // The result is always one of the six configured settings.
+        let allowed = [
+            (KDF_TYPE_ARGON2ID, 3, Some(64), Some(4)),
+            (crypto::KDF_TYPE_PBKDF2, 100_000, None, None),
+            (crypto::KDF_TYPE_PBKDF2, 5_000, None, None),
+            (KDF_TYPE_ARGON2ID, 6, Some(32), Some(4)),
+        ];
+        assert!(allowed.contains(&first));
+    }
+
+    #[test]
+    fn prelogin_kdf_index_stays_in_range_and_spreads() {
+        let secret = "access-secret-for-tests";
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..64 {
+            let email = format!("user{i}@example.com");
+            let index = prelogin_kdf_index(secret, &email, 6);
+            assert!(index < 6);
+            seen.insert(index);
+        }
+        // With 64 emails all six buckets should be hit.
+        assert_eq!(seen.len(), 6);
+    }
 
     fn register_token(name: Option<String>, exp: usize, secret: &[u8]) -> String {
         jsonwebtoken::encode(

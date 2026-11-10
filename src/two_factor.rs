@@ -456,13 +456,52 @@ pub async fn delete_protected_action_otp(db: &D1Database, user_id: &str) -> Resu
     Ok(())
 }
 
+/// Outcome of checking a protected-action OTP attempt, kept pure so the
+/// attempt accounting can be unit tested without a database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtectedActionOtpDecision {
+    /// The stored attempts already reached the limit; the token must be
+    /// deleted and the request rejected without counting this attempt.
+    RejectExpired,
+    /// The code does not match; store the incremented attempt counter and
+    /// reject.
+    RejectInvalid { attempts: u64 },
+    /// The code matches and is still valid.
+    Valid,
+}
+
+/// Upstream fix for `b71cb7a8` (off-by-one): the limit is checked *before*
+/// the attempt counter is incremented, so with a limit of 3 exactly three
+/// wrong attempts are allowed and a correct code on the third attempt still
+/// succeeds.
+pub fn evaluate_protected_action_otp(
+    data: &ProtectedActionOtpData,
+    otp: &str,
+) -> ProtectedActionOtpDecision {
+    if data.attempts >= PROTECTED_ACTION_OTP_ATTEMPTS_LIMIT {
+        return ProtectedActionOtpDecision::RejectExpired;
+    }
+
+    if is_token_expired(data.token_sent, PROTECTED_ACTION_OTP_EXPIRATION_TIME) {
+        return ProtectedActionOtpDecision::RejectExpired;
+    }
+
+    if !constant_time_eq::constant_time_eq(data.token.as_bytes(), otp.as_bytes()) {
+        return ProtectedActionOtpDecision::RejectInvalid {
+            attempts: data.attempts.saturating_add(1),
+        };
+    }
+
+    ProtectedActionOtpDecision::Valid
+}
+
 pub async fn validate_protected_action_otp(
     db: &D1Database,
     user_id: &str,
     otp: &str,
     delete_if_valid: bool,
 ) -> Result<(), AppError> {
-    let mut data = get_protected_action_otp(db, user_id)
+    let data = get_protected_action_otp(db, user_id)
         .await?
         .ok_or_else(|| {
             AppError::BadRequest(
@@ -471,29 +510,25 @@ pub async fn validate_protected_action_otp(
             )
         })?;
 
-    data.attempts = data.attempts.saturating_add(1);
-
-    if data.attempts >= PROTECTED_ACTION_OTP_ATTEMPTS_LIMIT {
-        let _ = delete_protected_action_otp(db, user_id).await;
-        return Err(AppError::BadRequest("Token has expired".to_string()));
+    match evaluate_protected_action_otp(&data, otp) {
+        ProtectedActionOtpDecision::RejectExpired => {
+            let _ = delete_protected_action_otp(db, user_id).await;
+            Err(AppError::BadRequest("Token has expired".to_string()))
+        }
+        ProtectedActionOtpDecision::RejectInvalid { attempts } => {
+            let mut updated = data;
+            updated.attempts = attempts;
+            let now = Utc::now().to_rfc3339();
+            upsert_protected_action_otp(db, user_id, &updated, &now).await?;
+            Err(AppError::BadRequest("Token is invalid".to_string()))
+        }
+        ProtectedActionOtpDecision::Valid => {
+            if delete_if_valid {
+                delete_protected_action_otp(db, user_id).await?;
+            }
+            Ok(())
+        }
     }
-
-    if is_token_expired(data.token_sent, PROTECTED_ACTION_OTP_EXPIRATION_TIME) {
-        let _ = delete_protected_action_otp(db, user_id).await;
-        return Err(AppError::BadRequest("Token has expired".to_string()));
-    }
-
-    if !constant_time_eq::constant_time_eq(data.token.as_bytes(), otp.as_bytes()) {
-        let now = Utc::now().to_rfc3339();
-        upsert_protected_action_otp(db, user_id, &data, &now).await?;
-        return Err(AppError::BadRequest("Token is invalid".to_string()));
-    }
-
-    if delete_if_valid {
-        delete_protected_action_otp(db, user_id).await?;
-    }
-
-    Ok(())
 }
 
 pub async fn get_email_2fa(
@@ -694,8 +729,60 @@ pub async fn clear_remember_tokens(db: &D1Database, user_id: &str) -> Result<(),
 
 #[cfg(test)]
 mod tests {
-    use super::{generate_totp_secret_base32_20, match_totp_time_step};
+    use super::{
+        ProtectedActionOtpData, ProtectedActionOtpDecision, evaluate_protected_action_otp,
+        generate_totp_secret_base32_20, match_totp_time_step,
+    };
     use totp_rs::{Algorithm, Secret, TOTP};
+
+    fn otp_data(token: &str, token_sent: i64, attempts: u64) -> ProtectedActionOtpData {
+        ProtectedActionOtpData {
+            token: token.to_string(),
+            token_sent,
+            attempts,
+        }
+    }
+
+    #[test]
+    fn otp_limit_allows_exactly_three_wrong_attempts() {
+        let now = chrono::Utc::now().timestamp();
+
+        // Three wrong attempts are counted and reported as invalid.
+        let mut attempts = 0;
+        for _ in 0..3 {
+            match evaluate_protected_action_otp(&otp_data("123456", now, attempts), "000000") {
+                ProtectedActionOtpDecision::RejectInvalid { attempts: next } => attempts = next,
+                other => panic!("expected RejectInvalid, got {other:?}"),
+            }
+        }
+        assert_eq!(attempts, 3);
+
+        // The request after the third wrong attempt is expired, not invalid.
+        assert_eq!(
+            evaluate_protected_action_otp(&otp_data("123456", now, 3), "000000"),
+            ProtectedActionOtpDecision::RejectExpired
+        );
+    }
+
+    #[test]
+    fn correct_code_on_final_attempt_still_succeeds() {
+        let now = chrono::Utc::now().timestamp();
+        // Two wrong attempts were already stored; the correct code on the
+        // third attempt must be accepted (this was the off-by-one bug).
+        assert_eq!(
+            evaluate_protected_action_otp(&otp_data("123456", now, 2), "123456"),
+            ProtectedActionOtpDecision::Valid
+        );
+    }
+
+    #[test]
+    fn expired_otp_is_rejected_before_matching() {
+        let stale = chrono::Utc::now().timestamp() - 601;
+        assert_eq!(
+            evaluate_protected_action_otp(&otp_data("123456", stale, 0), "123456"),
+            ProtectedActionOtpDecision::RejectExpired
+        );
+    }
 
     #[test]
     fn generated_totp_secret_is_20_bytes() {

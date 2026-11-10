@@ -93,7 +93,7 @@ pub fn decode_hs256<T: DeserializeOwned>(token: &str, secret: &str) -> Result<T,
         .map_err(|_| AppError::Unauthorized("Invalid token".to_string()))
 }
 
-const TWO_FACTOR_REMEMBER_VALIDITY_DAYS: i64 = 30;
+pub const TWO_FACTOR_REMEMBER_DEFAULT_DAYS: i64 = 30;
 const TWO_FACTOR_REMEMBER_ISSUER: &str = "warden-worker|2faremember";
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -105,14 +105,17 @@ pub struct TwoFactorRememberClaims {
     pub user_uuid: String,
 }
 
+/// `days` comes from the `TWO_FACTOR_REMEMBER_DAYS` env var (clamped to
+/// 1..=90 by the caller); it replaced the previously hard-coded 30 days.
 pub fn generate_2fa_remember_claims(
     device_uuid: String,
     user_uuid: String,
+    days: i64,
 ) -> TwoFactorRememberClaims {
     let now = Utc::now();
     TwoFactorRememberClaims {
         nbf: now.timestamp(),
-        exp: (now + Duration::days(TWO_FACTOR_REMEMBER_VALIDITY_DAYS)).timestamp(),
+        exp: (now + Duration::days(days)).timestamp(),
         iss: TWO_FACTOR_REMEMBER_ISSUER.to_string(),
         sub: device_uuid,
         user_uuid,

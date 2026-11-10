@@ -21,6 +21,7 @@ mod r2_file;
 mod router;
 mod two_factor;
 mod two_factor_key_manager;
+mod two_factor_verification;
 mod webauthn;
 
 pub use heavy_do::HeavyDo;

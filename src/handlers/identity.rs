@@ -496,13 +496,27 @@ fn verify_remember_token(
     }
 }
 
+/// 2FA remember-me duration in days, configurable via the
+/// `TWO_FACTOR_REMEMBER_DAYS` env var. Invalid or missing values fall back to
+/// the default of 30 days; the value is clamped to 1..=90.
+fn two_factor_remember_days(env: &worker::Env) -> i64 {
+    let parsed = env
+        .var("TWO_FACTOR_REMEMBER_DAYS")
+        .ok()
+        .and_then(|value| value.to_string().trim().parse::<i64>().ok())
+        .unwrap_or(jwt::TWO_FACTOR_REMEMBER_DEFAULT_DAYS);
+    parsed.clamp(1, 90)
+}
+
 async fn generate_remember_token_async(
     device_uuid: &str,
     user_uuid: &str,
     state: &Arc<AppState>,
 ) -> Result<String, AppError> {
     let jwt_keys = state.jwt_keys.clone();
-    let claims = jwt::generate_2fa_remember_claims(device_uuid.to_string(), user_uuid.to_string());
+    let days = two_factor_remember_days(&state.env);
+    let claims =
+        jwt::generate_2fa_remember_claims(device_uuid.to_string(), user_uuid.to_string(), days);
     jwt::encode_2fa_remember(&claims, &jwt_keys.access_secret)
 }
 

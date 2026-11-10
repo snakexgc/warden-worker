@@ -17,6 +17,9 @@ const RECORD_SEPARATOR: u8 = 0x1e;
 const INITIAL_RESPONSE: [u8; 3] = [0x7b, 0x7d, RECORD_SEPARATOR];
 const SIGNALR_MESSAGEPACK_PING: [u8; 3] = [0x02, 0x91, 0x06];
 const KEEPALIVE_INTERVAL_MS: i64 = 15_000;
+/// A client that has not answered two keepalive rounds (30s) is treated as a
+/// half-open connection and closed (upstream `42aa3ee1`).
+const WS_CLIENT_TIMEOUT_MS: i64 = 30_000;
 const MAX_ANONYMOUS_CONNECTIONS_PER_IP: usize = 25;
 
 const UPDATE_TYPE_AUTH_REQUEST: i32 = 15;
@@ -53,6 +56,21 @@ struct AuthEventPayload {
 #[serde(rename_all = "camelCase")]
 struct CloseAnonymousPayload {
     token: String,
+}
+
+/// Serialized onto each accepted WebSocket so the alarm handler can detect
+/// half-open connections (upstream `42aa3ee1`).
+#[derive(Debug, Serialize, Deserialize)]
+struct LastReceived {
+    ms: i64,
+}
+
+impl LastReceived {
+    fn now() -> Self {
+        Self {
+            ms: js_sys::Date::now() as i64,
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
@@ -154,6 +172,9 @@ impl DurableObject for NotificationsHub {
         ws: WebSocket,
         message: WebSocketIncomingMessage,
     ) -> Result<()> {
+        // Any inbound frame proves the connection is alive; refresh the
+        // last-received timestamp used by the half-open check.
+        let _ = ws.serialize_attachment(LastReceived::now());
         match message {
             WebSocketIncomingMessage::String(text) if is_signalr_messagepack_handshake(&text) => {
                 ws.send_with_bytes(INITIAL_RESPONSE)?;
@@ -187,7 +208,22 @@ impl DurableObject for NotificationsHub {
         if sockets.is_empty() {
             self.state.storage().delete_alarm().await?;
         } else {
+            let now_ms = js_sys::Date::now() as i64;
             for socket in sockets {
+                // Half-open detection (upstream `42aa3ee1`): without a
+                // recorded inbound frame, or when the client went silent for
+                // longer than the timeout, close the socket instead of
+                // pouring keepalives into a dead connection.
+                let timed_out = match socket.deserialize_attachment::<LastReceived>() {
+                    Ok(Some(last_received)) => now_ms - last_received.ms > WS_CLIENT_TIMEOUT_MS,
+                    _ => true,
+                };
+                if timed_out {
+                    if let Err(err) = socket.close(Some(1000), Some("client timeout")) {
+                        log::warn!("notifications client timeout close failed: {err}");
+                    }
+                    continue;
+                }
                 if let Err(err) = socket.send_with_bytes(SIGNALR_MESSAGEPACK_PING) {
                     log::warn!("notifications keepalive failed: {err}");
                 }
@@ -276,6 +312,8 @@ impl NotificationsHub {
     async fn accept_with_tags(&self, tags: &[&str]) -> Result<Response> {
         let pair = WebSocketPair::new()?;
         self.state.accept_websocket_with_tags(&pair.server, tags);
+        // Seed the half-open detection timestamp at accept time.
+        pair.server.serialize_attachment(LastReceived::now())?;
         if self.state.storage().get_alarm().await?.is_none() {
             self.state
                 .storage()

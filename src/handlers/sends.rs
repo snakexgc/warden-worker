@@ -1480,14 +1480,17 @@ pub async fn post_send_file_v2(
     let (send_type, key, mut data_value) = extract_send_payload_data(payload)?;
 
     let file_id = Uuid::new_v4().to_string();
-    if let Some(obj) = data_value.as_object_mut() {
-        obj.insert("id".to_string(), Value::String(file_id.clone()));
-        obj.insert("size".to_string(), Value::Number(file_length.into()));
-        obj.insert(
-            "sizeName".to_string(),
-            Value::String(display_size(file_length)),
-        );
-    }
+    // A file Send's data must be a JSON object; anything else cannot carry
+    // the file metadata (upstream `acb574b7`).
+    let Some(obj) = data_value.as_object_mut() else {
+        return Err(AppError::BadRequest("Invalid Send file data".to_string()));
+    };
+    obj.insert("id".to_string(), Value::String(file_id.clone()));
+    obj.insert("size".to_string(), Value::Number(file_length.into()));
+    obj.insert(
+        "sizeName".to_string(),
+        Value::String(display_size(file_length)),
+    );
 
     let send_id = Uuid::new_v4().to_string();
     let now = now_rfc3339_millis();

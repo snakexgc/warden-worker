@@ -158,17 +158,7 @@ pub async fn sync(
         user.kdf_memory,
         user.kdf_parallelism,
     );
-    let account_keys = serde_json::json!({
-        "publicKeyEncryptionKeyPair": {
-            "wrappedPrivateKey": user.private_key.clone(),
-            "publicKey": user.public_key.clone(),
-            "signedPublicKey": null,
-            "object": "publicKeyEncryptionKeyPair"
-        },
-        "securityState": null,
-        "signatureKeyPair": null,
-        "object": "privateKeys"
-    });
+    let account_keys = super::accounts::account_keys_json(&user.private_key, &user.public_key);
     let profile = Profile {
         id: user.id,
         name: user.name.unwrap_or_default(),

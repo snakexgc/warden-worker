@@ -11,7 +11,7 @@ use crate::logging::targets;
 use crate::notify::{NotifyContext, NotifyEvent, extract_request_meta};
 use crate::{
     auth::Claims, db, error::AppError, jwt, notify, password, router::AppState, two_factor,
-    webauthn,
+    two_factor_verification, webauthn,
 };
 
 #[derive(Debug, Deserialize, Clone)]
@@ -20,6 +20,10 @@ pub struct SecretVerificationData {
     #[serde(alias = "MasterPasswordHash")]
     master_password_hash: Option<String>,
     otp: Option<String>,
+    /// New-style authorization issued by `POST /two-factor/get-webauthn`
+    /// (upstream `acbf4901`); when present it replaces the password/OTP check.
+    #[serde(default)]
+    user_verification_token: Option<String>,
 }
 
 impl SecretVerificationData {
@@ -45,6 +49,8 @@ pub struct UpdateTwoFactorWebAuthnRequest {
     #[serde(alias = "MasterPasswordHash")]
     master_password_hash: Option<String>,
     otp: Option<String>,
+    #[serde(default)]
+    user_verification_token: Option<String>,
     id: i32,
     #[serde(
         alias = "Name",
@@ -64,6 +70,8 @@ pub struct UpdateTwoFactorWebAuthnDeleteRequest {
     #[serde(alias = "MasterPasswordHash")]
     master_password_hash: Option<String>,
     otp: Option<String>,
+    #[serde(default)]
+    user_verification_token: Option<String>,
     id: i32,
 }
 
@@ -159,10 +167,16 @@ async fn webauthn_response_with_object(
             })
         })
         .collect();
+    // Keep the legacy flat fields and add the nested `webAuthn` object used
+    // by clients on the new verification-token flow (upstream `acbf4901`).
     Ok(json!({
         "enabled": enabled,
-        "keys": key_items,
-        "object": object_name
+        "keys": key_items.clone(),
+        "object": object_name,
+        "webAuthn": {
+            "enabled": enabled,
+            "keys": key_items,
+        }
     }))
 }
 
@@ -722,8 +736,31 @@ pub async fn get_webauthn(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    payload.validate(&db, &claims.sub).await?;
-    let response = webauthn_response(&db, &claims.sub).await?;
+
+    let keys = webauthn::list_webauthn_2fa_keys(&db, &claims.sub).await?;
+    let enabled = webauthn::is_webauthn_enabled(&db, &claims.sub).await?;
+    let key_ids: Vec<i32> = keys.iter().map(|k| k.id).collect();
+    if let Some(token) = payload.user_verification_token.as_deref() {
+        two_factor_verification::validate_webauthn_token(
+            &state.jwt_keys.access_secret,
+            token,
+            &claims.sub,
+            &key_ids,
+            enabled,
+        )?;
+    } else {
+        payload.validate(&db, &claims.sub).await?;
+    }
+
+    let user_verification_token = two_factor_verification::mint_webauthn_token(
+        &state.jwt_keys.access_secret,
+        &claims.sub,
+        key_ids,
+        enabled,
+    )?;
+
+    let mut response = webauthn_response(&db, &claims.sub).await?;
+    response["userVerificationToken"] = Value::String(user_verification_token);
     Ok(Json(response))
 }
 
@@ -736,7 +773,21 @@ pub async fn get_webauthn_challenge(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    payload.validate(&db, &claims.sub).await?;
+
+    if let Some(token) = payload.user_verification_token.as_deref() {
+        let keys = webauthn::list_webauthn_2fa_keys(&db, &claims.sub).await?;
+        let enabled = webauthn::is_webauthn_enabled(&db, &claims.sub).await?;
+        let key_ids: Vec<i32> = keys.iter().map(|k| k.id).collect();
+        two_factor_verification::validate_webauthn_token(
+            &state.jwt_keys.access_secret,
+            token,
+            &claims.sub,
+            &key_ids,
+            enabled,
+        )?;
+    } else {
+        payload.validate(&db, &claims.sub).await?;
+    }
 
     let user_row: Value = db
         .prepare("SELECT name, email FROM users WHERE id = ?1")
@@ -776,12 +827,28 @@ pub async fn put_webauthn(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    SecretVerificationData {
-        master_password_hash: payload.master_password_hash.clone(),
-        otp: payload.otp.clone(),
+
+    if let Some(token) = payload.user_verification_token.as_deref() {
+        // Upstream `acbf4901`: the token must match the current credential
+        // list and its pre/post-enable state.
+        let keys = webauthn::list_webauthn_2fa_keys(&db, &claims.sub).await?;
+        let key_ids: Vec<i32> = keys.iter().map(|k| k.id).collect();
+        two_factor_verification::validate_webauthn_token(
+            &state.jwt_keys.access_secret,
+            token,
+            &claims.sub,
+            &key_ids,
+            !key_ids.is_empty(),
+        )?;
+    } else {
+        SecretVerificationData {
+            master_password_hash: payload.master_password_hash.clone(),
+            otp: payload.otp.clone(),
+            user_verification_token: None,
+        }
+        .validate(&db, &claims.sub)
+        .await?;
     }
-    .validate(&db, &claims.sub)
-    .await?;
 
     let desired_slot_id = payload.id;
     let all_keys = webauthn::list_webauthn_keys(&db, &claims.sub).await?;
@@ -818,12 +885,26 @@ pub async fn delete_webauthn(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    SecretVerificationData {
-        master_password_hash: payload.master_password_hash.clone(),
-        otp: payload.otp.clone(),
+
+    if let Some(token) = payload.user_verification_token.as_deref() {
+        let keys = webauthn::list_webauthn_2fa_keys(&db, &claims.sub).await?;
+        let key_ids: Vec<i32> = keys.iter().map(|k| k.id).collect();
+        two_factor_verification::validate_webauthn_token(
+            &state.jwt_keys.access_secret,
+            token,
+            &claims.sub,
+            &key_ids,
+            true,
+        )?;
+    } else {
+        SecretVerificationData {
+            master_password_hash: payload.master_password_hash.clone(),
+            otp: payload.otp.clone(),
+            user_verification_token: None,
+        }
+        .validate(&db, &claims.sub)
+        .await?;
     }
-    .validate(&db, &claims.sub)
-    .await?;
 
     webauthn::delete_webauthn_key(&db, &claims.sub, payload.id).await?;
     two_factor::clear_remember_tokens(&db, &claims.sub).await?;

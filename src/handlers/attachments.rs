@@ -21,7 +21,9 @@ use crate::{
 };
 
 const BUCKET_BINDING: &str = "SEND_FILES_BUCKET";
-const ATTACHMENT_URL_TTL_MINUTES: i64 = 5;
+// Reduced from 5 minutes to 1 (upstream `895ec2b1`): the pre-signed download
+// window should be as short as clients allow.
+const ATTACHMENT_URL_TTL_MINUTES: i64 = 1;
 const ATTACHMENT_SIZE_LEEWAY: i64 = 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
@@ -227,11 +229,15 @@ pub async fn create_attachment_v2(
         payload.key.into(),
         object_key.into(),
         now.clone().into(),
-        now.into(),
+        now.clone().into(),
     ])?
     .run()
     .await
     .map_err(|_| AppError::Database)?;
+
+    // Notify as soon as the attachment record exists so other clients see the
+    // new attachment even before the file bytes arrive (upstream `64ae55ce`).
+    finish_attachment_mutation(&db, &state, &claims, &cipher_id, &now).await?;
 
     let mut cipher: Cipher = cipher_db.into();
     enrich_cipher(&db, &state, &mut cipher).await?;
@@ -451,7 +457,9 @@ pub async fn upload_attachment_v2(
         .run()
         .await
         .map_err(|_| AppError::Database)?;
-    finish_attachment_mutation(&db, &state, &claims, &cipher_id, &now).await?;
+    // The revision bump and SyncCipherUpdate notification already happened
+    // when the attachment record was created (create_attachment_v2); doing it
+    // again here would double-notify (upstream `64ae55ce`).
     Ok(Json(json!({})))
 }
 

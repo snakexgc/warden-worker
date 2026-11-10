@@ -120,6 +120,17 @@ TURNSTILE_SITE_KEY
 
 普通环境变量 `CLIENT_SUPPRESS_ONBOARDING` 可控制客户端是否隐藏登录后的欢迎页、扩展安装提示、设置扩展跳转和高级功能引导，默认值为 `false`。
 
+普通环境变量 `TWO_FACTOR_REMEMBER_DAYS` 可控制"记住此设备"2FA 令牌的有效期（天），默认 `30`；解析失败或越界时自动回退为 30，实际取值被限制在 1..=90 之间（上游 `0dbc92f2`）。
+
+普通环境变量 `CLIENT_FEATURE_FLAGS` 可向 `/api/config` 的 `featureStates` 追加或覆盖客户端功能开关，格式为逗号分隔的 `name` 或 `name=bool`（如 `windows-desktop-autotype,biometrics-sdk-ipc=false`）。默认不开启任何新开关，与上游 `EXPERIMENTAL_CLIENT_FEATURE_FLAGS` 默认为空一致。可用 flag（上游 `0e93d15b` / `df2cd3c8` / `28649978`）：
+
+- `windows-desktop-autotype` / `windows-desktop-autotype-ga`：Windows 桌面端自动填充
+- `biometrics-sdk-ipc`：桌面端生物识别 SDK IPC
+- `fill-assist-targeting-rules`：自动填充定位规则
+- 以及上游支持列表中的其余 flag（`pm-5594-safari-account-switching`、`pm-32413-multi-client-password-management`、`undetermined-cipher-scenario-logic`、`enable-basic-auth-response`、`ssh-agent-v2`、`windows-native-credential-sync`、`pm-34171-card-scanner`、`pm-30529-webauthn-related-origins`、`pm-32009-new-item-types`）
+
+普通环境变量 `FILL_ASSIST_RULES_URL` 可覆盖 `/api/config` 的 `environment.fillAssistRules`，默认 `https://fillassist.bitwarden.com`。要求为不含凭据、query、fragment 且无首尾空白的 HTTPS URL，非法值会回退默认并输出告警日志（上游 `28649978`）。
+
 **人机验证说明**：开启后，匿名用户访问 Send 时会要求完成人机验证，防止被刷D1和R2的额度。
 
 ### 可选：动态 vaultwarden.css（参考 Vaultwarden 方案）
@@ -288,6 +299,8 @@ Wrangler 使用 D1 的 `d1_migrations` 表记录已执行的文件，因此后�
 - `PUT /api/accounts/email` - 修改邮箱
 - `POST /api/accounts/kdf` - 更新 KDF 设置
 - `POST /api/accounts/key-management/user-key-id` - 初始化用户密钥 ID（仅允许一次）
+- `GET /api/accounts/keys` - 获取用户密钥对（无密钥对时返回 404，SDK 以此判断是否需要生成）
+- `POST /api/accounts/keys` - 初始化用户密钥对（仅允许一次）
 
 ### 设备管理
 - `GET /api/devices` - 获取设备列表
@@ -314,6 +327,8 @@ Wrangler 使用 D1 的 `d1_migrations` 表记录已执行的文件，因此后�
 - `POST /api/two-factor/get-webauthn` - 获取 WebAuthn 配置
 - `POST /api/two-factor/get-webauthn-challenge` - 获取 WebAuthn 挑战
 - `POST/PUT/DELETE /api/two-factor/webauthn` - WebAuthn 管理
+
+2FA 设置类接口支持双鉴权路径（上游 `acbf4901`）：get-* 接口在密码/OTP 校验通过后返回 5 分钟有效的 `userVerificationToken`，后续 enable/disable/send-email 类接口可凭该 token 鉴权；旧客户端继续使用 `masterPasswordHash`/`otp` 的密码路径，两种方式均可用。
 
 ### WebAuthn 安全密钥
 - `GET/POST /accounts/webauthn/assertion-options` - 获取断言选项

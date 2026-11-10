@@ -16,6 +16,7 @@ use crate::notify::{self, EmailType, NotifyContext, NotifyEvent};
 use crate::password;
 use crate::router::AppState;
 use crate::two_factor::{self, EmailTokenData};
+use crate::two_factor_verification;
 use crate::webauthn;
 
 #[derive(Debug, Deserialize)]
@@ -36,6 +37,10 @@ pub struct PasswordOrOtpData {
     #[serde(alias = "MasterPasswordHash")]
     pub master_password_hash: Option<String>,
     pub otp: Option<String>,
+    /// New-style authorization issued by the get-* endpoints; when present it
+    /// replaces the password/OTP check (upstream `acbf4901`).
+    #[serde(default)]
+    pub user_verification_token: Option<String>,
 }
 
 impl PasswordOrOtpData {
@@ -90,15 +95,20 @@ pub struct EnableAuthenticatorData {
     token: NumberOrString,
     master_password_hash: Option<String>,
     otp: Option<String>,
+    #[serde(default)]
+    user_verification_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisableAuthenticatorData {
     key: String,
-    master_password_hash: String,
-    #[serde(rename = "type")]
-    r#type: NumberOrString,
+    #[serde(alias = "MasterPasswordHash")]
+    master_password_hash: Option<String>,
+    #[serde(default)]
+    user_verification_token: Option<String>,
+    #[serde(rename = "type", default)]
+    r#type: Option<NumberOrString>,
 }
 
 #[worker::send]
@@ -221,7 +231,6 @@ pub async fn get_authenticator(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    payload.validate(&db, &claims.sub).await?;
 
     let enabled = two_factor::is_authenticator_enabled(&db, &claims.sub).await?;
     let key = if enabled {
@@ -233,10 +242,36 @@ pub async fn get_authenticator(
         two_factor::generate_totp_secret_base32_20()
     };
 
+    if let Some(token) = payload.user_verification_token.as_deref() {
+        two_factor_verification::validate_authenticator_token(
+            &state.jwt_keys.access_secret,
+            token,
+            &claims.sub,
+            &key,
+            enabled,
+        )?;
+    } else {
+        payload.validate(&db, &claims.sub).await?;
+    }
+
+    let user_verification_token = two_factor_verification::mint_authenticator_token(
+        &state.jwt_keys.access_secret,
+        &claims.sub,
+        key.clone(),
+        enabled,
+    )?;
+
+    // Keep the legacy flat fields for the old (v2026.7.0) web vault while the
+    // new nested `authenticator` object serves upgraded clients.
     Ok(Json(json!({
         "enabled": enabled,
         "key": key,
-        "object": "twoFactorAuthenticator"
+        "object": "twoFactorAuthenticator",
+        "authenticator": {
+            "enabled": enabled,
+            "key": key,
+        },
+        "userVerificationToken": user_verification_token,
     })))
 }
 
@@ -250,12 +285,25 @@ pub async fn activate_authenticator(
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
 
-    PasswordOrOtpData {
-        master_password_hash: payload.master_password_hash.clone(),
-        otp: payload.otp.clone(),
+    if let Some(token) = payload.user_verification_token.as_deref() {
+        // Upstream `acbf4901`: the token was minted for the pre-enable state
+        // and carries the key shown to the user.
+        two_factor_verification::validate_authenticator_token(
+            &state.jwt_keys.access_secret,
+            token,
+            &claims.sub,
+            &payload.key,
+            false,
+        )?;
+    } else {
+        PasswordOrOtpData {
+            master_password_hash: payload.master_password_hash.clone(),
+            otp: payload.otp.clone(),
+            user_verification_token: None,
+        }
+        .validate(&db, &claims.sub)
+        .await?;
     }
-    .validate(&db, &claims.sub)
-    .await?;
 
     let key = payload.key.trim().to_uppercase();
     let key_bytes = Secret::Encoded(key.clone())
@@ -291,10 +339,16 @@ pub async fn activate_authenticator(
         },
     );
 
+    // Keep the legacy flat fields for the old web vault alongside the new
+    // nested `authenticator` object.
     Ok(Json(json!({
         "enabled": true,
         "key": key,
-        "object": "twoFactorAuthenticator"
+        "object": "twoFactorAuthenticator",
+        "authenticator": {
+            "enabled": true,
+            "key": key,
+        },
     })))
 }
 
@@ -318,8 +372,25 @@ pub async fn disable_authenticator_vw(
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
 
-    if !password::verify_user_password(&db, &claims.sub, &payload.master_password_hash).await? {
-        return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+    if let Some(token) = payload.user_verification_token.as_deref() {
+        // Token path (upstream `acbf4901`): the token was minted over the
+        // stored key while the provider was enabled.
+        let enabled = two_factor::is_authenticator_enabled(&db, &claims.sub).await?;
+        two_factor_verification::validate_authenticator_token(
+            &state.jwt_keys.access_secret,
+            token,
+            &claims.sub,
+            &payload.key,
+            enabled,
+        )?;
+    } else {
+        let master_password_hash = payload
+            .master_password_hash
+            .clone()
+            .ok_or_else(|| AppError::BadRequest("No validation provided".to_string()))?;
+        if !password::verify_user_password(&db, &claims.sub, &master_password_hash).await? {
+            return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+        }
     }
 
     if let Some(secret_enc) = two_factor::get_authenticator_secret_enc(&db, &claims.sub).await? {
@@ -336,10 +407,11 @@ pub async fn disable_authenticator_vw(
     }
 
     let type_ = match payload.r#type {
-        NumberOrString::Number(n) => n as i32,
-        NumberOrString::String(s) => s
+        Some(NumberOrString::Number(n)) => n as i32,
+        Some(NumberOrString::String(s)) => s
             .parse::<i32>()
             .unwrap_or(two_factor::TWO_FACTOR_PROVIDER_AUTHENTICATOR),
+        None => two_factor::TWO_FACTOR_PROVIDER_AUTHENTICATOR,
     };
 
     let meta = notify::extract_request_meta(&headers);
@@ -457,16 +529,22 @@ const EMAIL_ATTEMPTS_LIMIT: u64 = 3;
 #[serde(rename_all = "camelCase")]
 pub struct SendEmailData {
     pub email: String,
+    #[serde(alias = "MasterPasswordHash")]
     pub master_password_hash: Option<String>,
     pub otp: Option<String>,
+    #[serde(default)]
+    pub user_verification_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EmailData {
     pub token: String,
+    #[serde(alias = "MasterPasswordHash")]
     pub master_password_hash: Option<String>,
     pub otp: Option<String>,
+    #[serde(default)]
+    pub user_verification_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -519,7 +597,12 @@ pub async fn get_email(
         return Err(e);
     }
 
-    if let Err(e) = payload.validate(&db, &claims.sub).await {
+    // Dual-path authorization (upstream `acbf4901`): a userVerificationToken
+    // replaces the password/OTP check; the token itself is validated below
+    // once the stored email is known.
+    if payload.user_verification_token.is_none()
+        && let Err(e) = payload.validate(&db, &claims.sub).await
+    {
         log::warn!(
             target: targets::AUTH,
             "get_email_2fa_status password validation failed user_id={} error={:?}",
@@ -538,15 +621,41 @@ pub async fn get_email(
     let (enabled, mfa_email) = match two_factor::get_email_2fa(&db, &claims.sub).await? {
         Some((enabled, data)) => {
             let email_data = EmailTokenData::from_json(&data)?;
-            (enabled, json!(email_data.email))
+            (enabled, Some(email_data.email))
         }
-        None => (false, serde_json::Value::Null),
+        None => (false, None),
     };
 
+    if let Some(token) = payload.user_verification_token.as_deref() {
+        two_factor_verification::validate_email_token(
+            &state.jwt_keys.access_secret,
+            token,
+            &claims.sub,
+            mfa_email.as_deref(),
+            enabled,
+        )?;
+    }
+
+    let user_verification_token = two_factor_verification::mint_email_token(
+        &state.jwt_keys.access_secret,
+        &claims.sub,
+        mfa_email.clone(),
+        enabled,
+    )?;
+
+    // The legacy shape used a plain string under `email`; upstream `acbf4901`
+    // turned it into an object, which is a hard key conflict. The new shape
+    // wins (official clients expect it); the old web vault's Email 2FA card
+    // may render oddly until the frontend is upgraded. Login flows are not
+    // affected.
     Ok(Json(json!({
-        "email": mfa_email,
+        "email": {
+            "enabled": enabled,
+            "email": mfa_email,
+        },
         "enabled": enabled,
-        "object": "twoFactorEmail"
+        "userVerificationToken": user_verification_token,
+        "object": "twoFactorEmail",
     })))
 }
 
@@ -559,12 +668,25 @@ pub async fn send_email(
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
 
-    PasswordOrOtpData {
-        master_password_hash: payload.master_password_hash.clone(),
-        otp: payload.otp,
+    if let Some(token) = payload.user_verification_token.as_deref() {
+        // Upstream `acbf4901` validates with enabled=false here, so the
+        // address in the token is not compared while setting the provider up.
+        two_factor_verification::validate_email_token(
+            &state.jwt_keys.access_secret,
+            token,
+            &claims.sub,
+            Some(payload.email.as_str()),
+            false,
+        )?;
+    } else {
+        PasswordOrOtpData {
+            master_password_hash: payload.master_password_hash.clone(),
+            otp: payload.otp.clone(),
+            user_verification_token: None,
+        }
+        .validate(&db, &claims.sub)
+        .await?;
     }
-    .validate(&db, &claims.sub)
-    .await?;
 
     if !notify::is_email_webhook_configured(&state.env) {
         log::warn!(
@@ -595,7 +717,7 @@ pub async fn send_email(
         target: targets::AUTH,
         "send_email_2fa_verification user_id={} email={}",
         claims.sub,
-        payload.email
+        payload.email.escape_debug()
     );
 
     notify::send_email_token_background(
@@ -619,12 +741,25 @@ pub async fn verify_email(
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
 
-    PasswordOrOtpData {
-        master_password_hash: payload.master_password_hash,
-        otp: payload.otp,
+    if let Some(token) = payload.user_verification_token.as_deref() {
+        // Upstream validates with enabled=false during the setup flow, so the
+        // token address is not compared here.
+        two_factor_verification::validate_email_token(
+            &state.jwt_keys.access_secret,
+            token,
+            &claims.sub,
+            None,
+            false,
+        )?;
+    } else {
+        PasswordOrOtpData {
+            master_password_hash: payload.master_password_hash,
+            otp: payload.otp,
+            user_verification_token: None,
+        }
+        .validate(&db, &claims.sub)
+        .await?;
     }
-    .validate(&db, &claims.sub)
-    .await?;
 
     let data = two_factor::get_email_2fa_verification(&db, &claims.sub)
         .await?
@@ -701,7 +836,7 @@ pub async fn verify_email(
         target: targets::AUTH,
         "verify_email_2fa success user_id={} email={}",
         claims.sub,
-        email_data.email
+        email_data.email.escape_debug()
     );
 
     let _ = two_factor::get_or_create_recovery_code(&db, &claims.sub).await?;
@@ -819,7 +954,7 @@ pub async fn send_email_login(
             super::devices::purge_expired_auth_requests(&db).await?;
             let auth_request: Value = db
                 .prepare(
-                    "SELECT device_type, request_ip, access_code_hash, authentication_date
+                    "SELECT device_type, request_ip, access_code_hash, authentication_date, approved, creation_date
                      FROM auth_requests WHERE id = ?1 AND user_id = ?2 LIMIT 1",
                 )
                 .bind(&[auth_request_id.into(), user_id.clone().into()])?
@@ -827,15 +962,22 @@ pub async fn send_email_login(
                 .await
                 .map_err(|_| AppError::Database)?
                 .ok_or_else(|| AppError::Unauthorized("AuthRequest doesn't exist".to_string()))?;
-            if auth_request
+            // Upstream `acb574b7`: an auth request is only usable for the
+            // email 2FA login when it is approved, not consumed yet, younger
+            // than five minutes, and still matches the requesting device, IP
+            // and access code. Any deviation is reported uniformly.
+            let approved = auth_request
+                .get("approved")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                == 1;
+            let already_authenticated = auth_request
                 .get("authentication_date")
                 .and_then(Value::as_str)
-                .is_some()
-            {
-                return Err(AppError::Unauthorized(
-                    "AuthRequest doesn't exist".to_string(),
-                ));
-            }
+                .is_some();
+            let request_expired = auth_request_login_expired(
+                auth_request.get("creation_date").and_then(Value::as_str),
+            );
             let expected_device_type = auth_request
                 .get("device_type")
                 .and_then(Value::as_i64)
@@ -854,7 +996,10 @@ pub async fn send_email_login(
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             let actual_hash = format!("{:x}", Sha256::digest(access_code.as_bytes()));
-            if actual_device_type != expected_device_type
+            if !approved
+                || already_authenticated
+                || request_expired
+                || actual_device_type != expected_device_type
                 || super::identity::client_ip_from_headers(&headers) != expected_ip
                 || !constant_time_eq(expected_hash.as_bytes(), actual_hash.as_bytes())
             {
@@ -951,7 +1096,7 @@ pub(crate) async fn issue_email_login_token(
         target: targets::AUTH,
         "send_email_login user_id={} email={}",
         user_id,
-        email_data.email
+        email_data.email.escape_debug()
     );
 
     notify::send_email_token_background(
@@ -974,7 +1119,25 @@ pub async fn disable_email(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
-    payload.validate(&db, &claims.sub).await?;
+
+    if let Some(token) = payload.user_verification_token.as_deref() {
+        // Upstream `acbf4901`: when disabling, the token must have been minted
+        // for the currently stored address with the provider enabled. If
+        // there is no email 2FA record there is nothing to disable and the
+        // token check is skipped, matching upstream.
+        if let Some((enabled, data)) = two_factor::get_email_2fa(&db, &claims.sub).await? {
+            let email_data = EmailTokenData::from_json(&data)?;
+            two_factor_verification::validate_email_token(
+                &state.jwt_keys.access_secret,
+                token,
+                &claims.sub,
+                Some(email_data.email.as_str()),
+                enabled,
+            )?;
+        }
+    } else {
+        payload.validate(&db, &claims.sub).await?;
+    }
 
     two_factor::delete_email_2fa(&db, &claims.sub).await?;
     two_factor::clear_remember_tokens(&db, &claims.sub).await?;
@@ -1029,6 +1192,7 @@ pub async fn disable_twofactor(
     PasswordOrOtpData {
         master_password_hash: payload.master_password_hash,
         otp: payload.otp,
+        user_verification_token: None,
     }
     .validate(&db, &claims.sub)
     .await?;
@@ -1181,7 +1345,7 @@ pub async fn recover(
     log::info!(
         target: targets::AUTH,
         "recover called email={}",
-        payload.email
+        payload.email.escape_debug()
     );
 
     let result: Option<serde_json::Value> = db
@@ -1195,7 +1359,7 @@ pub async fn recover(
         log::warn!(
             target: targets::AUTH,
             "recover failed: user not found email={}",
-            payload.email
+            payload.email.escape_debug()
         );
         return Err(AppError::Unauthorized(
             "Username or password is incorrect. Try again.".to_string(),
@@ -1211,7 +1375,7 @@ pub async fn recover(
         log::warn!(
             target: targets::AUTH,
             "recover failed: password mismatch email={}",
-            payload.email
+            payload.email.escape_debug()
         );
         return Err(AppError::Unauthorized(
             "Username or password is incorrect. Try again.".to_string(),
@@ -1224,7 +1388,7 @@ pub async fn recover(
         log::warn!(
             target: targets::AUTH,
             "recover failed: invalid recovery code email={}",
-            payload.email
+            payload.email.escape_debug()
         );
         return Err(AppError::BadRequest(
             "Recovery code is incorrect. Try again.".to_string(),
@@ -1256,4 +1420,41 @@ pub async fn recover(
     );
 
     Ok(Json(json!({})))
+}
+
+/// An auth request usable for the email 2FA login must be younger than five
+/// minutes. A missing or unparsable creation date counts as expired
+/// (upstream `acb574b7`).
+fn auth_request_login_expired(creation_date: Option<&str>) -> bool {
+    let Some(creation_date) = creation_date else {
+        return true;
+    };
+    match chrono::DateTime::parse_from_rfc3339(creation_date) {
+        Ok(created) => chrono::Utc::now() - chrono::Duration::minutes(5) >= created,
+        Err(_) => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::auth_request_login_expired;
+    use chrono::{Duration, Utc};
+
+    #[test]
+    fn fresh_auth_request_is_not_expired() {
+        let now = Utc::now().to_rfc3339();
+        assert!(!auth_request_login_expired(Some(&now)));
+    }
+
+    #[test]
+    fn auth_request_expires_after_five_minutes() {
+        let stale = (Utc::now() - Duration::minutes(6)).to_rfc3339();
+        assert!(auth_request_login_expired(Some(&stale)));
+    }
+
+    #[test]
+    fn missing_or_invalid_creation_date_counts_as_expired() {
+        assert!(auth_request_login_expired(None));
+        assert!(auth_request_login_expired(Some("not-a-date")));
+    }
 }

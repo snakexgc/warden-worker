@@ -32,6 +32,12 @@ pub async fn import_data(
     let db = db::get_db(&state.env)?;
     claims.verify_security_stamp(&db).await?;
     archive::ensure_table(&db).await?;
+    // Upstream PR #7906 (`64ae55ce`): organization ids are not meaningful in
+    // a personal vault; strip them so imports from organization exports pass
+    // the personal-vault validation and are stored with a NULL organization.
+    for cipher in &mut payload.ciphers {
+        cipher.organization_id = None;
+    }
     let folder_count = payload.folders.len();
     let cipher_count = payload.ciphers.len();
     let now = Utc::now();
